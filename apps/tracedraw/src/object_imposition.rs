@@ -249,11 +249,32 @@ pub fn build_document(
             target_y - rotated_bounds.y0,
         ));
         let world = move_to_sheet * rotate_about_center;
+        fn refresh_identity(
+            shape: &mut Shape,
+            allocate: &mut impl FnMut() -> tracedraw_core::ShapeId,
+        ) {
+            shape.id = allocate();
+            shape.uid = None;
+            match &mut shape.kind {
+                tracedraw_core::ShapeKind::Group { children } => {
+                    for child in children {
+                        refresh_identity(child, allocate);
+                    }
+                }
+                tracedraw_core::ShapeKind::ClipFrame { frame, contents } => {
+                    refresh_identity(frame, allocate);
+                    for child in contents {
+                        refresh_identity(child, allocate);
+                    }
+                }
+                _ => {}
+            }
+        }
+
         let mut copies = Vec::with_capacity(design.shapes.len());
         for original in &design.shapes {
             let mut shape = original.clone();
-            shape.id = doc.ids_mut().shape();
-            shape.uid = None;
+            refresh_identity(&mut shape, &mut || doc.ids_mut().shape());
             shape.transform = world * shape.transform;
             copies.push(shape);
         }

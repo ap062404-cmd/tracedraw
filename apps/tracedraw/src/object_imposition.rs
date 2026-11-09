@@ -101,6 +101,8 @@ struct Instance {
     w: f64,
     h: f64,
     rotate: bool,
+    gutter_x: f64,
+    gutter_y: f64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -115,9 +117,9 @@ struct Candidate {
 
 fn candidate(free: Rect, item: Instance, rotate: bool, index: usize) -> Option<Candidate> {
     let (w, h, rotated) = if rotate && item.rotate {
-        (item.h, item.w, true)
+        (item.h + item.gutter_x, item.w + item.gutter_y, true)
     } else {
-        (item.w, item.h, false)
+        (item.w + item.gutter_x, item.h + item.gutter_y, false)
     };
     if w > free.w + 1e-7 || h > free.h + 1e-7 { return None; }
     let dw = (free.w - w).max(0.0);
@@ -203,6 +205,7 @@ pub fn plan(designs: &[DesignSpec], settings: SheetSettings) -> Result<Impositio
             items.push(Instance {
                 id: d.id, copy, w: d.width_mm + 2.0 * bleed,
                 h: d.height_mm + 2.0 * bleed, rotate: d.allow_rotation,
+                gutter_x: settings.gutter_x_mm, gutter_y: settings.gutter_y_mm,
             });
         }
     }
@@ -250,8 +253,8 @@ pub fn plan(designs: &[DesignSpec], settings: SheetSettings) -> Result<Impositio
             sheet_index,
             x_mm: outer.x + bleed,
             y_mm: outer.y + bleed,
-            width_mm: c.w - 2.0 * bleed,
-            height_mm: c.h - 2.0 * bleed,
+            width_mm: c.w - settings.gutter_x_mm - 2.0 * bleed,
+            height_mm: c.h - settings.gutter_y_mm - 2.0 * bleed,
             rotated: c.rotated,
         });
         used_area += c.w * c.h;

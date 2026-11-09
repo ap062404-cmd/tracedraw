@@ -333,9 +333,13 @@ pub fn build_document(
                         return false;
                     }
                     let other_bottom = sheet.height_mm - other.y_mm - other.height_mm;
+                    // Keep marks clear of the neighboring design's
+                    // reserved bleed and gutter area, not just its trim box.
                     let other_bounds = tracedraw_core::Rect::new(
-                        other.x_mm, other_bottom,
-                        other.x_mm + other.width_mm, other_bottom + other.height_mm,
+                        other.x_mm - sheet.bleed_mm,
+                        other_bottom - sheet.bleed_mm,
+                        other.x_mm + other.width_mm + sheet.bleed_mm + sheet.gutter_x_mm,
+                        other_bottom + other.height_mm + sheet.bleed_mm + sheet.gutter_y_mm,
                     );
                     mark_bounds.x0 < other_bounds.x1
                         && mark_bounds.x1 > other_bounds.x0

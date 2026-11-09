@@ -186,6 +186,7 @@ pub fn build_document(
     sheet: SheetSettings,
     plan: &ImpositionPlan,
     designs: &[DesignArtwork],
+    crop_marks: bool,
 ) -> Result<tracedraw_core::Document, PlanError> {
     use tracedraw_core::{Affine, Document, Layer, Page, Point, Shape, Size};
 
@@ -300,6 +301,39 @@ pub fn build_document(
         let page = &mut doc.pages[placement.sheet_index];
         let layer = page.layers.first_mut().expect("each output page has a layer");
         layer.shapes.extend(copies);
+
+        if crop_marks {
+            // Editable vector crop marks in page coordinates (mm).
+            // Planner coordinates are top-left / Y-down; document geometry
+            // is bottom-left / Y-up.
+            let left = placement.x_mm;
+            let right = placement.x_mm + placement.width_mm;
+            let bottom = target_y;
+            let top = target_y + placement.height_mm;
+            let gap = 1.0_f64;
+            let length = 3.0_f64;
+            let mut add_mark = |points: [Point; 2]| {
+                let mut path = tracedraw_core::BezPath::new();
+                path.move_to(points[0]);
+                path.line_to(points[1]);
+                let mut mark = Shape::new(
+                    doc.ids_mut().shape(),
+                    tracedraw_core::ShapeKind::Path { path, closed: false },
+                );
+                mark.name = Some("Crop mark".into());
+                mark.fill = tracedraw_core::Fill::None;
+                mark.stroke = Some(tracedraw_core::Stroke::default());
+                layer.shapes.push(mark);
+            };
+            add_mark([Point::new(left - gap - length, bottom), Point::new(left - gap, bottom)]);
+            add_mark([Point::new(left, bottom - gap - length), Point::new(left, bottom - gap)]);
+            add_mark([Point::new(right + gap, bottom), Point::new(right + gap + length, bottom)]);
+            add_mark([Point::new(right, bottom - gap - length), Point::new(right, bottom - gap)]);
+            add_mark([Point::new(left - gap - length, top), Point::new(left - gap, top)]);
+            add_mark([Point::new(left, top + gap), Point::new(left, top + gap + length)]);
+            add_mark([Point::new(right + gap, top), Point::new(right + gap + length, top)]);
+            add_mark([Point::new(right, top + gap), Point::new(right, top + gap + length)]);
+        }
     }
     Ok(doc)
 }

@@ -310,6 +310,36 @@ pub fn build_document(
             let gap = 1.0_f64;
             let length = 3.0_f64;
             let mut add_mark = |points: [Point; 2]| {
+                // Keep marks on the sheet and out of neighboring trim areas.
+                let min_x = points[0].x.min(points[1].x);
+                let max_x = points[0].x.max(points[1].x);
+                let min_y = points[0].y.min(points[1].y);
+                let max_y = points[0].y.max(points[1].y);
+                if min_x < 0.0 || min_y < 0.0
+                    || max_x > sheet.width_mm || max_y > sheet.height_mm
+                {
+                    return;
+                }
+                let mark_bounds = tracedraw_core::Rect::new(
+                    min_x - 1e-6, min_y - 1e-6, max_x + 1e-6, max_y + 1e-6,
+                );
+                let touches_neighbor = plan.placements.iter().any(|other| {
+                    if other.sheet_index != placement.sheet_index
+                        || (other.design_id == placement.design_id
+                            && other.copy_index == placement.copy_index)
+                    {
+                        return false;
+                    }
+                    let other_bottom = sheet.height_mm - other.y_mm - other.height_mm;
+                    let other_bounds = tracedraw_core::Rect::new(
+                        other.x_mm, other_bottom,
+                        other.x_mm + other.width_mm, other_bottom + other.height_mm,
+                    );
+                    mark_bounds.intersects(other_bounds)
+                });
+                if touches_neighbor {
+                    return;
+                }
                 let mut path = tracedraw_core::BezPath::new();
                 path.move_to(points[0]);
                 path.line_to(points[1]);

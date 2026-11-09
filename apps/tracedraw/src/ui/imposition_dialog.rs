@@ -40,6 +40,9 @@ pub struct State {
     pub bleed_mm: f64,
     pub crop_marks: bool,
     pub preview_sheet_index: usize,
+    cached_specs: Vec<DesignSpec>,
+    cached_settings: Option<SheetSettings>,
+    cached_plan: Option<Result<object_imposition::ImpositionPlan, object_imposition::PlanError>>,
 }
 
 impl State {
@@ -57,6 +60,9 @@ impl State {
             bleed_mm: 0.0,
             crop_marks: true,
             preview_sheet_index: 0,
+            cached_specs: Vec::new(),
+            cached_settings: None,
+            cached_plan: None,
         })
     }
 
@@ -218,7 +224,15 @@ pub fn dialog(app: &mut App, ctx: &Context, state: &mut State, close: &mut bool)
                 copies: design.copies,
                 allow_rotation: design.allow_rotation,
             }).collect();
-            match object_imposition::plan(&specs, settings) {
+            // The dialog is drawn every frame. Re-running MaxRects on every repaint
+            // makes the editor appear frozen, especially as copy counts grow. Keep
+            // the last result and only re-plan when a design or sheet setting changes.
+            if state.cached_specs != specs || state.cached_settings != Some(settings) || state.cached_plan.is_none() {
+                state.cached_plan = Some(object_imposition::plan(&specs, settings));
+                state.cached_specs = specs.clone();
+                state.cached_settings = Some(settings);
+            }
+            match state.cached_plan.as_ref().expect("plan cache initialized") {
                 Ok(plan) => {
                     ui.separator();
                     ui.heading("Layout preview");
@@ -247,7 +261,7 @@ pub fn dialog(app: &mut App, ctx: &Context, state: &mut State, close: &mut bool)
                             id: design.id,
                             shapes: design.shapes.clone(),
                         }).collect();
-                        match object_imposition::build_document("Imposition", settings, &plan, &artwork, state.crop_marks) {
+                        match object_imposition::build_document("Imposition", settings, plan, &artwork, state.crop_marks) {
                             Ok(doc) => {
                                 app.open_document(doc, None);
                                 *close = true;

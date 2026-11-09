@@ -36,6 +36,7 @@ pub struct State {
     pub margin_mm: f64,
     pub gutter_mm: f64,
     pub bleed_mm: f64,
+    pub preview_sheet_index: usize,
 }
 
 impl State {
@@ -49,6 +50,7 @@ impl State {
             margin_mm: 5.0,
             gutter_mm: 2.0,
             bleed_mm: 0.0,
+            preview_sheet_index: 0,
         })
     }
 
@@ -64,7 +66,7 @@ impl State {
 
 /// Draw a compact first-sheet preview using the exact placement coordinates
 /// produced by the planner. This is a visual aid, not an editable canvas.
-fn draw_preview(ui: &mut egui::Ui, plan: &object_imposition::ImpositionPlan, sheet: SheetSettings) {
+fn draw_preview(ui: &mut egui::Ui, plan: &object_imposition::ImpositionPlan, sheet: SheetSettings, sheet_index: usize) {
     use egui::{Align2, Color32, FontId, Stroke};
     let available = egui::vec2(380.0, 230.0);
     let (outer, painter) = ui.allocate_painter(available, egui::Sense::hover());
@@ -87,7 +89,7 @@ fn draw_preview(ui: &mut egui::Ui, plan: &object_imposition::ImpositionPlan, she
         Color32::from_rgb(190, 92, 112),
         Color32::from_rgb(90, 150, 155),
     ];
-    for placement in plan.placements.iter().filter(|p| p.sheet_index == 0) {
+    for placement in plan.placements.iter().filter(|p| p.sheet_index == sheet_index) {
         let x = page.left() + placement.x_mm as f32 * scale;
         let y = page.top() + placement.y_mm as f32 * scale;
         let rect = egui::Rect::from_min_size(
@@ -105,7 +107,7 @@ fn draw_preview(ui: &mut egui::Ui, plan: &object_imposition::ImpositionPlan, she
     painter.text(
         egui::pos2(outer.rect.left() + 4.0, outer.rect.bottom() - 2.0),
         Align2::LEFT_BOTTOM,
-        "Sheet 1 preview",
+        format!("Sheet {} preview", sheet_index + 1),
         FontId::proportional(10.0),
         ui.visuals().weak_text_color(),
     );
@@ -190,7 +192,21 @@ pub fn dialog(app: &mut App, ctx: &Context, state: &mut State, close: &mut bool)
                 Ok(plan) => {
                     ui.separator();
                     ui.heading("Layout preview");
-                    draw_preview(ui, &plan, settings);
+                    if plan.sheet_count > 1 {
+                        ui.horizontal(|ui| {
+                            if ui.small_button("Previous").clicked() {
+                                state.preview_sheet_index = state.preview_sheet_index.saturating_sub(1);
+                            }
+                            state.preview_sheet_index = state.preview_sheet_index.min(plan.sheet_count - 1);
+                            ui.label(format!("Sheet {} of {}", state.preview_sheet_index + 1, plan.sheet_count));
+                            if ui.small_button("Next").clicked() {
+                                state.preview_sheet_index = (state.preview_sheet_index + 1).min(plan.sheet_count - 1);
+                            }
+                        });
+                    } else {
+                        state.preview_sheet_index = 0;
+                    }
+                    draw_preview(ui, &plan, settings, state.preview_sheet_index);
                     ui.separator();
                     ui.label(format!(
                         "{} copies across {} design(s) · {} sheet(s) · {:.1}% artwork utilization",

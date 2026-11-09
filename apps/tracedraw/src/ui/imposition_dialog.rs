@@ -194,9 +194,11 @@ pub fn dialog(app: &mut App, ctx: &Context, state: &mut State, close: &mut bool)
                 ui.add(crate::ui::field::NumField::new(&mut state.gutter_x_mm).range(0.0..=1000.0));
                 ui.label("Gutter Y");
                 ui.add(crate::ui::field::NumField::new(&mut state.gutter_y_mm).range(0.0..=1000.0));
-                ui.label("Bleed");
+                ui.label("Bleed allowance");
                 ui.add(crate::ui::field::NumField::new(&mut state.bleed_mm).range(0.0..=1000.0));
                 ui.checkbox(&mut state.crop_marks, "Crop marks");
+            });
+            ui.small("Bleed allowance reserves space around each design; it does not extend artwork beyond the trim edge. Use artwork that already includes bleed for full-bleed printing.");
             });
 
             let settings = SheetSettings {

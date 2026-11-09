@@ -129,6 +129,7 @@ pub fn dialog(app: &mut App, ctx: &Context, state: &mut State, close: &mut bool)
     let mut add_selected = false;
     let mut remove_design = None;
     egui::Window::new("Object Imposition")
+        .order(egui::Order::Foreground)
         .collapsible(false)
         .resizable(true)
         .default_width(440.0)

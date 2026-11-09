@@ -546,6 +546,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn single_design_uses_calculator_style_regular_grid_and_spills_to_next_sheet() {
+        let settings = SheetSettings {
+            width_mm: 297.0, height_mm: 420.0,
+            margin_left_mm: 5.0, margin_right_mm: 5.0,
+            margin_top_mm: 5.0, margin_bottom_mm: 5.0,
+            gutter_x_mm: 2.0, gutter_y_mm: 2.0, bleed_mm: 0.0,
+        };
+        let result = plan(
+            &[DesignSpec { id: 1, width_mm: 90.0, height_mm: 55.0, copies: 25, allow_rotation: true }],
+            settings,
+        ).unwrap();
+        assert_eq!(result.total_copies, 25);
+        assert_eq!(result.sheet_count, 2);
+        assert_eq!(result.placements.iter().filter(|p| p.sheet_index == 0).count(), 21);
+        assert!(result.placements.iter().take(21).all(|p| !p.rotated));
+        for row in result.placements.iter().take(21).collect::<Vec<_>>().chunks(3) {
+            assert!(row.windows(2).all(|pair| (pair[1].x_mm - pair[0].x_mm - 92.0).abs() < 1e-7));
+        }
+    }
+
+    #[test]
     fn repeats_master_design_on_one_sheet() {
         let result = plan(
             &[DesignSpec { id: 7, width_mm: 90.0, height_mm: 50.0, copies: 4, allow_rotation: false }],

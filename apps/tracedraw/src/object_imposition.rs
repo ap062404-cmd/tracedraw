@@ -309,8 +309,12 @@ pub fn build_document(
             let top = target_y + placement.height_mm;
             // Crop marks sit outside the reserved bleed allowance, not
             // inside the bleed artwork itself.
-            let gap = sheet.bleed_mm + 1.0_f64;
-            let length = 3.0_f64;
+            // Keep crop marks inside the available gutter so marks around
+            // neighboring designs do not collide. A 2 mm gutter gets 1 mm
+            // marks; wider gutters allow longer, more conventional marks.
+            let gap = sheet.bleed_mm + 0.25_f64;
+            let length_x = (sheet.gutter_x_mm * 0.5).clamp(1.0, 3.0);
+            let length_y = (sheet.gutter_y_mm * 0.5).clamp(1.0, 3.0);
             let mut add_mark = |points: [Point; 2]| {
                 // Keep marks on the sheet and out of neighboring trim areas.
                 let min_x = points[0].x.min(points[1].x);
@@ -361,14 +365,14 @@ pub fn build_document(
                 mark.stroke = Some(tracedraw_core::Stroke::default());
                 crop_shapes.push(mark);
             };
-            add_mark([Point::new(left - gap - length, bottom), Point::new(left - gap, bottom)]);
-            add_mark([Point::new(left, bottom - gap - length), Point::new(left, bottom - gap)]);
-            add_mark([Point::new(right + gap, bottom), Point::new(right + gap + length, bottom)]);
-            add_mark([Point::new(right, bottom - gap - length), Point::new(right, bottom - gap)]);
-            add_mark([Point::new(left - gap - length, top), Point::new(left - gap, top)]);
-            add_mark([Point::new(left, top + gap), Point::new(left, top + gap + length)]);
-            add_mark([Point::new(right + gap, top), Point::new(right + gap + length, top)]);
-            add_mark([Point::new(right, top + gap), Point::new(right, top + gap + length)]);
+            add_mark([Point::new(left - gap - length_x, bottom), Point::new(left - gap, bottom)]);
+            add_mark([Point::new(left, bottom - gap - length_y), Point::new(left, bottom - gap)]);
+            add_mark([Point::new(right + gap, bottom), Point::new(right + gap + length_x, bottom)]);
+            add_mark([Point::new(right, bottom - gap - length_y), Point::new(right, bottom - gap)]);
+            add_mark([Point::new(left - gap - length_x, top), Point::new(left - gap, top)]);
+            add_mark([Point::new(left, top + gap), Point::new(left, top + gap + length_y)]);
+            add_mark([Point::new(right + gap, top), Point::new(right + gap + length_x, top)]);
+            add_mark([Point::new(right, top + gap), Point::new(right, top + gap + length_y)]);
         }
         let page = &mut doc.pages[placement.sheet_index];
         let layer = page.layers.first_mut().expect("each output page has a layer");

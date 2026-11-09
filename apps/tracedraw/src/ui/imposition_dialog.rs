@@ -38,6 +38,7 @@ pub struct State {
     pub gutter_x_mm: f64,
     pub gutter_y_mm: f64,
     pub bleed_mm: f64,
+    pub crop_marks: bool,
     pub preview_sheet_index: usize,
 }
 
@@ -54,6 +55,7 @@ impl State {
             gutter_x_mm: 2.0,
             gutter_y_mm: 2.0,
             bleed_mm: 0.0,
+            crop_marks: true,
             preview_sheet_index: 0,
         })
     }
@@ -194,6 +196,7 @@ pub fn dialog(app: &mut App, ctx: &Context, state: &mut State, close: &mut bool)
                 ui.add(crate::ui::field::NumField::new(&mut state.gutter_y_mm).range(0.0..=1000.0));
                 ui.label("Bleed");
                 ui.add(crate::ui::field::NumField::new(&mut state.bleed_mm).range(0.0..=1000.0));
+                ui.checkbox(&mut state.crop_marks, "Crop marks");
             });
 
             let settings = SheetSettings {
@@ -243,7 +246,7 @@ pub fn dialog(app: &mut App, ctx: &Context, state: &mut State, close: &mut bool)
                             id: design.id,
                             shapes: design.shapes.clone(),
                         }).collect();
-                        match object_imposition::build_document("Imposition", settings, &plan, &artwork) {
+                        match object_imposition::build_document("Imposition", settings, &plan, &artwork, state.crop_marks) {
                             Ok(doc) => {
                                 app.open_document(doc, None);
                                 *close = true;

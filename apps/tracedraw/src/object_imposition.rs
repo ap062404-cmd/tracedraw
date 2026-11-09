@@ -335,7 +335,10 @@ pub fn build_document(
                         other.x_mm, other_bottom,
                         other.x_mm + other.width_mm, other_bottom + other.height_mm,
                     );
-                    mark_bounds.intersects(other_bounds)
+                    mark_bounds.x0 < other_bounds.x1
+                        && mark_bounds.x1 > other_bounds.x0
+                        && mark_bounds.y0 < other_bounds.y1
+                        && mark_bounds.y1 > other_bounds.y0
                 });
                 if touches_neighbor {
                     return;

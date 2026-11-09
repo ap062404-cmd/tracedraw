@@ -199,7 +199,6 @@ pub fn dialog(app: &mut App, ctx: &Context, state: &mut State, close: &mut bool)
                 ui.checkbox(&mut state.crop_marks, "Crop marks");
             });
             ui.small("Bleed allowance reserves space around each design; it does not extend artwork beyond the trim edge. Use artwork that already includes bleed for full-bleed printing.");
-            });
 
             let settings = SheetSettings {
                 width_mm: state.sheet_width_mm,

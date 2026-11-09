@@ -94,7 +94,7 @@ fn draw_preview(ui: &mut egui::Ui, plan: &object_imposition::ImpositionPlan, she
             egui::pos2(x, y),
             egui::vec2(placement.width_mm as f32 * scale, placement.height_mm as f32 * scale),
         );
-        let color = colors[(placement.design_id as usize - 1) % colors.len()];
+        let color = colors[(placement.design_id as usize) % colors.len()];
         painter.rect_filled(rect, 1.0, color);
         painter.rect_stroke(rect, 1.0, Stroke::new(0.7, Color32::WHITE), egui::StrokeKind::Inside);
         if rect.width() > 24.0 && rect.height() > 14.0 {

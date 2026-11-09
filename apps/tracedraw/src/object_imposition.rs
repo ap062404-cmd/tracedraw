@@ -200,7 +200,6 @@ pub fn build_document(
     if plan.sheet_count == 0 {
         return Ok(doc);
     }
-    let first_page_id = doc.pages[0].id;
     for sheet_index in 0..plan.sheet_count {
         if sheet_index == 0 {
             let page = &mut doc.pages[0];
@@ -219,7 +218,6 @@ pub fn build_document(
             });
         }
     }
-    let _ = first_page_id;
     for placement in &plan.placements {
         let design = designs.iter().find(|d| d.id == placement.design_id)
             .ok_or(PlanError::InvalidDesign { id: placement.design_id })?;
@@ -241,28 +239,27 @@ pub fn build_document(
             Point::new(source_bounds.x1, source_bounds.y1),
             Point::new(source_bounds.x0, source_bounds.y1),
         ].map(|p| rotate_about_center * p);
-        let rotated_bounds = tracedraw_core::Rect::from_points(
-            rotated_corners[0], rotated_corners[0]
-        ).union(
-            rotated_corners[1..].iter().fold(
-                tracedraw_core::Rect::from_points(rotated_corners[0], rotated_corners[0]),
-                |bounds, p| bounds.union(tracedraw_core::Rect::from_points(*p, *p)),
-            )
-        );
+        let min_x = rotated_corners.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
+        let min_y = rotated_corners.iter().map(|p| p.y).fold(f64::INFINITY, f64::min);
+        let max_x = rotated_corners.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max);
+        let max_y = rotated_corners.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max);
+        let rotated_bounds = tracedraw_core::Rect::new(min_x, min_y, max_x, max_y);
         let move_to_sheet = Affine::translate((
             placement.x_mm - rotated_bounds.x0,
             target_y - rotated_bounds.y0,
         ));
         let world = move_to_sheet * rotate_about_center;
-        let page = &mut doc.pages[placement.sheet_index];
-        let layer = page.layers.first_mut().expect("each output page has a layer");
+        let mut copies = Vec::with_capacity(design.shapes.len());
         for original in &design.shapes {
             let mut shape = original.clone();
             shape.id = doc.ids_mut().shape();
             shape.uid = None;
             shape.transform = world * shape.transform;
-            layer.shapes.push(shape);
+            copies.push(shape);
         }
+        let page = &mut doc.pages[placement.sheet_index];
+        let layer = page.layers.first_mut().expect("each output page has a layer");
+        layer.shapes.extend(copies);
     }
     Ok(doc)
 }

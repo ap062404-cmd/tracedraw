@@ -3116,6 +3116,12 @@ fn node_items(app: &mut App, ui: &mut Ui) {
 
 fn object_menu(app: &mut App, ui: &mut Ui) {
     let has = !app.selection.is_empty();
+    if item(ui, "Object Imposition", "", has) {
+        if let Some(state) = crate::ui::imposition_dialog::State::from_selection(app.selected_shapes()) {
+            app.dialog = Dialog::Imposition(Box::new(state));
+        }
+    }
+
     let many = app.selection.len() > 1;
     // AI Generate: the docker in each mode, and Remove Background.
     sub(ui, "menu.object.ai_generate", |ui| {

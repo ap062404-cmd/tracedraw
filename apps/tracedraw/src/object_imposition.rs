@@ -307,7 +307,9 @@ pub fn build_document(
             let right = placement.x_mm + placement.width_mm;
             let bottom = target_y;
             let top = target_y + placement.height_mm;
-            let gap = 1.0_f64;
+            // Crop marks sit outside the reserved bleed allowance, not
+            // inside the bleed artwork itself.
+            let gap = sheet.bleed_mm + 1.0_f64;
             let length = 3.0_f64;
             let mut add_mark = |points: [Point; 2]| {
                 // Keep marks on the sheet and out of neighboring trim areas.

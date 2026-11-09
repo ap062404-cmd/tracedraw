@@ -57,8 +57,8 @@ impl State {
         Some(Self {
             designs,
             next_design_id,
-            sheet_width_mm: 297.0,
-            sheet_height_mm: 420.0,
+            sheet_width_mm: 320.0,
+            sheet_height_mm: 480.0,
             margin_x_mm: 5.0,
             margin_y_mm: 5.0,
             gutter_x_mm: 2.0,
@@ -197,6 +197,10 @@ pub fn dialog(app: &mut App, ctx: &Context, state: &mut State, close: &mut bool)
                         if ui.small_button("A3 · 297 × 420").clicked() {
                             state.sheet_width_mm = 297.0;
                             state.sheet_height_mm = 420.0;
+                        }
+                        if ui.small_button("A3+ · 320 × 480").clicked() {
+                            state.sheet_width_mm = 320.0;
+                            state.sheet_height_mm = 480.0;
                         }
                         if ui.small_button("SRA3 · 320 × 450").clicked() {
                             state.sheet_width_mm = 320.0;

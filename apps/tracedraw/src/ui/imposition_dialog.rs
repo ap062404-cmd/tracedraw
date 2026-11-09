@@ -140,85 +140,169 @@ fn draw_preview(ui: &mut egui::Ui, plan: &object_imposition::ImpositionPlan, she
 pub fn dialog(app: &mut App, ctx: &Context, state: &mut State, close: &mut bool) {
     let mut add_selected = false;
     let mut remove_design = None;
+    let mut create_document = false;
     egui::Window::new("Object Imposition")
         .order(egui::Order::Foreground)
         .collapsible(false)
         .resizable(true)
         .default_width(440.0)
+        .default_height(620.0)
+        .max_height(ctx.content_rect().height() * 0.92)
         .show(ctx, |ui| {
-            ui.label("Each selected object or group is one production design.");
-            ui.label("Select another object on the canvas, then add it below.");
-            ui.separator();
+            let footer_height = 42.0;
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .max_height((ui.available_height() - footer_height).max(120.0))
+                .show(ui, |ui| {
+                    ui.label("Each selected top-level object is one production design. Groups stay together.");
+                    ui.label("Select other objects on the canvas, then add them as separate designs.");
+                    ui.separator();
 
-            ui.heading("Designs");
-            for (index, design) in state.designs.iter_mut().enumerate() {
-                ui.push_id(design.id, |ui| {
-                    ui.group(|ui| {
-                        ui.horizontal(|ui| {
-                            ui.strong(format!("Design {}", index + 1));
-                            ui.label(format!("{:.1} × {:.1} mm", design.width_mm, design.height_mm));
-                            if ui.small_button("Remove").clicked() {
-                                remove_design = Some(design.id);
-                            }
+                    ui.heading("Designs");
+                    for (index, design) in state.designs.iter_mut().enumerate() {
+                        ui.push_id(design.id, |ui| {
+                            ui.group(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.strong(format!("Design {}", index + 1));
+                                    ui.label(format!("{:.1} × {:.1} mm", design.width_mm, design.height_mm));
+                                    if ui.small_button("Remove").clicked() {
+                                        remove_design = Some(design.id);
+                                    }
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("Copies");
+                                    ui.add(crate::ui::field::NumField::new(&mut design.copies).range(1..=10000));
+                                    ui.checkbox(&mut design.allow_rotation, "Allow 90° rotation");
+                                });
+                            });
                         });
-                        ui.horizontal(|ui| {
-                            ui.label("Copies");
-                            ui.add(crate::ui::field::NumField::new(&mut design.copies).range(1..=10000));
-                            ui.checkbox(&mut design.allow_rotation, "Allow 90° rotation");
-                        });
+                    }
+                    if let Some(id) = remove_design {
+                        if state.designs.len() > 1 {
+                            state.designs.retain(|design| design.id != id);
+                        }
+                    }
+                    if ui.button("+ Add selected design(s)").clicked() {
+                        add_selected = true;
+                    }
+
+                    ui.separator();
+                    ui.heading("Sheet settings");
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Paper preset:");
+                        if ui.small_button("A4 · 210 × 297").clicked() {
+                            state.sheet_width_mm = 210.0;
+                            state.sheet_height_mm = 297.0;
+                        }
+                        if ui.small_button("A3 · 297 × 420").clicked() {
+                            state.sheet_width_mm = 297.0;
+                            state.sheet_height_mm = 420.0;
+                        }
+                        if ui.small_button("SRA3 · 320 × 450").clicked() {
+                            state.sheet_width_mm = 320.0;
+                            state.sheet_height_mm = 450.0;
+                        }
                     });
+                    ui.horizontal(|ui| {
+                        ui.label("Width");
+                        ui.add(crate::ui::field::NumField::new(&mut state.sheet_width_mm).range(1.0..=10000.0));
+                        ui.label("Height");
+                        ui.add(crate::ui::field::NumField::new(&mut state.sheet_height_mm).range(1.0..=10000.0));
+                        ui.label("mm");
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Margin X");
+                        ui.add(crate::ui::field::NumField::new(&mut state.margin_x_mm).range(0.0..=1000.0));
+                        ui.label("Margin Y");
+                        ui.add(crate::ui::field::NumField::new(&mut state.margin_y_mm).range(0.0..=1000.0));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Gutter X");
+                        ui.add(crate::ui::field::NumField::new(&mut state.gutter_x_mm).range(0.0..=1000.0));
+                        ui.label("Gutter Y");
+                        ui.add(crate::ui::field::NumField::new(&mut state.gutter_y_mm).range(0.0..=1000.0));
+                        ui.label("Bleed");
+                        ui.add(crate::ui::field::NumField::new(&mut state.bleed_mm).range(0.0..=1000.0));
+                        ui.checkbox(&mut state.crop_marks, "Crop marks");
+                    });
+                    ui.small("Bleed reserves space around each design; it does not extend artwork beyond the trim edge.");
+
+                    let settings = SheetSettings {
+                        width_mm: state.sheet_width_mm,
+                        height_mm: state.sheet_height_mm,
+                        margin_left_mm: state.margin_x_mm,
+                        margin_right_mm: state.margin_x_mm,
+                        margin_top_mm: state.margin_y_mm,
+                        margin_bottom_mm: state.margin_y_mm,
+                        gutter_x_mm: state.gutter_x_mm,
+                        gutter_y_mm: state.gutter_y_mm,
+                        bleed_mm: state.bleed_mm,
+                    };
+                    let specs: Vec<DesignSpec> = state.designs.iter().map(|design| DesignSpec {
+                        id: design.id,
+                        width_mm: design.width_mm,
+                        height_mm: design.height_mm,
+                        copies: design.copies,
+                        allow_rotation: design.allow_rotation,
+                    }).collect();
+                    if state.cached_specs != specs || state.cached_settings != Some(settings) || state.cached_plan.is_none() {
+                        state.cached_plan = Some(object_imposition::plan(&specs, settings));
+                        state.cached_specs = specs;
+                        state.cached_settings = Some(settings);
+                        state.preview_sheet_index = 0;
+                    }
+                    match state.cached_plan.as_ref().expect("plan cache initialized") {
+                        Ok(plan) => {
+                            ui.separator();
+                            ui.heading("Layout preview");
+                            if plan.sheet_count > 1 {
+                                ui.horizontal(|ui| {
+                                    if ui.small_button("Previous").clicked() {
+                                        state.preview_sheet_index = state.preview_sheet_index.saturating_sub(1);
+                                    }
+                                    state.preview_sheet_index = state.preview_sheet_index.min(plan.sheet_count - 1);
+                                    ui.label(format!("Sheet {} of {}", state.preview_sheet_index + 1, plan.sheet_count));
+                                    if ui.small_button("Next").clicked() {
+                                        state.preview_sheet_index = (state.preview_sheet_index + 1).min(plan.sheet_count - 1);
+                                    }
+                                });
+                            } else {
+                                state.preview_sheet_index = 0;
+                            }
+                            draw_preview(ui, plan, settings, state.preview_sheet_index);
+                            ui.label(format!(
+                                "{} copies across {} design(s) · {} sheet(s) · {:.1}% artwork utilization",
+                                plan.total_copies, state.designs.len(), plan.sheet_count, plan.utilization_percent
+                            ));
+                        }
+                        Err(error) => {
+                            ui.colored_label(egui::Color32::from_rgb(190, 70, 55), format!("Cannot fit artwork: {error:?}"));
+                        }
+                    }
                 });
-            }
-            if let Some(id) = remove_design {
-                if state.designs.len() > 1 {
-                    state.designs.retain(|design| design.id != id);
-                }
-            }
-            if ui.button("+ Add selected design").clicked() {
-                add_selected = true;
-            }
-
             ui.separator();
-            ui.heading("Sheet settings");
-            ui.horizontal_wrapped(|ui| {
-                ui.label("Paper preset:");
-                if ui.small_button("A4 · 210 × 297").clicked() {
-                    state.sheet_width_mm = 210.0;
-                    state.sheet_height_mm = 297.0;
+            ui.horizontal(|ui| {
+                let can_create = matches!(state.cached_plan, Some(Ok(_)));
+                if ui.add_enabled(can_create, egui::Button::new("Create production document")).clicked() {
+                    create_document = true;
                 }
-                if ui.small_button("A3 · 297 × 420").clicked() {
-                    state.sheet_width_mm = 297.0;
-                    state.sheet_height_mm = 420.0;
-                }
-                if ui.small_button("SRA3 · 320 × 450").clicked() {
-                    state.sheet_width_mm = 320.0;
-                    state.sheet_height_mm = 450.0;
+                if ui.button("Close").clicked() {
+                    *close = true;
                 }
             });
-            ui.horizontal(|ui| {
-                ui.label("Width");
-                ui.add(crate::ui::field::NumField::new(&mut state.sheet_width_mm).range(1.0..=10000.0));
-                ui.label("Height");
-                ui.add(crate::ui::field::NumField::new(&mut state.sheet_height_mm).range(1.0..=10000.0));
-                ui.label("mm");
-            });
-            ui.horizontal(|ui| {
-                ui.label("Margin X");
-                ui.add(crate::ui::field::NumField::new(&mut state.margin_x_mm).range(0.0..=1000.0));
-                ui.label("Margin Y");
-                ui.add(crate::ui::field::NumField::new(&mut state.margin_y_mm).range(0.0..=1000.0));
-            });
-            ui.horizontal(|ui| {
-                ui.label("Gutter X");
-                ui.add(crate::ui::field::NumField::new(&mut state.gutter_x_mm).range(0.0..=1000.0));
-                ui.label("Gutter Y");
-                ui.add(crate::ui::field::NumField::new(&mut state.gutter_y_mm).range(0.0..=1000.0));
-                ui.label("Bleed allowance");
-                ui.add(crate::ui::field::NumField::new(&mut state.bleed_mm).range(0.0..=1000.0));
-                ui.checkbox(&mut state.crop_marks, "Crop marks");
-            });
-            ui.small("Bleed allowance reserves space around each design; it does not extend artwork beyond the trim edge. Use artwork that already includes bleed for full-bleed printing.");
+        });
 
+    if add_selected {
+        let selected = app.selected_shapes();
+        if !state.add_selection(selected) {
+            app.status = "Select valid objects or groups before adding designs.".into();
+        } else {
+            state.cached_plan = None;
+        }
+    }
+
+    if create_document {
+        if let Some(Ok(plan)) = state.cached_plan.as_ref() {
             let settings = SheetSettings {
                 width_mm: state.sheet_width_mm,
                 height_mm: state.sheet_height_mm,
@@ -230,72 +314,17 @@ pub fn dialog(app: &mut App, ctx: &Context, state: &mut State, close: &mut bool)
                 gutter_y_mm: state.gutter_y_mm,
                 bleed_mm: state.bleed_mm,
             };
-            let specs: Vec<DesignSpec> = state.designs.iter().map(|design| DesignSpec {
+            let artwork: Vec<DesignArtwork> = state.designs.iter().map(|design| DesignArtwork {
                 id: design.id,
-                width_mm: design.width_mm,
-                height_mm: design.height_mm,
-                copies: design.copies,
-                allow_rotation: design.allow_rotation,
+                shapes: design.shapes.clone(),
             }).collect();
-            // The dialog is drawn every frame. Re-running MaxRects on every repaint
-            // makes the editor appear frozen, especially as copy counts grow. Keep
-            // the last result and only re-plan when a design or sheet setting changes.
-            if state.cached_specs != specs || state.cached_settings != Some(settings) || state.cached_plan.is_none() {
-                state.cached_plan = Some(object_imposition::plan(&specs, settings));
-                state.cached_specs = specs.clone();
-                state.cached_settings = Some(settings);
-            }
-            match state.cached_plan.as_ref().expect("plan cache initialized") {
-                Ok(plan) => {
-                    ui.separator();
-                    ui.heading("Layout preview");
-                    if plan.sheet_count > 1 {
-                        ui.horizontal(|ui| {
-                            if ui.small_button("Previous").clicked() {
-                                state.preview_sheet_index = state.preview_sheet_index.saturating_sub(1);
-                            }
-                            state.preview_sheet_index = state.preview_sheet_index.min(plan.sheet_count - 1);
-                            ui.label(format!("Sheet {} of {}", state.preview_sheet_index + 1, plan.sheet_count));
-                            if ui.small_button("Next").clicked() {
-                                state.preview_sheet_index = (state.preview_sheet_index + 1).min(plan.sheet_count - 1);
-                            }
-                        });
-                    } else {
-                        state.preview_sheet_index = 0;
-                    }
-                    draw_preview(ui, &plan, settings, state.preview_sheet_index);
-                    ui.separator();
-                    ui.label(format!(
-                        "{} copies across {} design(s) · {} sheet(s) · {:.1}% artwork utilization",
-                        plan.total_copies, state.designs.len(), plan.sheet_count, plan.utilization_percent
-                    ));
-                    if ui.button("Create production document").clicked() {
-                        let artwork: Vec<DesignArtwork> = state.designs.iter().map(|design| DesignArtwork {
-                            id: design.id,
-                            shapes: design.shapes.clone(),
-                        }).collect();
-                        match object_imposition::build_document("Imposition", settings, plan, &artwork, state.crop_marks) {
-                            Ok(doc) => {
-                                app.open_document(doc, None);
-                                *close = true;
-                            }
-                            Err(error) => app.status = format!("Imposition: {error:?}"),
-                        }
-                    }
+            match object_imposition::build_document("Imposition", settings, plan, &artwork, state.crop_marks) {
+                Ok(doc) => {
+                    app.open_document(doc, None);
+                    *close = true;
                 }
-                Err(error) => {
-                    ui.colored_label(egui::Color32::from_rgb(190, 70, 55), format!("Cannot fit artwork: {error:?}"));
-                }
+                Err(error) => app.status = format!("Imposition: {error:?}"),
             }
-            if ui.button("Close").clicked() {
-                *close = true;
-            }
-        });
-
-    if add_selected {
-        let selected = app.selected_shapes();
-        if !state.add_selection(selected) {
-            app.status = "Select a valid object or group before adding a design.".into();
         }
     }
 }

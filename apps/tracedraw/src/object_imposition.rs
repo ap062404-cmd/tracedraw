@@ -298,10 +298,7 @@ pub fn build_document(
             shape.transform = world * shape.transform;
             copies.push(shape);
         }
-        let page = &mut doc.pages[placement.sheet_index];
-        let layer = page.layers.first_mut().expect("each output page has a layer");
-        layer.shapes.extend(copies);
-
+        let mut crop_shapes = Vec::new();
         if crop_marks {
             // Editable vector crop marks in page coordinates (mm).
             // Planner coordinates are top-left / Y-down; document geometry
@@ -323,7 +320,7 @@ pub fn build_document(
                 mark.name = Some("Crop mark".into());
                 mark.fill = tracedraw_core::Fill::None;
                 mark.stroke = Some(tracedraw_core::Stroke::default());
-                layer.shapes.push(mark);
+                crop_shapes.push(mark);
             };
             add_mark([Point::new(left - gap - length, bottom), Point::new(left - gap, bottom)]);
             add_mark([Point::new(left, bottom - gap - length), Point::new(left, bottom - gap)]);
@@ -334,6 +331,10 @@ pub fn build_document(
             add_mark([Point::new(right + gap, top), Point::new(right + gap + length, top)]);
             add_mark([Point::new(right, top + gap), Point::new(right, top + gap + length)]);
         }
+        let page = &mut doc.pages[placement.sheet_index];
+        let layer = page.layers.first_mut().expect("each output page has a layer");
+        layer.shapes.extend(copies);
+        layer.shapes.extend(crop_shapes);
     }
     Ok(doc)
 }

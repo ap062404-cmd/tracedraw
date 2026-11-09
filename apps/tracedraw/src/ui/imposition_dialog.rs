@@ -33,8 +33,10 @@ pub struct State {
     pub next_design_id: u64,
     pub sheet_width_mm: f64,
     pub sheet_height_mm: f64,
-    pub margin_mm: f64,
-    pub gutter_mm: f64,
+    pub margin_x_mm: f64,
+    pub margin_y_mm: f64,
+    pub gutter_x_mm: f64,
+    pub gutter_y_mm: f64,
     pub bleed_mm: f64,
     pub preview_sheet_index: usize,
 }
@@ -47,8 +49,10 @@ impl State {
             next_design_id: 2,
             sheet_width_mm: 297.0,
             sheet_height_mm: 420.0,
-            margin_mm: 5.0,
-            gutter_mm: 2.0,
+            margin_x_mm: 5.0,
+            margin_y_mm: 5.0,
+            gutter_x_mm: 2.0,
+            gutter_y_mm: 2.0,
             bleed_mm: 0.0,
             preview_sheet_index: 0,
         })
@@ -155,17 +159,39 @@ pub fn dialog(app: &mut App, ctx: &Context, state: &mut State, close: &mut bool)
 
             ui.separator();
             ui.heading("Sheet settings");
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Paper preset:");
+                if ui.small_button("A4 · 210 × 297").clicked() {
+                    state.sheet_width_mm = 210.0;
+                    state.sheet_height_mm = 297.0;
+                }
+                if ui.small_button("A3 · 297 × 420").clicked() {
+                    state.sheet_width_mm = 297.0;
+                    state.sheet_height_mm = 420.0;
+                }
+                if ui.small_button("SRA3 · 320 × 450").clicked() {
+                    state.sheet_width_mm = 320.0;
+                    state.sheet_height_mm = 450.0;
+                }
+            });
             ui.horizontal(|ui| {
                 ui.label("Width");
                 ui.add(crate::ui::field::NumField::new(&mut state.sheet_width_mm).range(1.0..=10000.0));
                 ui.label("Height");
                 ui.add(crate::ui::field::NumField::new(&mut state.sheet_height_mm).range(1.0..=10000.0));
+                ui.label("mm");
             });
             ui.horizontal(|ui| {
-                ui.label("Margin");
-                ui.add(crate::ui::field::NumField::new(&mut state.margin_mm).range(0.0..=1000.0));
-                ui.label("Gutter");
-                ui.add(crate::ui::field::NumField::new(&mut state.gutter_mm).range(0.0..=1000.0));
+                ui.label("Margin X");
+                ui.add(crate::ui::field::NumField::new(&mut state.margin_x_mm).range(0.0..=1000.0));
+                ui.label("Margin Y");
+                ui.add(crate::ui::field::NumField::new(&mut state.margin_y_mm).range(0.0..=1000.0));
+            });
+            ui.horizontal(|ui| {
+                ui.label("Gutter X");
+                ui.add(crate::ui::field::NumField::new(&mut state.gutter_x_mm).range(0.0..=1000.0));
+                ui.label("Gutter Y");
+                ui.add(crate::ui::field::NumField::new(&mut state.gutter_y_mm).range(0.0..=1000.0));
                 ui.label("Bleed");
                 ui.add(crate::ui::field::NumField::new(&mut state.bleed_mm).range(0.0..=1000.0));
             });
@@ -173,12 +199,12 @@ pub fn dialog(app: &mut App, ctx: &Context, state: &mut State, close: &mut bool)
             let settings = SheetSettings {
                 width_mm: state.sheet_width_mm,
                 height_mm: state.sheet_height_mm,
-                margin_left_mm: state.margin_mm,
-                margin_right_mm: state.margin_mm,
-                margin_top_mm: state.margin_mm,
-                margin_bottom_mm: state.margin_mm,
-                gutter_x_mm: state.gutter_mm,
-                gutter_y_mm: state.gutter_mm,
+                margin_left_mm: state.margin_x_mm,
+                margin_right_mm: state.margin_x_mm,
+                margin_top_mm: state.margin_y_mm,
+                margin_bottom_mm: state.margin_y_mm,
+                gutter_x_mm: state.gutter_x_mm,
+                gutter_y_mm: state.gutter_y_mm,
                 bleed_mm: state.bleed_mm,
             };
             let specs: Vec<DesignSpec> = state.designs.iter().map(|design| DesignSpec {

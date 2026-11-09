@@ -313,8 +313,11 @@ pub fn build_document(
             // neighboring designs do not collide. A 2 mm gutter gets 1 mm
             // marks; wider gutters allow longer, more conventional marks.
             let gap = sheet.bleed_mm + 0.25_f64;
-            let length_x = (sheet.gutter_x_mm * 0.5).clamp(1.0, 3.0);
-            let length_y = (sheet.gutter_y_mm * 0.5).clamp(1.0, 3.0);
+            // Each neighboring object needs its own half of the gutter.
+            // Subtract the outside gap first; never force a 1 mm mark into
+            // a gutter that cannot physically contain it.
+            let length_x = (sheet.gutter_x_mm * 0.5 - gap).clamp(0.0, 3.0);
+            let length_y = (sheet.gutter_y_mm * 0.5 - gap).clamp(0.0, 3.0);
             let mut add_mark = |points: [Point; 2]| {
                 // Keep marks on the sheet and out of neighboring trim areas.
                 let min_x = points[0].x.min(points[1].x);
@@ -342,8 +345,8 @@ pub fn build_document(
                     let other_bounds = tracedraw_core::Rect::new(
                         other.x_mm - sheet.bleed_mm,
                         other_bottom - sheet.bleed_mm,
-                        other.x_mm + other.width_mm + sheet.bleed_mm + sheet.gutter_x_mm,
-                        other_bottom + other.height_mm + sheet.bleed_mm + sheet.gutter_y_mm,
+                        other.x_mm + other.width_mm + sheet.bleed_mm,
+                        other_bottom + other.height_mm + sheet.bleed_mm,
                     );
                     mark_bounds.x0 < other_bounds.x1
                         && mark_bounds.x1 > other_bounds.x0
@@ -493,7 +496,49 @@ pub fn plan(designs: &[DesignSpec], settings: SheetSettings) -> Result<Impositio
         });
     }
 
-    // Mixed-design jobs: retain the collision-safe MaxRects planner.
+    // If all selected designs share the same physical dimensions and
+    // rotation policy, treat them as one production grid. Fill its slots in
+    // design order so separate files never get scattered by MaxRects.
+    let same_size_group = designs.len() > 1
+        && designs.iter().all(|d| {
+            (d.width_mm - designs[0].width_mm).abs() < 1e-6
+                && (d.height_mm - designs[0].height_mm).abs() < 1e-6
+                && d.allow_rotation == designs[0].allow_rotation
+        });
+    if same_size_group {
+        let total_copies: u32 = designs.iter().map(|d| d.copies).sum();
+        if total_copies == 0 {
+            return Ok(ImpositionPlan {
+                placements: Vec::new(), sheet_count: 0, total_copies: 0,
+                utilization_percent: 0.0,
+            });
+        }
+        let combined = DesignSpec {
+            id: designs[0].id,
+            width_mm: designs[0].width_mm,
+            height_mm: designs[0].height_mm,
+            copies: total_copies,
+            allow_rotation: designs[0].allow_rotation,
+        };
+        let mut grouped = plan(&[combined], settings)?;
+        let mut design_index = 0usize;
+        let mut assigned = 0u32;
+        for placement in &mut grouped.placements {
+            while design_index < designs.len() && assigned >= designs[design_index].copies {
+                design_index += 1;
+                assigned = 0;
+            }
+            if design_index >= designs.len() {
+                return Err(PlanError::InvalidDesign { id: placement.design_id });
+            }
+            placement.design_id = designs[design_index].id;
+            placement.copy_index = assigned;
+            assigned += 1;
+        }
+        return Ok(grouped);
+    }
+
+    // Mixed-size jobs retain the collision-safe MaxRects planner.
     let bleed = settings.bleed_mm;
     let mut items = Vec::new();
     for d in designs {

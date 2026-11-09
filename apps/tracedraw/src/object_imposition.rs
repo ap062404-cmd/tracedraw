@@ -382,16 +382,13 @@ pub fn build_document(
     Ok(doc)
 }
 
-/// Pack designs with a MaxRects best-short-side-fit heuristic.
-///
-/// Each selected design is treated as one production unit, even when it
-/// consists of multiple vector objects. Copies are placed across as few
-/// sheets as the heuristic can find; source artwork is not modified.
+/// Plan regular grid and cross-rotated candidates, matching the calculator's
+/// deterministic "maximum copies, then simplest layout" strategy for a
+/// single design. Multiple designs retain the general MaxRects fallback.
 pub fn plan(designs: &[DesignSpec], settings: SheetSettings) -> Result<ImpositionPlan, PlanError> {
     let values = [
-        settings.width_mm, settings.height_mm,
-        settings.margin_left_mm, settings.margin_right_mm,
-        settings.margin_top_mm, settings.margin_bottom_mm,
+        settings.width_mm, settings.height_mm, settings.margin_left_mm,
+        settings.margin_right_mm, settings.margin_top_mm, settings.margin_bottom_mm,
         settings.gutter_x_mm, settings.gutter_y_mm, settings.bleed_mm,
     ];
     if values.iter().any(|v| !v.is_finite()) || settings.width_mm <= 0.0 || settings.height_mm <= 0.0 {
@@ -401,86 +398,147 @@ pub fn plan(designs: &[DesignSpec], settings: SheetSettings) -> Result<Impositio
         return Err(PlanError::InvalidMargins);
     }
     let usable = Rect {
-        x: settings.margin_left_mm,
-        y: settings.margin_top_mm,
+        x: settings.margin_left_mm, y: settings.margin_top_mm,
         w: settings.width_mm - settings.margin_left_mm - settings.margin_right_mm,
         h: settings.height_mm - settings.margin_top_mm - settings.margin_bottom_mm,
     };
     if usable.w <= 0.0 || usable.h <= 0.0 { return Err(PlanError::InvalidMargins); }
+    for d in designs {
+        if !d.width_mm.is_finite() || !d.height_mm.is_finite() || d.width_mm <= 0.0 || d.height_mm <= 0.0 {
+            return Err(PlanError::InvalidDesign { id: d.id });
+        }
+    }
+    if designs.len() == 1 {
+        let d = &designs[0];
+        if d.copies == 0 {
+            return Ok(ImpositionPlan { placements: Vec::new(), sheet_count: 0, total_copies: 0, utilization_percent: 0.0 });
+        }
+        let bleed = settings.bleed_mm;
+        let w = d.width_mm + 2.0 * bleed;
+        let h = d.height_mm + 2.0 * bleed;
+        // Every candidate is a list of trim origins in sheet coordinates.
+        let grid = |x: f64, y: f64, aw: f64, ah: f64, iw: f64, ih: f64, rotated: bool| -> Vec<(f64,f64,bool)> {
+            let mut out = Vec::new();
+            if aw <= 0.0 || ah <= 0.0 { return out; }
+            let sx = iw + settings.gutter_x_mm;
+            let sy = ih + settings.gutter_y_mm;
+            let nx = ((aw + settings.gutter_x_mm) / sx).floor().max(0.0) as usize;
+            let ny = ((ah + settings.gutter_y_mm) / sy).floor().max(0.0) as usize;
+            for row in 0..ny {
+                for col in 0..nx {
+                    let px = x + col as f64 * sx;
+                    let py = y + row as f64 * sy;
+                    if px + iw <= x + aw + 1e-7 && py + ih <= y + ah + 1e-7 {
+                        out.push((px + bleed, py + bleed, rotated));
+                    }
+                }
+            }
+            out
+        };
+        let mut candidates: Vec<(String, Vec<(f64,f64,bool)>)> = Vec::new();
+        candidates.push(("Grid normal".into(), grid(usable.x, usable.y, usable.w, usable.h, w, h, false)));
+        if d.allow_rotation {
+            candidates.push(("Grid rotasi".into(), grid(usable.x, usable.y, usable.w, usable.h, h, w, true)));
+            // Normal grid with a rotated right strip and/or bottom strip.
+            let nx = ((usable.w + settings.gutter_x_mm) / (w + settings.gutter_x_mm)).floor() as usize;
+            let ny = ((usable.h + settings.gutter_y_mm) / (h + settings.gutter_y_mm)).floor() as usize;
+            let main_w = (nx as f64 * (w + settings.gutter_x_mm) - settings.gutter_x_mm).max(0.0);
+            let main_h = (ny as f64 * (h + settings.gutter_y_mm) - settings.gutter_y_mm).max(0.0);
+            let gx = settings.gutter_x_mm;
+            let gy = settings.gutter_y_mm;
+            let mut right = grid(usable.x + main_w + gx, usable.y, usable.w - main_w - gx, usable.h, h, w, true);
+            let mut base = grid(usable.x, usable.y, main_w, usable.h, w, h, false);
+            let mut mixed = base.clone(); mixed.append(&mut right);
+            candidates.push(("Grid normal + rotasi kanan".into(), mixed));
+            let mut bottom = grid(usable.x, usable.y + main_h + gy, usable.w, usable.h - main_h - gy, h, w, true);
+            base = grid(usable.x, usable.y, usable.w, main_h, w, h, false);
+            base.append(&mut bottom);
+            candidates.push(("Grid normal + rotasi bawah".into(), base));
+            // Rotated base grid with normal fill in the remaining strips.
+            let rnx = ((usable.w + gx) / (h + gx)).floor() as usize;
+            let rny = ((usable.h + gy) / (w + gy)).floor() as usize;
+            let rot_w = (rnx as f64 * (h + gx) - gx).max(0.0);
+            let rot_h = (rny as f64 * (w + gy) - gy).max(0.0);
+            let mut right2 = grid(usable.x + rot_w + gx, usable.y, usable.w - rot_w - gx, usable.h, w, h, false);
+            let mut base2 = grid(usable.x, usable.y, rot_w, usable.h, h, w, true);
+            base2.append(&mut right2);
+            candidates.push(("Grid rotasi + normal kanan".into(), base2));
+            let mut bottom2 = grid(usable.x, usable.y + rot_h + gy, usable.w, usable.h - rot_h - gy, w, h, false);
+            let mut base3 = grid(usable.x, usable.y, usable.w, rot_h, h, w, true);
+            base3.append(&mut bottom2);
+            candidates.push(("Grid rotasi + normal bawah".into(), base3));
+        }
+        candidates.sort_by(|a,b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(&b.0)));
+        let best = candidates.into_iter().next().map(|x| x.1).unwrap_or_default();
+        if best.is_empty() {
+            return Err(PlanError::DoesNotFit { id: d.id, width_mm: d.width_mm, height_mm: d.height_mm });
+        }
+        let per_sheet = best.len();
+        let mut placements = Vec::with_capacity(d.copies as usize);
+        for copy in 0..d.copies {
+            let sheet_index = copy as usize / per_sheet;
+            let pos = best[copy as usize % per_sheet];
+            let (pw, ph) = if pos.2 { (d.height_mm, d.width_mm) } else { (d.width_mm, d.height_mm) };
+            placements.push(ObjectPlacement {
+                design_id: d.id, copy_index: copy, sheet_index,
+                x_mm: pos.0, y_mm: pos.1, width_mm: pw, height_mm: ph, rotated: pos.2,
+            });
+        }
+        let sheet_count = (d.copies as usize + per_sheet - 1) / per_sheet;
+        let artwork_area = placements.iter().map(|p| p.width_mm * p.height_mm).sum::<f64>();
+        let sheet_area = usable.w * usable.h * sheet_count as f64;
+        return Ok(ImpositionPlan {
+            placements, sheet_count, total_copies: d.copies as usize,
+            utilization_percent: if sheet_area > 0.0 { artwork_area / sheet_area * 100.0 } else { 0.0 },
+        });
+    }
 
+    // Mixed-design jobs: retain the collision-safe MaxRects planner.
     let bleed = settings.bleed_mm;
     let mut items = Vec::new();
     for d in designs {
-        if !d.width_mm.is_finite() || !d.height_mm.is_finite()
-            || d.width_mm <= 0.0 || d.height_mm <= 0.0 {
-            return Err(PlanError::InvalidDesign { id: d.id });
-        }
         for copy in 0..d.copies {
-            items.push(Instance {
-                id: d.id, copy, w: d.width_mm + 2.0 * bleed,
+            items.push(Instance { id: d.id, copy, w: d.width_mm + 2.0 * bleed,
                 h: d.height_mm + 2.0 * bleed, rotate: d.allow_rotation,
-                gutter_x: settings.gutter_x_mm, gutter_y: settings.gutter_y_mm,
-            });
+                gutter_x: settings.gutter_x_mm, gutter_y: settings.gutter_y_mm });
         }
     }
     let total = items.len();
-    items.sort_by(|a, b| {
-        (b.w * b.h).total_cmp(&(a.w * a.h))
-            .then_with(|| b.w.max(b.h).total_cmp(&a.w.max(a.h)))
-    });
-
+    items.sort_by(|a,b| (b.w*b.h).total_cmp(&(a.w*a.h)).then_with(|| b.w.max(b.h).total_cmp(&a.w.max(a.h))));
     let mut sheets: Vec<Vec<Rect>> = Vec::new();
     let mut placements = Vec::with_capacity(total);
     let mut artwork_area = 0.0;
     for item in items {
-        let mut best: Option<(usize, Candidate)> = None;
-        for (sheet_index, free) in sheets.iter().enumerate() {
-            for (free_index, rect) in free.iter().copied().enumerate() {
-                for rotate in [false, true] {
-                    let Some(c) = candidate(rect, item, rotate, free_index) else { continue; };
-                    let score = (c.short_side, c.long_side);
-                    let replace = best.as_ref().is_none_or(|(_, old)| score < (old.short_side, old.long_side));
-                    if replace { best = Some((sheet_index, c)); }
+        let mut best: Option<(usize,Candidate)> = None;
+        for (si, free) in sheets.iter().enumerate() {
+            for (fi, rect) in free.iter().copied().enumerate() {
+                for rotate in [false,true] {
+                    if let Some(c) = candidate(rect,item,rotate,fi) {
+                        let score=(c.short_side,c.long_side);
+                        if best.as_ref().is_none_or(|(_,old)| score < (old.short_side,old.long_side)) { best=Some((si,c)); }
+                    }
                 }
             }
         }
-        let (sheet_index, c) = if let Some(best) = best {
-            best
-        } else {
-            let Some(c) = candidate(usable, item, false, 0)
-                .or_else(|| candidate(usable, item, true, 0)) else {
-                    return Err(PlanError::DoesNotFit {
-                        id: item.id,
-                        width_mm: item.w - 2.0 * bleed,
-                        height_mm: item.h - 2.0 * bleed,
-                    });
-                };
-            sheets.push(vec![usable]);
-            (sheets.len() - 1, c)
+        let (si,c)=if let Some(v)=best { v } else {
+            let Some(c)=candidate(usable,item,false,0).or_else(|| candidate(usable,item,true,0)) else {
+                return Err(PlanError::DoesNotFit { id:item.id,width_mm:item.w-2.0*bleed,height_mm:item.h-2.0*bleed });
+            };
+            sheets.push(vec![usable]); (sheets.len()-1,c)
         };
-        let free = sheets[sheet_index][c.free_index];
-        let outer = Rect { x: free.x, y: free.y, w: c.w, h: c.h };
-        sheets[sheet_index] = split_free_rects(&sheets[sheet_index], outer);
-        placements.push(ObjectPlacement {
-            design_id: item.id,
-            copy_index: item.copy,
-            sheet_index,
-            x_mm: outer.x + bleed,
-            y_mm: outer.y + bleed,
-            width_mm: c.w - settings.gutter_x_mm - 2.0 * bleed,
-            height_mm: c.h - settings.gutter_y_mm - 2.0 * bleed,
-            rotated: c.rotated,
-        });
-        let (trim_w, trim_h) = if c.rotated { (item.h - 2.0 * bleed, item.w - 2.0 * bleed) } else { (item.w - 2.0 * bleed, item.h - 2.0 * bleed) };
-        artwork_area += trim_w * trim_h;
+        let free=sheets[si][c.free_index];
+        let outer=Rect{x:free.x,y:free.y,w:c.w,h:c.h};
+        sheets[si]=split_free_rects(&sheets[si],outer);
+        placements.push(ObjectPlacement { design_id:item.id,copy_index:item.copy,sheet_index:si,
+            x_mm:outer.x+bleed,y_mm:outer.y+bleed,
+            width_mm:c.w-settings.gutter_x_mm-2.0*bleed,
+            height_mm:c.h-settings.gutter_y_mm-2.0*bleed,rotated:c.rotated });
+        let (tw,th)=if c.rotated {(item.h-2.0*bleed,item.w-2.0*bleed)} else {(item.w-2.0*bleed,item.h-2.0*bleed)};
+        artwork_area+=tw*th;
     }
-    let sheet_area = usable.w * usable.h * sheets.len() as f64;
-    Ok(ImpositionPlan {
-        placements,
-        sheet_count: sheets.len(),
-        total_copies: total,
-        utilization_percent: if sheet_area > 0.0 { artwork_area / sheet_area * 100.0 } else { 0.0 },
-    })
+    let sheet_area=usable.w*usable.h*sheets.len() as f64;
+    Ok(ImpositionPlan { placements,sheet_count:sheets.len(),total_copies:total,
+        utilization_percent:if sheet_area>0.0 {artwork_area/sheet_area*100.0} else {0.0} })
 }
 
 #[cfg(test)]

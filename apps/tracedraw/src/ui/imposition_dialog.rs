@@ -47,10 +47,16 @@ pub struct State {
 
 impl State {
     pub fn from_selection(shapes: Vec<Shape>) -> Option<Self> {
-        let first = DesignEntry::from_shapes(1, shapes, 10)?;
+        // Each top-level selected shape is a separate design. A Group remains
+        // one Shape, so its children stay together as one production unit.
+        let designs: Vec<DesignEntry> = shapes.into_iter().enumerate()
+            .filter_map(|(index, shape)| DesignEntry::from_shapes(index as u64 + 1, vec![shape], 10))
+            .collect();
+        if designs.is_empty() { return None; }
+        let next_design_id = designs.iter().map(|design| design.id).max().unwrap_or(0).saturating_add(1);
         Some(Self {
-            designs: vec![first],
-            next_design_id: 2,
+            designs,
+            next_design_id,
             sheet_width_mm: 297.0,
             sheet_height_mm: 420.0,
             margin_x_mm: 5.0,
@@ -67,11 +73,17 @@ impl State {
     }
 
     fn add_selection(&mut self, shapes: Vec<Shape>) -> bool {
-        let id = self.next_design_id;
-        let Some(design) = DesignEntry::from_shapes(id, shapes, 1) else { return false; };
-        self.designs.push(design);
-        self.next_design_id = self.next_design_id.saturating_add(1);
-        true
+        if shapes.is_empty() { return false; }
+        let mut added = false;
+        for shape in shapes {
+            let id = self.next_design_id;
+            self.next_design_id = self.next_design_id.saturating_add(1);
+            if let Some(design) = DesignEntry::from_shapes(id, vec![shape], 1) {
+                self.designs.push(design);
+                added = true;
+            }
+        }
+        added
     }
 }
 

@@ -217,7 +217,7 @@ pub fn plan(designs: &[DesignSpec], settings: SheetSettings) -> Result<Impositio
 
     let mut sheets: Vec<Vec<Rect>> = Vec::new();
     let mut placements = Vec::with_capacity(total);
-    let mut used_area = 0.0;
+    let mut artwork_area = 0.0;
     for item in items {
         let mut best: Option<(usize, Candidate)> = None;
         for (sheet_index, free) in sheets.iter().enumerate() {
@@ -257,14 +257,15 @@ pub fn plan(designs: &[DesignSpec], settings: SheetSettings) -> Result<Impositio
             height_mm: c.h - settings.gutter_y_mm - 2.0 * bleed,
             rotated: c.rotated,
         });
-        used_area += c.w * c.h;
+        let (trim_w, trim_h) = if c.rotated { (item.h - 2.0 * bleed, item.w - 2.0 * bleed) } else { (item.w - 2.0 * bleed, item.h - 2.0 * bleed) };
+        artwork_area += trim_w * trim_h;
     }
     let sheet_area = usable.w * usable.h * sheets.len() as f64;
     Ok(ImpositionPlan {
         placements,
         sheet_count: sheets.len(),
         total_copies: total,
-        utilization_percent: if sheet_area > 0.0 { used_area / sheet_area * 100.0 } else { 0.0 },
+        utilization_percent: if sheet_area > 0.0 { artwork_area / sheet_area * 100.0 } else { 0.0 },
     })
 }
 
@@ -303,6 +304,28 @@ mod tests {
             SheetSettings::default(),
         );
         assert!(matches!(result, Err(PlanError::DoesNotFit { id: 9, .. })));
+    }
+
+    #[test]
+    fn rotated_placement_reports_the_rotated_trim_size() {
+        let result = plan(
+            &[DesignSpec { id: 11, width_mm: 40.0, height_mm: 80.0, copies: 1, allow_rotation: true }],
+            SheetSettings { width_mm: 90.0, height_mm: 50.0, margin_left_mm: 0.0, margin_right_mm: 0.0, margin_top_mm: 0.0, margin_bottom_mm: 0.0, gutter_x_mm: 0.0, gutter_y_mm: 0.0, bleed_mm: 0.0 },
+        ).unwrap();
+        let p = result.placements[0];
+        assert!(p.rotated);
+        assert_eq!((p.width_mm, p.height_mm), (80.0, 40.0));
+    }
+
+    #[test]
+    fn zero_copies_produce_no_empty_sheet() {
+        let result = plan(
+            &[DesignSpec { id: 12, width_mm: 40.0, height_mm: 30.0, copies: 0, allow_rotation: false }],
+            SheetSettings::default(),
+        ).unwrap();
+        assert_eq!(result.total_copies, 0);
+        assert_eq!(result.sheet_count, 0);
+        assert!(result.placements.is_empty());
     }
 
     #[test]

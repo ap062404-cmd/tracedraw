@@ -63,6 +63,7 @@ pub enum PlanError {
     InvalidMargins,
     InvalidDesign { id: u64 },
     DoesNotFit { id: u64, width_mm: f64, height_mm: f64 },
+    InvalidPlacementSheet { index: usize, sheet_count: usize },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -219,6 +220,24 @@ pub fn build_document(
         }
     }
     for placement in &plan.placements {
+        if placement.sheet_index >= plan.sheet_count {
+            return Err(PlanError::InvalidPlacementSheet {
+                index: placement.sheet_index,
+                sheet_count: plan.sheet_count,
+            });
+        }
+        let placement_values = [
+            placement.x_mm,
+            placement.y_mm,
+            placement.width_mm,
+            placement.height_mm,
+        ];
+        if placement_values.iter().any(|v| !v.is_finite())
+            || placement.width_mm <= 0.0
+            || placement.height_mm <= 0.0
+        {
+            return Err(PlanError::InvalidDesign { id: placement.design_id });
+        }
         let design = designs.iter().find(|d| d.id == placement.design_id)
             .ok_or(PlanError::InvalidDesign { id: placement.design_id })?;
         if design.shapes.is_empty() {

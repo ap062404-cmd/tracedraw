@@ -168,6 +168,105 @@ fn split_free_rects(free: &[Rect], used: Rect) -> Vec<Rect> {
     out.into_iter().zip(keep).filter_map(|(r, keep)| keep.then_some(r)).collect()
 }
 
+/// A design unit is one selected object or group of objects.
+#[derive(Debug, Clone)]
+pub struct DesignArtwork {
+    pub id: u64,
+    pub shapes: Vec<tracedraw_core::Shape>,
+}
+
+/// Build a separate production document from a completed plan.
+///
+/// The source shapes are expected in page coordinates (as returned by
+/// App::selected_shapes). Each placement gets fresh object IDs. The source
+/// document is never mutated.
+pub fn build_document(
+    title: &str,
+    sheet: SheetSettings,
+    plan: &ImpositionPlan,
+    designs: &[DesignArtwork],
+) -> Result<tracedraw_core::Document, PlanError> {
+    use tracedraw_core::{Affine, Document, Layer, Page, Point, Shape, Size};
+
+    if sheet.width_mm <= 0.0 || sheet.height_mm <= 0.0
+        || !sheet.width_mm.is_finite() || !sheet.height_mm.is_finite()
+    {
+        return Err(PlanError::InvalidSheet);
+    }
+    let mut doc = Document::new(
+        title,
+        Size::new(sheet.width_mm, sheet.height_mm),
+    );
+    if plan.sheet_count == 0 {
+        return Ok(doc);
+    }
+    let first_page_id = doc.pages[0].id;
+    for sheet_index in 0..plan.sheet_count {
+        if sheet_index == 0 {
+            let page = &mut doc.pages[0];
+            page.name = format!("Sheet {}", sheet_index + 1);
+            page.size = Size::new(sheet.width_mm, sheet.height_mm);
+        } else {
+            let page_id = doc.ids_mut().page();
+            let layer_id = doc.ids_mut().layer();
+            doc.pages.push(Page {
+                id: page_id,
+                name: format!("Sheet {}", sheet_index + 1),
+                size: Size::new(sheet.width_mm, sheet.height_mm),
+                layers: vec![Layer::new(layer_id, "Artwork")],
+                guides: Vec::new(),
+                background: None,
+            });
+        }
+    }
+    let _ = first_page_id;
+    for placement in &plan.placements {
+        let design = designs.iter().find(|d| d.id == placement.design_id)
+            .ok_or(PlanError::InvalidDesign { id: placement.design_id })?;
+        if design.shapes.is_empty() {
+            return Err(PlanError::InvalidDesign { id: placement.design_id });
+        }
+        let source_bounds = design.shapes.iter().map(Shape::bounds)
+            .reduce(|a, b| a.union(b))
+            .ok_or(PlanError::InvalidDesign { id: placement.design_id })?;
+        let target_y = sheet.height_mm - placement.y_mm - placement.height_mm;
+        let source_center = source_bounds.center();
+        let angle = if placement.rotated { std::f64::consts::FRAC_PI_2 } else { 0.0 };
+        let rotate_about_center = Affine::translate((source_center.x, source_center.y))
+            * Affine::rotate(angle)
+            * Affine::translate((-source_center.x, -source_center.y));
+        let rotated_corners = [
+            Point::new(source_bounds.x0, source_bounds.y0),
+            Point::new(source_bounds.x1, source_bounds.y0),
+            Point::new(source_bounds.x1, source_bounds.y1),
+            Point::new(source_bounds.x0, source_bounds.y1),
+        ].map(|p| rotate_about_center * p);
+        let rotated_bounds = tracedraw_core::Rect::from_points(
+            rotated_corners[0], rotated_corners[0]
+        ).union(
+            rotated_corners[1..].iter().fold(
+                tracedraw_core::Rect::from_points(rotated_corners[0], rotated_corners[0]),
+                |bounds, p| bounds.union(tracedraw_core::Rect::from_points(*p, *p)),
+            )
+        );
+        let move_to_sheet = Affine::translate((
+            placement.x_mm - rotated_bounds.x0,
+            target_y - rotated_bounds.y0,
+        ));
+        let world = move_to_sheet * rotate_about_center;
+        let page = &mut doc.pages[placement.sheet_index];
+        let layer = page.layers.first_mut().expect("each output page has a layer");
+        for original in &design.shapes {
+            let mut shape = original.clone();
+            shape.id = doc.ids_mut().shape();
+            shape.uid = None;
+            shape.transform = world * shape.transform;
+            layer.shapes.push(shape);
+        }
+    }
+    Ok(doc)
+}
+
 /// Pack designs with a MaxRects best-short-side-fit heuristic.
 ///
 /// Each selected design is treated as one production unit, even when it

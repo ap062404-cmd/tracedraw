@@ -61,6 +61,56 @@ impl State {
     }
 }
 
+
+/// Draw a compact first-sheet preview using the exact placement coordinates
+/// produced by the planner. This is a visual aid, not an editable canvas.
+fn draw_preview(ui: &mut egui::Ui, plan: &object_imposition::ImpositionPlan, sheet: SheetSettings) {
+    use egui::{Align2, Color32, FontId, Stroke};
+    let available = egui::vec2(380.0, 230.0);
+    let (outer, painter) = ui.allocate_painter(available, egui::Sense::hover());
+    let page_w = sheet.width_mm as f32;
+    let page_h = sheet.height_mm as f32;
+    if page_w <= 0.0 || page_h <= 0.0 { return; }
+    let pad = 12.0;
+    let scale = ((outer.rect.width() - pad * 2.0) / page_w)
+        .min((outer.rect.height() - pad * 2.0) / page_h);
+    let w = page_w * scale;
+    let h = page_h * scale;
+    let page = egui::Rect::from_center_size(outer.rect.center(), egui::vec2(w, h));
+    painter.rect_filled(page, 2.0, Color32::from_rgb(250, 250, 246));
+    painter.rect_stroke(page, 2.0, Stroke::new(1.0, Color32::DARK_GRAY), egui::StrokeKind::Inside);
+    let colors = [
+        Color32::from_rgb(76, 132, 190),
+        Color32::from_rgb(74, 155, 116),
+        Color32::from_rgb(194, 126, 65),
+        Color32::from_rgb(151, 111, 184),
+        Color32::from_rgb(190, 92, 112),
+        Color32::from_rgb(90, 150, 155),
+    ];
+    for placement in plan.placements.iter().filter(|p| p.sheet_index == 0) {
+        let x = page.left() + placement.x_mm as f32 * scale;
+        let y = page.top() + placement.y_mm as f32 * scale;
+        let rect = egui::Rect::from_min_size(
+            egui::pos2(x, y),
+            egui::vec2(placement.width_mm as f32 * scale, placement.height_mm as f32 * scale),
+        );
+        let color = colors[(placement.design_id as usize - 1) % colors.len()];
+        painter.rect_filled(rect, 1.0, color);
+        painter.rect_stroke(rect, 1.0, Stroke::new(0.7, Color32::WHITE), egui::StrokeKind::Inside);
+        if rect.width() > 24.0 && rect.height() > 14.0 {
+            painter.text(rect.center(), Align2::CENTER_CENTER,
+                format!("D{}", placement.design_id), FontId::proportional(10.0), Color32::WHITE);
+        }
+    }
+    painter.text(
+        egui::pos2(outer.rect.left() + 4.0, outer.rect.bottom() - 2.0),
+        Align2::LEFT_BOTTOM,
+        "Sheet 1 preview",
+        FontId::proportional(10.0),
+        ui.visuals().weak_text_color(),
+    );
+}
+
 pub fn dialog(app: &mut App, ctx: &Context, state: &mut State, close: &mut bool) {
     let mut add_selected = false;
     let mut remove_design = None;
@@ -138,6 +188,9 @@ pub fn dialog(app: &mut App, ctx: &Context, state: &mut State, close: &mut bool)
             }).collect();
             match object_imposition::plan(&specs, settings) {
                 Ok(plan) => {
+                    ui.separator();
+                    ui.heading("Layout preview");
+                    draw_preview(ui, &plan, settings);
                     ui.separator();
                     ui.label(format!(
                         "{} copies across {} design(s) · {} sheet(s) · {:.1}% artwork utilization",

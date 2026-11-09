@@ -610,6 +610,37 @@ mod tests {
     }
 
     #[test]
+    fn equal_size_designs_share_one_regular_grid_in_design_order() {
+        let settings = SheetSettings {
+            width_mm: 320.0, height_mm: 480.0,
+            margin_left_mm: 5.0, margin_right_mm: 5.0,
+            margin_top_mm: 5.0, margin_bottom_mm: 5.0,
+            gutter_x_mm: 2.0, gutter_y_mm: 2.0, bleed_mm: 0.0,
+        };
+        let result = plan(
+            &[
+                DesignSpec { id: 10, width_mm: 90.0, height_mm: 55.0, copies: 10, allow_rotation: true },
+                DesignSpec { id: 20, width_mm: 90.0, height_mm: 55.0, copies: 10, allow_rotation: true },
+            ],
+            settings,
+        ).unwrap();
+        assert_eq!(result.total_copies, 20);
+        assert_eq!(result.sheet_count, 1);
+        assert_eq!(result.placements.len(), 20);
+        assert!(result.placements[..10].iter().all(|p| p.design_id == 10));
+        assert!(result.placements[10..].iter().all(|p| p.design_id == 20));
+        assert!(result.placements.iter().all(|p| p.rotated));
+        let mut xs: Vec<_> = result.placements.iter().map(|p| p.x_mm).collect();
+        let mut ys: Vec<_> = result.placements.iter().map(|p| p.y_mm).collect();
+        xs.sort_by(f64::total_cmp);
+        ys.sort_by(f64::total_cmp);
+        xs.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+        ys.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+        assert_eq!(xs.len(), 5);
+        assert_eq!(ys.len(), 4);
+    }
+
+    #[test]
     fn repeats_master_design_on_one_sheet() {
         let result = plan(
             &[DesignSpec { id: 7, width_mm: 90.0, height_mm: 50.0, copies: 4, allow_rotation: false }],

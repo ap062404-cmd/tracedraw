@@ -546,9 +546,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn single_design_uses_calculator_style_regular_grid_and_spills_to_next_sheet() {
+    fn business_cards_fit_twenty_five_up_on_a3_plus() {
         let settings = SheetSettings {
-            width_mm: 297.0, height_mm: 420.0,
+            width_mm: 320.0, height_mm: 480.0,
             margin_left_mm: 5.0, margin_right_mm: 5.0,
             margin_top_mm: 5.0, margin_bottom_mm: 5.0,
             gutter_x_mm: 2.0, gutter_y_mm: 2.0, bleed_mm: 0.0,
@@ -558,12 +558,10 @@ mod tests {
             settings,
         ).unwrap();
         assert_eq!(result.total_copies, 25);
-        assert_eq!(result.sheet_count, 2);
-        assert_eq!(result.placements.iter().filter(|p| p.sheet_index == 0).count(), 21);
-        assert!(result.placements.iter().take(21).all(|p| !p.rotated));
-        for row in result.placements.iter().take(21).collect::<Vec<_>>().chunks(3) {
-            assert!(row.windows(2).all(|pair| (pair[1].x_mm - pair[0].x_mm - 92.0).abs() < 1e-7));
-        }
+        assert_eq!(result.sheet_count, 1);
+        assert_eq!(result.placements.len(), 25);
+        assert!(result.placements.iter().all(|p| p.rotated));
+        assert!(result.placements.iter().all(|p| (p.width_mm, p.height_mm) == (55.0, 90.0)));
     }
 
     #[test]

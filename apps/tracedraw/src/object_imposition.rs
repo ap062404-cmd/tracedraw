@@ -465,6 +465,60 @@ mod tests {
     }
 
     #[test]
+    fn placements_stay_inside_sheet_and_do_not_overlap() {
+        let settings = SheetSettings {
+            width_mm: 210.0,
+            height_mm: 148.0,
+            margin_left_mm: 5.0,
+            margin_right_mm: 5.0,
+            margin_top_mm: 5.0,
+            margin_bottom_mm: 5.0,
+            gutter_x_mm: 3.0,
+            gutter_y_mm: 4.0,
+            bleed_mm: 2.0,
+        };
+        let result = plan(
+            &[
+                DesignSpec { id: 1, width_mm: 70.0, height_mm: 40.0, copies: 4, allow_rotation: true },
+                DesignSpec { id: 2, width_mm: 35.0, height_mm: 25.0, copies: 3, allow_rotation: false },
+            ],
+            settings,
+        ).unwrap();
+
+        assert_eq!(result.total_copies, 7);
+        for (i, a) in result.placements.iter().enumerate() {
+            let outer_a = Rect {
+                x: a.x_mm - settings.bleed_mm,
+                y: a.y_mm - settings.bleed_mm,
+                w: a.width_mm + 2.0 * settings.bleed_mm + settings.gutter_x_mm,
+                h: a.height_mm + 2.0 * settings.bleed_mm + settings.gutter_y_mm,
+            };
+            assert!(outer_a.x >= settings.margin_left_mm - 1e-7);
+            assert!(outer_a.y >= settings.margin_top_mm - 1e-7);
+            assert!(outer_a.right() <= settings.width_mm - settings.margin_right_mm + 1e-7);
+            assert!(outer_a.bottom() <= settings.height_mm - settings.margin_bottom_mm + 1e-7);
+            for b in result.placements.iter().skip(i + 1).filter(|b| b.sheet_index == a.sheet_index) {
+                let outer_b = Rect {
+                    x: b.x_mm - settings.bleed_mm,
+                    y: b.y_mm - settings.bleed_mm,
+                    w: b.width_mm + 2.0 * settings.bleed_mm + settings.gutter_x_mm,
+                    h: b.height_mm + 2.0 * settings.bleed_mm + settings.gutter_y_mm,
+                };
+                assert!(!outer_a.intersects(outer_b), "placements overlap: {a:?} and {b:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_non_finite_sheet_settings() {
+        let result = plan(
+            &[DesignSpec { id: 4, width_mm: 20.0, height_mm: 20.0, copies: 1, allow_rotation: false }],
+            SheetSettings { width_mm: f64::NAN, ..SheetSettings::default() },
+        );
+        assert_eq!(result, Err(PlanError::InvalidSheet));
+    }
+
+    #[test]
     fn bleed_is_kept_outside_trim_dimensions() {
         let result = plan(
             &[DesignSpec { id: 3, width_mm: 40.0, height_mm: 30.0, copies: 1, allow_rotation: false }],

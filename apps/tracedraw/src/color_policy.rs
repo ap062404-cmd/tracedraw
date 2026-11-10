@@ -35,8 +35,23 @@ fn profile_dirs() -> Vec<std::path::PathBuf> {
         dirs.push("/usr/local/share/color/icc".into());
         // colord keeps profiles installed through desktop colour management here.
         dirs.push("/var/lib/colord/icc".into());
-        if let Some(home) = crate::files::home_dir() {
+        // Follow the XDG base-directory specification as well as the
+        // conventional locations. Desktop environments may install colour
+        // profiles under a non-default data home or data prefix.
+        if let Some(data_home) = std::env::var_os("XDG_DATA_HOME") {
+            dirs.push(std::path::PathBuf::from(data_home).join("color/icc"));
+        } else if let Some(home) = crate::files::home_dir() {
             dirs.push(home.join(".local/share/color/icc"));
+        }
+        if let Some(data_dirs) = std::env::var_os("XDG_DATA_DIRS") {
+            dirs.extend(
+                std::env::split_paths(&data_dirs).map(|dir| dir.join("color/icc")),
+            );
+        } else {
+            dirs.push("/usr/local/share/color/icc".into());
+            dirs.push("/usr/share/color/icc".into());
+        }
+        if let Some(home) = crate::files::home_dir() {
             dirs.push(home.join(".local/share/icc"));
             dirs.push(home.join(".color/icc"));
         }
@@ -62,6 +77,8 @@ fn profile_dirs() -> Vec<std::path::PathBuf> {
         }
     }
 
+    dirs.sort();
+    dirs.dedup();
     dirs
 }
 

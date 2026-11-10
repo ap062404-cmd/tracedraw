@@ -316,11 +316,11 @@ pub fn build_document(
             let bottom = target_y;
             let top = target_y + placement.height_mm;
             // Crop marks sit outside the reserved bleed allowance, not
-            // inside the bleed artwork itself.
-            // The trim-to-trim gutter includes bleed on both sides.
-            // Keep 0.25 mm clear beyond each bleed edge; the remaining
-            // half-gutter is available for the mark. A 2 mm gutter therefore
-            // gives 0.75 mm marks, regardless of bleed width.
+            // inside the bleed artwork itself. The trim-to-trim distance
+            // includes bleed on both sides; keep 0.25 mm clear beyond each
+            // bleed edge and 0.25 mm clear at the gutter midpoint. With a
+            // 2 mm gutter this leaves 0.5 mm for each mark, regardless of
+            // the configured bleed width.
             let gap = sheet.bleed_mm + 0.25_f64;
             let length_x = crop_mark_length(sheet.gutter_x_mm);
             let length_y = crop_mark_length(sheet.gutter_y_mm);

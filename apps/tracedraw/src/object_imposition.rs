@@ -76,10 +76,10 @@ pub struct ImpositionPlan {
 
 /// Length available for a crop mark on one side of a gutter.
 ///
-/// The bleed allowance is already accounted for by the mark's offset from
-/// the trim edge, so it must not be subtracted from the gutter a second time.
+/// Reserve 0.25 mm after the bleed edge and another 0.25 mm at the
+/// gutter midpoint so marks from neighboring objects remain separated.
 fn crop_mark_length(gutter_mm: f64) -> f64 {
-    (gutter_mm * 0.5 - 0.25).clamp(0.0, 3.0)
+    (gutter_mm * 0.5 - 0.5).clamp(0.0, 3.0)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -609,8 +609,8 @@ mod tests {
 
     #[test]
     fn crop_mark_length_uses_half_gutter_after_clearance() {
-        assert!((crop_mark_length(2.0) - 0.75).abs() < 1e-9);
-        assert!((crop_mark_length(4.0) - 1.75).abs() < 1e-9);
+        assert!((crop_mark_length(2.0) - 0.5).abs() < 1e-9);
+        assert!((crop_mark_length(4.0) - 1.5).abs() < 1e-9);
         assert_eq!(crop_mark_length(0.0), 0.0);
         assert_eq!(crop_mark_length(0.4), 0.0);
         assert_eq!(crop_mark_length(10.0), 3.0);

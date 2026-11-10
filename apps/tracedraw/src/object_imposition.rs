@@ -574,6 +574,16 @@ pub fn plan(designs: &[DesignSpec], settings: SheetSettings) -> Result<Impositio
     }
     let total = items.len();
     items.sort_by(|a,b| (b.w*b.h).total_cmp(&(a.w*a.h)).then_with(|| b.w.max(b.h).total_cmp(&a.w.max(a.h))));
+    // Gutter is required only between neighboring designs, never between
+    // the final design and the sheet edge. Extend the packing workspace by
+    // one gutter to the right and bottom so padded instances can use that
+    // edge space without pushing their bleed outside the usable sheet.
+    let packing_area = Rect {
+        x: usable.x,
+        y: usable.y,
+        w: usable.w + settings.gutter_x_mm,
+        h: usable.h + settings.gutter_y_mm,
+    };
     let mut sheets: Vec<Vec<Rect>> = Vec::new();
     let mut placements = Vec::with_capacity(total);
     let mut artwork_area = 0.0;
@@ -590,10 +600,10 @@ pub fn plan(designs: &[DesignSpec], settings: SheetSettings) -> Result<Impositio
             }
         }
         let (si,c)=if let Some(v)=best { v } else {
-            let Some(c)=candidate(usable,item,false,0).or_else(|| candidate(usable,item,true,0)) else {
+            let Some(c)=candidate(packing_area,item,false,0).or_else(|| candidate(packing_area,item,true,0)) else {
                 return Err(PlanError::DoesNotFit { id:item.id,width_mm:item.w-2.0*bleed,height_mm:item.h-2.0*bleed });
             };
-            sheets.push(vec![usable]); (sheets.len()-1,c)
+            sheets.push(vec![packing_area]); (sheets.len()-1,c)
         };
         let free=sheets[si][c.free_index];
         let outer=Rect{x:free.x,y:free.y,w:c.w,h:c.h};
@@ -805,10 +815,19 @@ mod tests {
                 w: a.width_mm + 2.0 * settings.bleed_mm + settings.gutter_x_mm,
                 h: a.height_mm + 2.0 * settings.bleed_mm + settings.gutter_y_mm,
             };
-            assert!(outer_a.x >= settings.margin_left_mm - 1e-7);
-            assert!(outer_a.y >= settings.margin_top_mm - 1e-7);
-            assert!(outer_a.right() <= settings.width_mm - settings.margin_right_mm + 1e-7);
-            assert!(outer_a.bottom() <= settings.height_mm - settings.margin_bottom_mm + 1e-7);
+            // Bleed must stay inside the usable sheet. The trailing
+            // gutter may extend beyond its edge because it is not printable
+            // content and is not required after the final item.
+            let bleed_a = Rect {
+                x: a.x_mm - settings.bleed_mm,
+                y: a.y_mm - settings.bleed_mm,
+                w: a.width_mm + 2.0 * settings.bleed_mm,
+                h: a.height_mm + 2.0 * settings.bleed_mm,
+            };
+            assert!(bleed_a.x >= settings.margin_left_mm - 1e-7);
+            assert!(bleed_a.y >= settings.margin_top_mm - 1e-7);
+            assert!(bleed_a.right() <= settings.width_mm - settings.margin_right_mm + 1e-7);
+            assert!(bleed_a.bottom() <= settings.height_mm - settings.margin_bottom_mm + 1e-7);
             for b in result.placements.iter().skip(i + 1).filter(|b| b.sheet_index == a.sheet_index) {
                 let outer_b = Rect {
                     x: b.x_mm - settings.bleed_mm,
@@ -819,6 +838,35 @@ mod tests {
                 assert!(!outer_a.intersects(outer_b), "placements overlap: {a:?} and {b:?}");
             }
         }
+    }
+
+    #[test]
+    fn mixed_design_job_does_not_require_a_trailing_sheet_edge_gutter() {
+        let settings = SheetSettings {
+            width_mm: 100.0,
+            height_mm: 80.0,
+            margin_left_mm: 5.0,
+            margin_right_mm: 5.0,
+            margin_top_mm: 5.0,
+            margin_bottom_mm: 5.0,
+            gutter_x_mm: 2.0,
+            gutter_y_mm: 2.0,
+            bleed_mm: 0.0,
+        };
+        // A 90 mm design exactly fills the usable width. The second,
+        // different-size design has no copies, forcing the mixed-size path.
+        let result = plan(
+            &[
+                DesignSpec { id: 1, width_mm: 90.0, height_mm: 40.0, copies: 1, allow_rotation: false },
+                DesignSpec { id: 2, width_mm: 30.0, height_mm: 20.0, copies: 0, allow_rotation: false },
+            ],
+            settings,
+        ).unwrap();
+        assert_eq!(result.sheet_count, 1);
+        assert_eq!(result.placements.len(), 1);
+        let p = result.placements[0];
+        assert!((p.x_mm - 5.0).abs() < 1e-7);
+        assert!((p.x_mm + p.width_mm - 95.0).abs() < 1e-7);
     }
 
     #[test]

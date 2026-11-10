@@ -330,6 +330,13 @@ pub fn build_document(
                 let max_x = points[0].x.max(points[1].x);
                 let min_y = points[0].y.min(points[1].y);
                 let max_y = points[0].y.max(points[1].y);
+                // A gutter that is too narrow has no room for a crop mark.
+                // Do not add a zero-length path to the production document.
+                if (max_x - min_x).abs() <= 1e-7
+                    && (max_y - min_y).abs() <= 1e-7
+                {
+                    return;
+                }
                 if min_x < 0.0 || min_y < 0.0
                     || max_x > sheet.width_mm || max_y > sheet.height_mm
                 {

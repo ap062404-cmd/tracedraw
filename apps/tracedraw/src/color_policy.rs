@@ -23,21 +23,43 @@ pub struct FoundProfile {
     pub space: Space,
 }
 
-/// The folders where systems keep colour profiles.
+/// The folders where systems keep colour profiles. Keep the search
+/// platform-specific: scanning paths from other operating systems is
+/// harmless but obscures which locations TraceDraw actually supports.
 fn profile_dirs() -> Vec<std::path::PathBuf> {
-    let mut dirs: Vec<std::path::PathBuf> = vec![
-        "/usr/share/color/icc".into(),
-        "/usr/local/share/color/icc".into(),
-        "/Library/ColorSync/Profiles".into(),
-        "/System/Library/ColorSync/Profiles".into(),
-        r"C:\Windows\System32\spool\drivers\color".into(),
-    ];
-    if let Some(home) = crate::files::home_dir() {
-        dirs.push(home.join(".local/share/color/icc"));
-        dirs.push(home.join(".local/share/icc"));
-        dirs.push(home.join(".color/icc"));
-        dirs.push(home.join("Library/ColorSync/Profiles"));
+    let mut dirs = Vec::new();
+
+    #[cfg(target_os = "linux")]
+    {
+        dirs.push("/usr/share/color/icc".into());
+        dirs.push("/usr/local/share/color/icc".into());
+        if let Some(home) = crate::files::home_dir() {
+            dirs.push(home.join(".local/share/color/icc"));
+            dirs.push(home.join(".local/share/icc"));
+            dirs.push(home.join(".color/icc"));
+        }
     }
+
+    #[cfg(target_os = "windows")]
+    {
+        // Respect non-default Windows installations instead of assuming
+        // that the system drive is always C:.
+        if let Some(root) = std::env::var_os("WINDIR") {
+            dirs.push(std::path::PathBuf::from(root).join(
+                "System32/spool/drivers/color",
+            ));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        dirs.push("/Library/ColorSync/Profiles".into());
+        dirs.push("/System/Library/ColorSync/Profiles".into());
+        if let Some(home) = crate::files::home_dir() {
+            dirs.push(home.join("Library/ColorSync/Profiles"));
+        }
+    }
+
     dirs
 }
 

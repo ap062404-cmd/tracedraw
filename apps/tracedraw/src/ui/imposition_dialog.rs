@@ -1,6 +1,6 @@
 //! Object-based imposition dialog for print production.
 use crate::app::App;
-use crate::object_imposition::{self, DesignArtwork, DesignSpec, SheetSettings};
+use crate::object_imposition::{self, CropMarkSettings, DesignArtwork, DesignSpec, SheetSettings};
 use egui::Context;
 use tracedraw_core::Shape;
 
@@ -39,6 +39,9 @@ pub struct State {
     pub gutter_y_mm: f64,
     pub bleed_mm: f64,
     pub crop_marks: bool,
+    pub crop_mark_length_mm: f64,
+    pub crop_mark_offset_mm: f64,
+    pub crop_mark_width_mm: f64,
     pub preview_sheet_index: usize,
     cached_specs: Vec<DesignSpec>,
     cached_settings: Option<SheetSettings>,
@@ -65,6 +68,9 @@ impl State {
             gutter_y_mm: 2.0,
             bleed_mm: 0.0,
             crop_marks: true,
+            crop_mark_length_mm: 3.0,
+            crop_mark_offset_mm: 0.5,
+            crop_mark_width_mm: 0.2,
             preview_sheet_index: 0,
             cached_specs: Vec::new(),
             cached_settings: None,
@@ -229,6 +235,21 @@ pub fn dialog(app: &mut App, ctx: &Context, state: &mut State, close: &mut bool)
                         ui.add(crate::ui::field::NumField::new(&mut state.bleed_mm).range(0.0..=1000.0));
                         ui.checkbox(&mut state.crop_marks, "Crop marks");
                     });
+                    if state.crop_marks {
+                        ui.horizontal(|ui| {
+                            ui.label("Mark length");
+                            ui.add(crate::ui::field::NumField::new(&mut state.crop_mark_length_mm).range(0.0..=20.0));
+                            ui.label("Offset");
+                            ui.add(crate::ui::field::NumField::new(&mut state.crop_mark_offset_mm).range(0.0..=20.0));
+                            ui.label("mm");
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Line width");
+                            ui.add(crate::ui::field::NumField::new(&mut state.crop_mark_width_mm).range(0.05..=2.0));
+                            ui.label("mm");
+                        });
+                        ui.small("Crop-mark length is independent of gutter size. Marks that would overlap another design or leave the sheet are omitted.");
+                    }
                     ui.small("Bleed reserves space around each design; it does not extend artwork beyond the trim edge.");
 
                     let settings = SheetSettings {
@@ -322,7 +343,14 @@ pub fn dialog(app: &mut App, ctx: &Context, state: &mut State, close: &mut bool)
                 id: design.id,
                 shapes: design.shapes.clone(),
             }).collect();
-            match object_imposition::build_document("Imposition", settings, plan, &artwork, state.crop_marks) {
+            let crop_settings = CropMarkSettings {
+                length_mm: state.crop_mark_length_mm,
+                offset_mm: state.crop_mark_offset_mm,
+                stroke_width_mm: state.crop_mark_width_mm,
+            };
+            match object_imposition::build_document_with_crop_settings(
+                "Imposition", settings, plan, &artwork, state.crop_marks, crop_settings,
+            ) {
                 Ok(doc) => {
                     app.open_document(doc, None);
                     *close = true;

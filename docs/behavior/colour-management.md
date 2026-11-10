@@ -114,9 +114,10 @@ For Glow, the glutin config template does not explicitly request an sRGB
 framebuffer, and TraceDraw does not explicitly enable
 `GL_FRAMEBUFFER_SRGB`. The selected GL config's capabilities still need
 to be queried at runtime. For WGPU, eframe delegates surface and format
-selection to egui-wgpu; the actual selected surface format and its sRGB
-encoding must be inspected at runtime rather than inferred from the
-requested low-latency surface configuration.
+selection to egui-wgpu. TraceDraw now logs the selected WGPU surface
+format at startup and labels whether the format is sRGB-encoded. This
+identifies the renderer's surface encoding, but does not establish whether
+the desktop compositor applies the monitor profile.
 
 Neither renderer inspection alone establishes whether the desktop
 compositor applies the monitor profile. No monitor transform should be

@@ -90,6 +90,25 @@ CLI `tracedraw-cli icc <file>` prints a profile's class, spaces, version
 and the sRGB values of its primaries, which is how a profile is checked.
 The document stores the profile names used for its colours.
 
+## Display profile (monitor)
+
+The screen target of the ICC engine is the built-in sRGB profile. This is
+the application's working display target, not a detected monitor profile.
+The Color Management dialog's Default tab reports this distinction: the
+operating-system monitor ICC is not queried and monitor compensation is
+not active. The application therefore keeps its existing sRGB screen
+output and does not silently change document colour values.
+
+A monitor profile must not simply replace the engine's sRGB target. The
+desktop compositor may already apply the monitor profile, depending on
+the operating system, display server and renderer. Applying the same
+profile in TraceDraw as well could compensate twice. TraceDraw uses both
+the eframe/wgpu and eframe/glow desktop renderers, so a future monitor
+compensation path must establish the actual surface/output colour-space
+behaviour for both before enabling a transform. Until then, the monitor
+profile is diagnostic-only; working RGB/CMYK profiles, soft proof and
+PDF OutputIntent remain separate.
+
 ## PDF/X export
 
 Export > PDF offers PDF 1.4, PDF/X-1a:2003, PDF/X-3:2003 and PDF/X-4

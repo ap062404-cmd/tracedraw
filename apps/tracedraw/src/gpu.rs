@@ -527,6 +527,13 @@ pub fn note_renderer(cc: &eframe::CreationContext<'_>, mode: Mode) {
     let what = match cc.wgpu_render_state.as_ref() {
         Some(rs) => {
             let i = rs.adapter.get_info();
+            let format = rs.target_format;
+            let encoding = if format.is_srgb() {
+                "sRGB-encoded surface"
+            } else {
+                "non-sRGB surface encoding"
+            };
+            log::info!("WGPU surface format: {format:?} ({encoding})");
             format!("{} ({:?})", i.name, i.backend)
         }
         None => "OpenGL".to_string(),

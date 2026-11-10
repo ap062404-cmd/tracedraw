@@ -667,6 +667,54 @@ mod tests {
     }
 
     #[test]
+    fn unequal_copy_counts_keep_equal_size_designs_on_the_same_grid() {
+        let settings = SheetSettings {
+            width_mm: 320.0, height_mm: 480.0,
+            margin_left_mm: 5.0, margin_right_mm: 5.0,
+            margin_top_mm: 5.0, margin_bottom_mm: 5.0,
+            gutter_x_mm: 2.0, gutter_y_mm: 2.0, bleed_mm: 1.0,
+        };
+        let grouped = plan(
+            &[
+                DesignSpec { id: 31, width_mm: 90.0, height_mm: 55.0, copies: 3, allow_rotation: true },
+                DesignSpec { id: 32, width_mm: 90.0, height_mm: 55.0, copies: 7, allow_rotation: true },
+            ],
+            settings,
+        ).unwrap();
+        let reference = plan(
+            &[DesignSpec { id: 99, width_mm: 90.0, height_mm: 55.0, copies: 10, allow_rotation: true }],
+            settings,
+        ).unwrap();
+
+        assert_eq!(grouped.sheet_count, reference.sheet_count);
+        assert_eq!(grouped.placements.len(), 10);
+        assert_eq!(
+            grouped.placements.iter().map(|p| (p.x_mm, p.y_mm, p.width_mm, p.height_mm, p.rotated)).collect::<Vec<_>>(),
+            reference.placements.iter().map(|p| (p.x_mm, p.y_mm, p.width_mm, p.height_mm, p.rotated)).collect::<Vec<_>>(),
+        );
+        assert!(grouped.placements[..3].iter().all(|p| p.design_id == 31));
+        assert!(grouped.placements[3..].iter().all(|p| p.design_id == 32));
+
+        for (i, a) in grouped.placements.iter().enumerate() {
+            let a_rect = Rect {
+                x: a.x_mm - settings.bleed_mm,
+                y: a.y_mm - settings.bleed_mm,
+                w: a.width_mm + 2.0 * settings.bleed_mm,
+                h: a.height_mm + 2.0 * settings.bleed_mm,
+            };
+            for b in grouped.placements.iter().skip(i + 1).filter(|b| b.sheet_index == a.sheet_index) {
+                let b_rect = Rect {
+                    x: b.x_mm - settings.bleed_mm,
+                    y: b.y_mm - settings.bleed_mm,
+                    w: b.width_mm + 2.0 * settings.bleed_mm,
+                    h: b.height_mm + 2.0 * settings.bleed_mm,
+                };
+                assert!(!a_rect.intersects(b_rect), "grouped designs overlap: {a:?} and {b:?}");
+            }
+        }
+    }
+
+    #[test]
     fn repeats_master_design_on_one_sheet() {
         let result = plan(
             &[DesignSpec { id: 7, width_mm: 90.0, height_mm: 50.0, copies: 4, allow_rotation: false }],

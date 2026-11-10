@@ -620,12 +620,18 @@ pub fn plan(designs: &[DesignSpec], settings: SheetSettings) -> Result<Impositio
     // Keep the padded rectangles alongside placements so the mixed-size
     // heuristic can prefer extending the current design's block.
     let mut placed_outer: Vec<(u64, usize, Rect)> = Vec::with_capacity(total);
+    let mut design_rotations: std::collections::HashMap<u64, bool> = std::collections::HashMap::new();
     let mut artwork_area = 0.0;
     for item in items {
+        let rotation_options: &[bool] = match design_rotations.get(&item.id) {
+            Some(true) => &[true],
+            Some(false) => &[false],
+            None => &[false, true],
+        };
         let mut best: Option<(usize,Candidate,(u8,f64,f64))> = None;
         for (si, free) in sheets.iter().enumerate() {
             for (fi, rect) in free.iter().copied().enumerate() {
-                for rotate in [false,true] {
+                for &rotate in rotation_options {
                     if let Some(c) = candidate(rect,item,rotate,fi) {
                         let proposed = Rect { x: rect.x, y: rect.y, w: c.w, h: c.h };
                         // A same-design neighbor is preferred before local
@@ -661,11 +667,19 @@ pub fn plan(designs: &[DesignSpec], settings: SheetSettings) -> Result<Impositio
             }
         }
         let (si,c)=if let Some((si,c,_))=best { (si,c) } else {
-            let Some(c)=candidate(packing_area,item,false,0).or_else(|| candidate(packing_area,item,true,0)) else {
+            let new_sheet_candidate = match design_rotations.get(&item.id) {
+                Some(&rotate) => candidate(packing_area,item,rotate,0),
+                None => candidate(packing_area,item,false,0)
+                    .or_else(|| candidate(packing_area,item,true,0)),
+            };
+            let Some(c)=new_sheet_candidate else {
                 return Err(PlanError::DoesNotFit { id:item.id,width_mm:item.w-2.0*bleed,height_mm:item.h-2.0*bleed });
             };
             sheets.push(vec![packing_area]); (sheets.len()-1,c)
         };
+        // Rotation is selected once per design, not independently for each
+        // copy. This keeps every copy in a design block consistently oriented.
+        design_rotations.entry(item.id).or_insert(c.rotated);
         let free=sheets[si][c.free_index];
         let outer=Rect{x:free.x,y:free.y,w:c.w,h:c.h};
         sheets[si]=split_free_rects(&sheets[si],outer);
@@ -872,6 +886,33 @@ mod tests {
                 });
                 assert!(has_neighbor, "design {design_id} copy {} is isolated", placement.copy_index);
             }
+        }
+    }
+
+    #[test]
+    fn mixed_size_design_copies_keep_one_rotation_orientation() {
+        let settings = SheetSettings {
+            width_mm: 180.0, height_mm: 110.0,
+            margin_left_mm: 5.0, margin_right_mm: 5.0,
+            margin_top_mm: 5.0, margin_bottom_mm: 5.0,
+            gutter_x_mm: 2.0, gutter_y_mm: 2.0, bleed_mm: 0.0,
+        };
+        let result = plan(
+            &[
+                DesignSpec { id: 71, width_mm: 75.0, height_mm: 35.0, copies: 3, allow_rotation: true },
+                DesignSpec { id: 72, width_mm: 25.0, height_mm: 18.0, copies: 5, allow_rotation: true },
+            ],
+            settings,
+        ).unwrap();
+
+        for design_id in [71, 72] {
+            let orientations: Vec<_> = result.placements.iter()
+                .filter(|p| p.design_id == design_id)
+                .map(|p| p.rotated)
+                .collect();
+            assert!(!orientations.is_empty());
+            assert!(orientations.iter().all(|&rotated| rotated == orientations[0]),
+                "design {design_id} copies use inconsistent rotation: {orientations:?}");
         }
     }
 

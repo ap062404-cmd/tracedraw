@@ -586,20 +586,50 @@ pub fn plan(designs: &[DesignSpec], settings: SheetSettings) -> Result<Impositio
     };
     let mut sheets: Vec<Vec<Rect>> = Vec::new();
     let mut placements = Vec::with_capacity(total);
+    // Keep the padded rectangles alongside placements so the mixed-size
+    // heuristic can prefer extending the current design's block.
+    let mut placed_outer: Vec<(u64, usize, Rect)> = Vec::with_capacity(total);
     let mut artwork_area = 0.0;
     for item in items {
-        let mut best: Option<(usize,Candidate)> = None;
+        let mut best: Option<(usize,Candidate,(u8,f64,f64))> = None;
         for (si, free) in sheets.iter().enumerate() {
             for (fi, rect) in free.iter().copied().enumerate() {
                 for rotate in [false,true] {
                     if let Some(c) = candidate(rect,item,rotate,fi) {
-                        let score=(c.short_side,c.long_side);
-                        if best.as_ref().is_none_or(|(_,old)| score < (old.short_side,old.long_side)) { best=Some((si,c)); }
+                        let proposed = Rect { x: rect.x, y: rect.y, w: c.w, h: c.h };
+                        // A same-design neighbor is preferred before local
+                        // free-rectangle fit. This keeps copies together
+                        // instead of scattering them into unrelated gaps.
+                        let extends_group = placed_outer.iter().any(|(id, sheet, placed)| {
+                            if *id != item.id || *sheet != si { return false; }
+                            let horizontal_touch =
+                                (proposed.x - placed.right()).abs() <= 1e-6
+                                || (placed.x - proposed.right()).abs() <= 1e-6;
+                            let vertical_overlap =
+                                proposed.y < placed.bottom() - 1e-6
+                                && proposed.bottom() > placed.y + 1e-6;
+                            let vertical_touch =
+                                (proposed.y - placed.bottom()).abs() <= 1e-6
+                                || (placed.y - proposed.bottom()).abs() <= 1e-6;
+                            let horizontal_overlap =
+                                proposed.x < placed.right() - 1e-6
+                                && proposed.right() > placed.x + 1e-6;
+                            (horizontal_touch && vertical_overlap)
+                                || (vertical_touch && horizontal_overlap)
+                        });
+                        let score = (
+                            if extends_group { 0 } else { 1 },
+                            c.short_side,
+                            c.long_side,
+                        );
+                        if best.as_ref().is_none_or(|(_,_,old)| score < *old) {
+                            best = Some((si,c,score));
+                        }
                     }
                 }
             }
         }
-        let (si,c)=if let Some(v)=best { v } else {
+        let (si,c)=if let Some((si,c,_))=best { (si,c) } else {
             let Some(c)=candidate(packing_area,item,false,0).or_else(|| candidate(packing_area,item,true,0)) else {
                 return Err(PlanError::DoesNotFit { id:item.id,width_mm:item.w-2.0*bleed,height_mm:item.h-2.0*bleed });
             };
@@ -608,6 +638,7 @@ pub fn plan(designs: &[DesignSpec], settings: SheetSettings) -> Result<Impositio
         let free=sheets[si][c.free_index];
         let outer=Rect{x:free.x,y:free.y,w:c.w,h:c.h};
         sheets[si]=split_free_rects(&sheets[si],outer);
+        placed_outer.push((item.id, si, outer));
         placements.push(ObjectPlacement { design_id:item.id,copy_index:item.copy,sheet_index:si,
             x_mm:outer.x+bleed,y_mm:outer.y+bleed,
             width_mm:c.w-settings.gutter_x_mm-2.0*bleed,

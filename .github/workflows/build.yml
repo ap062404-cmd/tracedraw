@@ -72,6 +72,12 @@ jobs:
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             name: linux-x86_64
+          # Keep 32-bit Windows release support, but skip it on pull requests
+          # so day-to-day development only builds Windows/Linux x86_64.
+          - os: windows-latest
+            target: i686-pc-windows-msvc
+            name: windows-x86
+    if: github.event_name != 'pull_request' || matrix.target != 'i686-pc-windows-msvc'
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5

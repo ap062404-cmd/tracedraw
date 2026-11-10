@@ -26,39 +26,59 @@ pub struct FoundProfile {
 /// The folders where systems keep colour profiles. Keep the search
 /// platform-specific: scanning paths from other operating systems is
 /// harmless but obscures which locations TraceDraw actually supports.
-fn profile_dirs() -> Vec<std::path::PathBuf> {
-    let mut dirs = Vec::new();
+#[cfg(target_os = "linux")]
+fn linux_profile_dirs(
+    home: Option<std::path::PathBuf>,
+    data_home: Option<std::path::PathBuf>,
+    data_dirs: Option<std::ffi::OsString>,
+) -> Vec<std::path::PathBuf> {
+    let mut dirs = vec![
+        std::path::PathBuf::from("/usr/share/color/icc"),
+        std::path::PathBuf::from("/usr/local/share/color/icc"),
+        // colord keeps profiles installed through desktop colour management here.
+        std::path::PathBuf::from("/var/lib/colord/icc"),
+    ];
 
+    if let Some(data_home) = data_home {
+        dirs.push(data_home.join("color/icc"));
+    } else if let Some(home) = &home {
+        dirs.push(home.join(".local/share/color/icc"));
+    }
+
+    if let Some(data_dirs) = data_dirs {
+        dirs.extend(std::env::split_paths(&data_dirs).map(|dir| dir.join("color/icc")));
+    } else {
+        // XDG's default data prefixes, in their documented order.
+        dirs.push("/usr/local/share/color/icc".into());
+        dirs.push("/usr/share/color/icc".into());
+    }
+
+    if let Some(home) = home {
+        dirs.push(home.join(".local/share/icc"));
+        dirs.push(home.join(".color/icc"));
+    }
+
+    dirs.sort();
+    dirs.dedup();
+    dirs
+}
+
+/// The folders where systems keep colour profiles. Keep the search
+/// platform-specific: scanning paths from other operating systems is
+/// harmless but obscures which locations TraceDraw actually supports.
+fn profile_dirs() -> Vec<std::path::PathBuf> {
     #[cfg(target_os = "linux")]
     {
-        dirs.push("/usr/share/color/icc".into());
-        dirs.push("/usr/local/share/color/icc".into());
-        // colord keeps profiles installed through desktop colour management here.
-        dirs.push("/var/lib/colord/icc".into());
-        // Follow the XDG base-directory specification as well as the
-        // conventional locations. Desktop environments may install colour
-        // profiles under a non-default data home or data prefix.
-        if let Some(data_home) = std::env::var_os("XDG_DATA_HOME") {
-            dirs.push(std::path::PathBuf::from(data_home).join("color/icc"));
-        } else if let Some(home) = crate::files::home_dir() {
-            dirs.push(home.join(".local/share/color/icc"));
-        }
-        if let Some(data_dirs) = std::env::var_os("XDG_DATA_DIRS") {
-            dirs.extend(
-                std::env::split_paths(&data_dirs).map(|dir| dir.join("color/icc")),
-            );
-        } else {
-            dirs.push("/usr/local/share/color/icc".into());
-            dirs.push("/usr/share/color/icc".into());
-        }
-        if let Some(home) = crate::files::home_dir() {
-            dirs.push(home.join(".local/share/icc"));
-            dirs.push(home.join(".color/icc"));
-        }
+        return linux_profile_dirs(
+            crate::files::home_dir(),
+            std::env::var_os("XDG_DATA_HOME").map(std::path::PathBuf::from),
+            std::env::var_os("XDG_DATA_DIRS"),
+        );
     }
 
     #[cfg(target_os = "windows")]
     {
+        let mut dirs = Vec::new();
         // Respect non-default Windows installations instead of assuming
         // that the system drive is always C:.
         if let Some(root) = std::env::var_os("WINDIR") {
@@ -66,20 +86,23 @@ fn profile_dirs() -> Vec<std::path::PathBuf> {
                 "System32/spool/drivers/color",
             ));
         }
+        return dirs;
     }
 
     #[cfg(target_os = "macos")]
     {
-        dirs.push("/Library/ColorSync/Profiles".into());
-        dirs.push("/System/Library/ColorSync/Profiles".into());
+        let mut dirs = vec![
+            std::path::PathBuf::from("/Library/ColorSync/Profiles"),
+            std::path::PathBuf::from("/System/Library/ColorSync/Profiles"),
+        ];
         if let Some(home) = crate::files::home_dir() {
             dirs.push(home.join("Library/ColorSync/Profiles"));
         }
+        return dirs;
     }
 
-    dirs.sort();
-    dirs.dedup();
-    dirs
+    #[allow(unreachable_code)]
+    Vec::new()
 }
 
 /// Every readable RGB, CMYK and grayscale profile in the system folders
@@ -448,6 +471,31 @@ impl FoundOrName {
 mod tests {
     use super::*;
     use tracedraw_core::icc::test_profiles as tp;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn xdg_profile_directories_follow_overrides_and_defaults() {
+        let home = Some(std::path::PathBuf::from("/home/tester"));
+        let custom_home = Some(std::path::PathBuf::from("/data/tester"));
+        let custom_dirs = Some(std::ffi::OsString::from("/opt/share:/srv/share"));
+        let dirs = linux_profile_dirs(home.clone(), custom_home, custom_dirs);
+        assert!(dirs.contains(&std::path::PathBuf::from("/data/tester/color/icc")));
+        assert!(dirs.contains(&std::path::PathBuf::from("/opt/share/color/icc")));
+        assert!(dirs.contains(&std::path::PathBuf::from("/srv/share/color/icc")));
+        assert!(dirs.contains(&std::path::PathBuf::from("/var/lib/colord/icc")));
+        assert!(!dirs.contains(&std::path::PathBuf::from("/home/tester/.local/share/color/icc")));
+
+        let defaults = linux_profile_dirs(home.clone(), None, None);
+        assert!(defaults.contains(&std::path::PathBuf::from("/home/tester/.local/share/color/icc")));
+        assert!(defaults.contains(&std::path::PathBuf::from("/usr/local/share/color/icc")));
+        assert!(defaults.contains(&std::path::PathBuf::from("/usr/share/color/icc")));
+        assert!(defaults.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(defaults.len(), {
+            let mut unique = defaults.clone();
+            unique.dedup();
+            unique.len()
+        });
+    }
 
     #[test]
     fn profile_directories_are_scoped_to_the_target_platform() {

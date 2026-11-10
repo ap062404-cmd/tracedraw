@@ -719,6 +719,34 @@ fn default_tab(ui: &mut Ui, st: &mut ColorManagementState, load: &mut Option<Spa
             );
             ui.end_row();
         });
+
+    // Display diagnostics are deliberately read-only: the monitor profile
+    // is not yet applied to the renderer, so do not imply that the OS
+    // display profile is being used for screen conversion.
+    section(ui, "Display profile (screen)");
+    let display_name = tracedraw_core::color::engine::icc()
+        .map(|engine| {
+            engine
+                .display_profile()
+                .description()
+                .unwrap_or("sRGB (built-in)")
+                .to_string()
+        })
+        .unwrap_or_else(|| "sRGB (built-in)".to_string());
+    egui::Grid::new("cm_display_diagnostic")
+        .num_columns(2)
+        .spacing([8.0, 4.0])
+        .show(ui, |ui| {
+            row(ui, "Application display target:");
+            ui.label(display_name);
+            ui.end_row();
+            row(ui, "Operating-system monitor ICC:");
+            ui.label("Not queried");
+            ui.end_row();
+            row(ui, "Monitor compensation:");
+            ui.label("Not active — sRGB output is retained");
+            ui.end_row();
+        });
 }
 
 fn preset_label(key: &str) -> String {

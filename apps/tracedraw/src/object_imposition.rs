@@ -878,6 +878,47 @@ mod tests {
         assert_eq!(result, Err(PlanError::InvalidSheet));
     }
 
+
+    #[test]
+    fn mixed_rotated_item_keeps_sheet_axis_gutters_with_asymmetric_spacing() {
+        let settings = SheetSettings {
+            width_mm: 50.0,
+            height_mm: 90.0,
+            margin_left_mm: 0.0,
+            margin_right_mm: 0.0,
+            margin_top_mm: 0.0,
+            margin_bottom_mm: 0.0,
+            gutter_x_mm: 3.0,
+            gutter_y_mm: 7.0,
+            bleed_mm: 1.0,
+        };
+        // The 70 x 40 artwork only fits when rotated. The gutter dimensions
+        // remain tied to the sheet axes: 3 mm horizontally and 7 mm vertically.
+        let result = plan(
+            &[
+                DesignSpec { id: 41, width_mm: 70.0, height_mm: 40.0, copies: 1, allow_rotation: true },
+                DesignSpec { id: 42, width_mm: 10.0, height_mm: 10.0, copies: 0, allow_rotation: false },
+            ],
+            settings,
+        ).unwrap();
+
+        assert_eq!(result.placements.len(), 1);
+        let p = result.placements[0];
+        assert!(p.rotated);
+        assert!((p.width_mm - 40.0).abs() < 1e-7);
+        assert!((p.height_mm - 70.0).abs() < 1e-7);
+        let bleed_bounds = Rect {
+            x: p.x_mm - settings.bleed_mm,
+            y: p.y_mm - settings.bleed_mm,
+            w: p.width_mm + 2.0 * settings.bleed_mm,
+            h: p.height_mm + 2.0 * settings.bleed_mm,
+        };
+        assert!(bleed_bounds.x >= -1e-7);
+        assert!(bleed_bounds.y >= -1e-7);
+        assert!(bleed_bounds.right() <= settings.width_mm + 1e-7);
+        assert!(bleed_bounds.bottom() <= settings.height_mm + 1e-7);
+    }
+
     #[test]
     fn bleed_is_kept_outside_trim_dimensions() {
         let result = plan(

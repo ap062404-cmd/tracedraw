@@ -787,6 +787,60 @@ mod tests {
     }
 
     #[test]
+    fn mixed_size_copies_prefer_contiguous_design_blocks() {
+        let settings = SheetSettings {
+            width_mm: 160.0, height_mm: 100.0,
+            margin_left_mm: 5.0, margin_right_mm: 5.0,
+            margin_top_mm: 5.0, margin_bottom_mm: 5.0,
+            gutter_x_mm: 2.0, gutter_y_mm: 2.0, bleed_mm: 0.0,
+        };
+        let result = plan(
+            &[
+                DesignSpec { id: 61, width_mm: 60.0, height_mm: 30.0, copies: 2, allow_rotation: false },
+                DesignSpec { id: 62, width_mm: 20.0, height_mm: 20.0, copies: 4, allow_rotation: false },
+            ],
+            settings,
+        ).unwrap();
+
+        assert_eq!(result.sheet_count, 1);
+        for design_id in [61, 62] {
+            let group: Vec<_> = result.placements.iter()
+                .filter(|p| p.design_id == design_id)
+                .collect();
+            assert!(!group.is_empty());
+            // Each copy should touch at least one other copy of the same
+            // design when measured using its padded (gutter-inclusive) box.
+            for placement in &group {
+                let a = Rect {
+                    x: placement.x_mm,
+                    y: placement.y_mm,
+                    w: placement.width_mm + settings.gutter_x_mm,
+                    h: placement.height_mm + settings.gutter_y_mm,
+                };
+                let has_neighbor = group.iter().any(|other| {
+                    if other.copy_index == placement.copy_index { return false; }
+                    let b = Rect {
+                        x: other.x_mm,
+                        y: other.y_mm,
+                        w: other.width_mm + settings.gutter_x_mm,
+                        h: other.height_mm + settings.gutter_y_mm,
+                    };
+                    let horizontal = (a.right() - b.x).abs() <= 1e-6
+                        || (b.right() - a.x).abs() <= 1e-6;
+                    let vertical_overlap = a.y < b.bottom() - 1e-6
+                        && a.bottom() > b.y + 1e-6;
+                    let vertical = (a.bottom() - b.y).abs() <= 1e-6
+                        || (b.bottom() - a.y).abs() <= 1e-6;
+                    let horizontal_overlap = a.x < b.right() - 1e-6
+                        && a.right() > b.x + 1e-6;
+                    (horizontal && vertical_overlap) || (vertical && horizontal_overlap)
+                });
+                assert!(has_neighbor, "design {design_id} copy {} is isolated", placement.copy_index);
+            }
+        }
+    }
+
+    #[test]
     fn rejects_a_design_that_cannot_fit() {
         let result = plan(
             &[DesignSpec { id: 9, width_mm: 300.0, height_mm: 20.0, copies: 1, allow_rotation: false }],

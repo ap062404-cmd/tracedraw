@@ -309,13 +309,11 @@ pub fn build_document(
             let top = target_y + placement.height_mm;
             // Crop marks sit outside the reserved bleed allowance, not
             // inside the bleed artwork itself.
-            // Keep crop marks inside the available gutter so marks around
-            // neighboring designs do not collide. A 2 mm gutter gets 1 mm
-            // marks; wider gutters allow longer, more conventional marks.
+            // Keep marks outside the bleed and inside the gutter. The
+            // outside clearance is 0.25 mm; the remaining half-gutter is
+            // available to each adjacent trim edge. With a 2 mm gutter,
+            // each mark is 0.75 mm long (not 1 mm).
             let gap = sheet.bleed_mm + 0.25_f64;
-            // Each neighboring object needs its own half of the gutter.
-            // Subtract the outside gap first; never force a 1 mm mark into
-            // a gutter that cannot physically contain it.
             let length_x = (sheet.gutter_x_mm * 0.5 - gap).clamp(0.0, 3.0);
             let length_y = (sheet.gutter_y_mm * 0.5 - gap).clamp(0.0, 3.0);
             let mut add_mark = |points: [Point; 2]| {
@@ -471,7 +469,18 @@ pub fn plan(designs: &[DesignSpec], settings: SheetSettings) -> Result<Impositio
             base3.append(&mut bottom2);
             candidates.push(("Grid rotasi + normal bawah".into(), base3));
         }
-        candidates.sort_by(|a,b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(&b.0)));
+        // Match the calculator's tie-break: maximum copies first,
+        // then prefer normal, rotated, and finally mixed layouts.
+        let layout_weight = |name: &str| {
+            if name == "Grid normal" { 0 }
+            else if name == "Grid rotasi" { 1 }
+            else { 3 }
+        };
+        candidates.sort_by(|a, b| {
+            b.1.len().cmp(&a.1.len())
+                .then_with(|| layout_weight(&a.0).cmp(&layout_weight(&b.0)))
+                .then_with(|| a.0.cmp(&b.0))
+        });
         let best = candidates.into_iter().next().map(|x| x.1).unwrap_or_default();
         if best.is_empty() {
             return Err(PlanError::DoesNotFit { id: d.id, width_mm: d.width_mm, height_mm: d.height_mm });

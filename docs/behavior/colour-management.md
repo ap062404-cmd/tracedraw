@@ -101,13 +101,22 @@ output and does not silently change document colour values.
 
 A monitor profile must not simply replace the engine's sRGB target. The
 desktop compositor may already apply the monitor profile, depending on
-the operating system, display server and renderer. Applying the same
-profile in TraceDraw as well could compensate twice. TraceDraw uses both
-the eframe/wgpu and eframe/glow desktop renderers, so a future monitor
-compensation path must establish the actual surface/output colour-space
-behaviour for both before enabling a transform. Until then, the monitor
-profile is diagnostic-only; working RGB/CMYK profiles, soft proof and
-PDF OutputIntent remain separate.
+the operating system and display server. Applying the same profile in
+TraceDraw as well could compensate twice.
+
+The current desktop dependency configuration disables eframe's default
+features and enables only `glow`, `wayland` and `x11`; it does not enable
+the eframe/wgpu renderer. The active native path is therefore eframe/glow
+(OpenGL). Its glutin config template does not explicitly request an sRGB
+framebuffer, and TraceDraw does not explicitly enable
+`GL_FRAMEBUFFER_SRGB`. That is not enough to conclude what transfer
+behaviour the chosen platform framebuffer actually provides: the GL
+config's capabilities and the compositor/display path still need to be
+queried at runtime on supported systems. No monitor transform should be
+enabled until that output path is measured and tested.
+
+Until then, the monitor profile is diagnostic-only; working RGB/CMYK
+profiles, soft proof and PDF OutputIntent remain separate.
 
 ## PDF/X export
 

@@ -74,6 +74,14 @@ pub struct ImpositionPlan {
     pub utilization_percent: f64,
 }
 
+/// Length available for a crop mark on one side of a gutter.
+///
+/// The bleed allowance is already accounted for by the mark's offset from
+/// the trim edge, so it must not be subtracted from the gutter a second time.
+fn crop_mark_length(gutter_mm: f64) -> f64 {
+    (gutter_mm * 0.5 - 0.25).clamp(0.0, 3.0)
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Rect {
     x: f64,
@@ -309,13 +317,13 @@ pub fn build_document(
             let top = target_y + placement.height_mm;
             // Crop marks sit outside the reserved bleed allowance, not
             // inside the bleed artwork itself.
-            // Keep marks outside the bleed and inside the gutter. The
-            // outside clearance is 0.25 mm; the remaining half-gutter is
-            // available to each adjacent trim edge. With a 2 mm gutter,
-            // each mark is 0.75 mm long (not 1 mm).
+            // The trim-to-trim gutter includes bleed on both sides.
+            // Keep 0.25 mm clear beyond each bleed edge; the remaining
+            // half-gutter is available for the mark. A 2 mm gutter therefore
+            // gives 0.75 mm marks, regardless of bleed width.
             let gap = sheet.bleed_mm + 0.25_f64;
-            let length_x = (sheet.gutter_x_mm * 0.5 - gap).clamp(0.0, 3.0);
-            let length_y = (sheet.gutter_y_mm * 0.5 - gap).clamp(0.0, 3.0);
+            let length_x = crop_mark_length(sheet.gutter_x_mm);
+            let length_y = crop_mark_length(sheet.gutter_y_mm);
             let mut add_mark = |points: [Point; 2]| {
                 // Keep marks on the sheet and out of neighboring trim areas.
                 let min_x = points[0].x.min(points[1].x);
@@ -598,6 +606,15 @@ pub fn plan(designs: &[DesignSpec], settings: SheetSettings) -> Result<Impositio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn crop_mark_length_uses_half_gutter_after_clearance() {
+        assert!((crop_mark_length(2.0) - 0.75).abs() < 1e-9);
+        assert!((crop_mark_length(4.0) - 1.75).abs() < 1e-9);
+        assert_eq!(crop_mark_length(0.0), 0.0);
+        assert_eq!(crop_mark_length(0.4), 0.0);
+        assert_eq!(crop_mark_length(10.0), 3.0);
+    }
 
     #[test]
     fn business_cards_fit_twenty_five_up_on_a3_plus() {

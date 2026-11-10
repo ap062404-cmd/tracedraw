@@ -269,3 +269,64 @@ width.
 - Converting between CMYK profiles keeps pure black when asked, leaves
   other models alone, and recolours shapes inside groups
   (`color_policy::tests`).
+
+
+## Cross-platform display-colour plan (Windows and Linux)
+
+Windows and Linux are equal first-class desktop targets. The colour-management
+model and user-facing behaviour must be shared; only the operating-system
+adapter that discovers display devices and their assigned ICC profiles may
+differ.
+
+The implementation is split into three boundaries:
+
+1. **Shared application layer**: a platform-neutral display-profile result,
+   monitor identity, profile bytes/metadata, and explicit states such as
+   available, unavailable, unsupported, or temporarily unknown. The UI and
+   diagnostics consume this shared result; they must not contain
+   OS-specific branching.
+2. **Platform discovery adapters**: Windows obtains the active display and
+   its assigned profile through supported Windows colour-management/display
+   APIs. Linux discovers profiles through the desktop colour-management
+   service where available (commonly colord), while accounting for desktop,
+   display-server, permission, and multi-monitor differences. Missing
+   services or permissions are normal fallback states, not fatal errors.
+3. **Shared rendering policy**: the same policy decides whether a display
+   transform is safe to use. It considers the active monitor, renderer output
+   encoding, and whether the operating-system compositor already applies
+   display colour management. A profile being discoverable does not by itself
+   mean TraceDraw should apply it.
+
+Both platforms must retain the same document working-profile behaviour,
+soft-proof controls, output-profile selection, PDF OutputIntent semantics,
+and saved document data. Display-profile discovery must never rewrite object
+colour values, assign a monitor profile as a document working profile, or
+change PDF export.
+
+For multi-monitor desktops, the display associated with the application
+window is the relevant display, not an arbitrary system-wide default. Moving
+the window between displays or changing a display profile must invalidate
+stale diagnostic state. If the platform cannot reliably identify the
+window's display or its assigned profile, TraceDraw reports that state
+explicitly and keeps the safe sRGB display path.
+
+### Cross-platform acceptance requirements
+
+- The same source tree builds for supported Windows and Linux targets.
+- The same colour-management UI and document behaviour are available on
+  both platforms.
+- Platform discovery failure never prevents the editor from starting.
+- No monitor compensation is enabled solely because an ICC file was found.
+- WGPU and Glow paths are validated independently on both platforms before
+  display compensation is enabled.
+- Automated tests cover shared profile-selection and fallback logic without
+  depending on a particular desktop environment; platform adapters receive
+  platform-specific integration checks.
+- Release packages are produced and smoke-tested separately for Windows and
+  Linux, including opening, editing, saving, and exporting a representative
+  print document.
+
+This plan is intentionally diagnostic-first. Until compositor behaviour and
+renderer output encoding have been verified on each supported platform,
+monitor ICC discovery remains informational and sRGB remains the safe
+application display target.

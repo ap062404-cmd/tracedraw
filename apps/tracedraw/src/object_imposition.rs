@@ -74,14 +74,6 @@ pub struct ImpositionPlan {
     pub utilization_percent: f64,
 }
 
-/// Length available for a crop mark on one side of a gutter.
-///
-/// Reserve 0.25 mm after the bleed edge and another 0.25 mm at the
-/// gutter midpoint so marks from neighboring objects remain separated.
-fn crop_mark_length(gutter_mm: f64) -> f64 {
-    (gutter_mm * 0.5 - 0.5).clamp(0.0, 3.0)
-}
-
 #[derive(Debug, Clone, Copy)]
 struct Rect {
     x: f64,
@@ -184,6 +176,33 @@ pub struct DesignArtwork {
     pub shapes: Vec<tracedraw_core::Shape>,
 }
 
+/// User-adjustable crop-mark geometry. Values are in millimetres.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CropMarkSettings {
+    /// Length of each crop-mark segment, measured outwards from the trim.
+    pub length_mm: f64,
+    /// Clear space between the trim/bleed edge and the crop mark.
+    pub offset_mm: f64,
+    /// Printed line thickness.
+    pub stroke_width_mm: f64,
+}
+
+impl Default for CropMarkSettings {
+    fn default() -> Self {
+        Self { length_mm: 3.0, offset_mm: 0.5, stroke_width_mm: 0.2 }
+    }
+}
+
+impl CropMarkSettings {
+    fn safe(self) -> Self {
+        Self {
+            length_mm: if self.length_mm.is_finite() { self.length_mm.clamp(0.0, 20.0) } else { 3.0 },
+            offset_mm: if self.offset_mm.is_finite() { self.offset_mm.clamp(0.0, 20.0) } else { 0.5 },
+            stroke_width_mm: if self.stroke_width_mm.is_finite() { self.stroke_width_mm.clamp(0.05, 2.0) } else { 0.2 },
+        }
+    }
+}
+
 /// Build a separate production document from a completed plan.
 ///
 /// The source shapes are expected in page coordinates (as returned by
@@ -196,7 +215,20 @@ pub fn build_document(
     designs: &[DesignArtwork],
     crop_marks: bool,
 ) -> Result<tracedraw_core::Document, PlanError> {
+    build_document_with_crop_settings(title, sheet, plan, designs, crop_marks, CropMarkSettings::default())
+}
+
+/// Build a production document with explicit crop-mark geometry.
+pub fn build_document_with_crop_settings(
+    title: &str,
+    sheet: SheetSettings,
+    plan: &ImpositionPlan,
+    designs: &[DesignArtwork],
+    crop_marks: bool,
+    crop_settings: CropMarkSettings,
+) -> Result<tracedraw_core::Document, PlanError> {
     use tracedraw_core::{Affine, Document, Layer, Page, Point, Shape, Size};
+    let crop_settings = crop_settings.safe();
 
     if sheet.width_mm <= 0.0 || sheet.height_mm <= 0.0
         || !sheet.width_mm.is_finite() || !sheet.height_mm.is_finite()
@@ -315,15 +347,12 @@ pub fn build_document(
             let right = placement.x_mm + placement.width_mm;
             let bottom = target_y;
             let top = target_y + placement.height_mm;
-            // Crop marks sit outside the reserved bleed allowance, not
-            // inside the bleed artwork itself. The trim-to-trim distance
-            // includes bleed on both sides; keep 0.25 mm clear beyond each
-            // bleed edge and 0.25 mm clear at the gutter midpoint. With a
-            // 2 mm gutter this leaves 0.5 mm for each mark, regardless of
-            // the configured bleed width.
-            let gap = sheet.bleed_mm + 0.25_f64;
-            let length_x = crop_mark_length(sheet.gutter_x_mm);
-            let length_y = crop_mark_length(sheet.gutter_y_mm);
+            // Marks use the requested length and offset independently of
+            // the gutter. A mark is omitted only when it would leave the
+            // sheet or collide with another design's reserved bleed area.
+            let gap = sheet.bleed_mm + crop_settings.offset_mm;
+            let length_x = crop_settings.length_mm;
+            let length_y = crop_settings.length_mm;
             let mut add_mark = |points: [Point; 2]| {
                 // Keep marks on the sheet and out of neighboring trim areas.
                 let min_x = points[0].x.min(points[1].x);
@@ -378,7 +407,9 @@ pub fn build_document(
                 );
                 mark.name = Some("Crop mark".into());
                 mark.fill = tracedraw_core::Fill::None;
-                mark.stroke = Some(tracedraw_core::Stroke::default());
+                let mut stroke = tracedraw_core::Stroke::default();
+                stroke.width = crop_settings.stroke_width_mm;
+                mark.stroke = Some(stroke);
                 crop_shapes.push(mark);
             };
             add_mark([Point::new(left - gap - length_x, bottom), Point::new(left - gap, bottom)]);
@@ -656,12 +687,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn crop_mark_length_uses_half_gutter_after_clearance() {
-        assert!((crop_mark_length(2.0) - 0.5).abs() < 1e-9);
-        assert!((crop_mark_length(4.0) - 1.5).abs() < 1e-9);
-        assert_eq!(crop_mark_length(0.0), 0.0);
-        assert_eq!(crop_mark_length(0.4), 0.0);
-        assert_eq!(crop_mark_length(10.0), 3.0);
+    fn crop_mark_settings_have_print_friendly_defaults_and_safe_bounds() {
+        assert_eq!(CropMarkSettings::default(), CropMarkSettings {
+            length_mm: 3.0, offset_mm: 0.5, stroke_width_mm: 0.2,
+        });
+        let safe = CropMarkSettings {
+            length_mm: f64::NAN, offset_mm: -4.0, stroke_width_mm: 9.0,
+        }.safe();
+        assert_eq!(safe.length_mm, 3.0);
+        assert_eq!(safe.offset_mm, 0.0);
+        assert_eq!(safe.stroke_width_mm, 2.0);
     }
 
     #[test]

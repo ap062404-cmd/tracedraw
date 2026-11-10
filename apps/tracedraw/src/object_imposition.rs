@@ -919,6 +919,44 @@ mod tests {
         assert!(bleed_bounds.bottom() <= settings.height_mm + 1e-7);
     }
 
+
+    #[test]
+    fn rotated_mixed_designs_keep_horizontal_gutter_in_sheet_coordinates() {
+        let settings = SheetSettings {
+            width_mm: 55.0,
+            height_mm: 90.0,
+            margin_left_mm: 0.0,
+            margin_right_mm: 0.0,
+            margin_top_mm: 0.0,
+            margin_bottom_mm: 0.0,
+            gutter_x_mm: 3.0,
+            gutter_y_mm: 7.0,
+            bleed_mm: 1.0,
+        };
+        let result = plan(
+            &[
+                DesignSpec { id: 51, width_mm: 70.0, height_mm: 40.0, copies: 1, allow_rotation: true },
+                DesignSpec { id: 52, width_mm: 5.0, height_mm: 5.0, copies: 1, allow_rotation: false },
+            ],
+            settings,
+        ).unwrap();
+
+        assert_eq!(result.placements.len(), 2);
+        let rotated = result.placements.iter().find(|p| p.design_id == 51).unwrap();
+        let neighbor = result.placements.iter().find(|p| p.design_id == 52).unwrap();
+        assert!(rotated.rotated);
+        assert_eq!(rotated.sheet_index, neighbor.sheet_index);
+        let rotated_bleed_right = rotated.x_mm + rotated.width_mm + settings.bleed_mm;
+        let neighbor_bleed_left = neighbor.x_mm - settings.bleed_mm;
+        let horizontal_gap = if neighbor_bleed_left >= rotated_bleed_right {
+            neighbor_bleed_left - rotated_bleed_right
+        } else {
+            rotated.x_mm - settings.bleed_mm
+                - (neighbor.x_mm + neighbor.width_mm + settings.bleed_mm)
+        };
+        assert!((horizontal_gap - settings.gutter_x_mm).abs() < 1e-7);
+    }
+
     #[test]
     fn bleed_is_kept_outside_trim_dimensions() {
         let result = plan(

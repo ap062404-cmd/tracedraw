@@ -104,16 +104,24 @@ desktop compositor may already apply the monitor profile, depending on
 the operating system and display server. Applying the same profile in
 TraceDraw as well could compensate twice.
 
-The current desktop dependency configuration disables eframe's default
-features and enables only `glow`, `wayland` and `x11`; it does not enable
-the eframe/wgpu renderer. The active native path is therefore eframe/glow
-(OpenGL). Its glutin config template does not explicitly request an sRGB
+The desktop build enables both eframe's `glow` and `wgpu`
+features. TraceDraw chooses its renderer at start-up: Hardware and Software
+modes use WGPU; GL mode uses Glow/OpenGL. The selected mode is recorded by
+the GPU startup diagnostics, so display behaviour must be checked for each
+renderer rather than assuming one native path.
+
+For Glow, the glutin config template does not explicitly request an sRGB
 framebuffer, and TraceDraw does not explicitly enable
-`GL_FRAMEBUFFER_SRGB`. That is not enough to conclude what transfer
-behaviour the chosen platform framebuffer actually provides: the GL
-config's capabilities and the compositor/display path still need to be
-queried at runtime on supported systems. No monitor transform should be
-enabled until that output path is measured and tested.
+`GL_FRAMEBUFFER_SRGB`. The selected GL config's capabilities still need
+to be queried at runtime. For WGPU, eframe delegates surface and format
+selection to egui-wgpu; the actual selected surface format and its sRGB
+encoding must be inspected at runtime rather than inferred from the
+requested low-latency surface configuration.
+
+Neither renderer inspection alone establishes whether the desktop
+compositor applies the monitor profile. No monitor transform should be
+enabled until the selected renderer's output encoding and the compositor
+path have been measured and tested.
 
 Until then, the monitor profile is diagnostic-only; working RGB/CMYK
 profiles, soft proof and PDF OutputIntent remain separate.

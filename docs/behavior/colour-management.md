@@ -104,6 +104,42 @@ desktop compositor may already apply the monitor profile, depending on
 the operating system and display server. Applying the same profile in
 TraceDraw as well could compensate twice.
 
+### Platform discovery requirements
+
+A profile file in a standard ICC folder is not evidence that it belongs to the
+monitor showing the TraceDraw window. Discovery must start with that window's
+current display and must return an explicit unavailable or ambiguous result
+when the OS cannot identify the matching device.
+
+On Windows, the supported WCS display-profile API is
+`ColorProfileGetDisplayDefault` (in `mscms.dll`). It takes a display adapter
+LUID and source ID, not an HWND or a monitor name. The implementation therefore
+has to map the window's monitor to the corresponding active display path using
+the Windows display-configuration APIs, then request the current-user profile
+and, where useful, the system-wide profile. The returned path is only a
+candidate until it has been opened and parsed as an ICC profile. This WCS API
+requires Windows 10 build 20348 or later; older Windows versions must report
+that this lookup is unsupported and retain the sRGB fallback. The API allocates
+the returned path for the caller, which must release it with `LocalFree`.
+
+On Linux, colord is the desktop colour-management service. A client must
+identify the active display device and match it to colord's display device,
+typically using stable output/EDID metadata (for example
+`OutputEdidMd5` where available). It must then resolve the device's default
+profile using colord's device/profile semantics. The `Profiles` property is
+an association list and must not be treated as "the first profile is always
+the default". If colord, the session D-Bus, output identity, or a default
+profile is unavailable, TraceDraw must report that state and keep sRGB.
+X11 output names and Wayland/DRM connector identities are not interchangeable;
+the implementation must not guess a match from a connector name alone.
+
+The common result should carry the display identity, resolved profile path
+(and parsed profile data when valid), scope/source, and a status such as
+available, unsupported, not configured, ambiguous, or query failed. A change
+of window monitor, display topology, or profile association invalidates
+the result. These lookups are read-only: TraceDraw must not register, assign, or
+change OS profiles.
+
 The desktop build enables both eframe's `glow` and `wgpu`
 features. TraceDraw chooses its renderer at start-up: Hardware and Software
 modes use WGPU; GL mode uses Glow/OpenGL. The selected mode is recorded by

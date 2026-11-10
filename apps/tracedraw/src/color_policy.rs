@@ -33,6 +33,8 @@ fn profile_dirs() -> Vec<std::path::PathBuf> {
     {
         dirs.push("/usr/share/color/icc".into());
         dirs.push("/usr/local/share/color/icc".into());
+        // colord keeps profiles installed through desktop colour management here.
+        dirs.push("/var/lib/colord/icc".into());
         if let Some(home) = crate::files::home_dir() {
             dirs.push(home.join(".local/share/color/icc"));
             dirs.push(home.join(".local/share/icc"));
@@ -429,6 +431,33 @@ impl FoundOrName {
 mod tests {
     use super::*;
     use tracedraw_core::icc::test_profiles as tp;
+
+    #[test]
+    fn profile_directories_are_scoped_to_the_target_platform() {
+        let dirs = profile_dirs();
+        #[cfg(target_os = "linux")]
+        {
+            assert!(dirs.iter().any(|p| p == std::path::Path::new("/usr/share/color/icc")));
+            assert!(dirs.iter().any(|p| p == std::path::Path::new("/var/lib/colord/icc")));
+            assert!(!dirs.iter().any(|p| p.to_string_lossy().contains("ColorSync")));
+            assert!(!dirs.iter().any(|p| p.to_string_lossy().contains("spool/drivers/color")));
+        }
+        #[cfg(target_os = "windows")]
+        {
+            assert!(dirs.iter().all(|p| {
+                std::env::var_os("WINDIR")
+                    .map(|root| p.starts_with(std::path::PathBuf::from(root)))
+                    .unwrap_or(true)
+            }));
+            assert!(!dirs.iter().any(|p| p.to_string_lossy().contains("ColorSync")));
+            assert!(!dirs.iter().any(|p| p == std::path::Path::new("/usr/share/color/icc")));
+        }
+        #[cfg(target_os = "macos")]
+        {
+            assert!(dirs.iter().any(|p| p == std::path::Path::new("/Library/ColorSync/Profiles")));
+            assert!(!dirs.iter().any(|p| p == std::path::Path::new("/usr/share/color/icc")));
+        }
+    }
 
     #[test]
     fn fills_and_outlines_of_nested_shapes_are_recoloured() {

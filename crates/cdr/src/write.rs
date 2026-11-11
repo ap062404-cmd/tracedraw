@@ -4101,17 +4101,6 @@ impl<'a> Writer<'a> {
     ) -> Option<u32> {
         let id = self.next_bitmap;
         let rec = bmp_record(id, png, size_mm, picture_inks)?;
-        // An imposed drawing often places the same source bitmap many
-        // times. CorelDRAW's bitmap table stores each distinct image once;
-        // every object then refers to that shared image number. The record
-        // differs only in its leading id, so compare the payload after it.
-        if let Some(existing) = self
-            .bitmaps
-            .iter()
-            .find(|existing| existing.get(4..) == rec.get(4..))
-        {
-            return Some(u32::from_le_bytes(existing[..4].try_into().ok()?));
-        }
         self.next_bitmap += 1;
         self.bitmaps.push(rec);
         Some(id)

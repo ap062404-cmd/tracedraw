@@ -964,7 +964,7 @@ mod tests {
                 rect: PRect::new(0.0, 0.0, 10.0, 10.0),
                 width_px: 1,
                 height_px: 1,
-                png: png.into(),
+                png: png.clone().into(),
                 fx: None,
             })
             .expect("bitmap");

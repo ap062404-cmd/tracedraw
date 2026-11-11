@@ -4101,6 +4101,16 @@ impl<'a> Writer<'a> {
     ) -> Option<u32> {
         let id = self.next_bitmap;
         let rec = bmp_record(id, png, size_mm, picture_inks)?;
+        // A bitmap record's first four bytes are its document-local id.
+        // Reuse an existing id only when every remaining byte matches:
+        // this includes its colour model, physical resolution, pixels and
+        // optional transparency mask.
+        if let Some(existing) = self.bitmaps.iter().find(|old| old.get(4..) == rec.get(4..)) {
+            return existing
+                .get(..4)
+                .and_then(|bytes| bytes.try_into().ok())
+                .map(u32::from_le_bytes);
+        }
         self.next_bitmap += 1;
         self.bitmaps.push(rec);
         Some(id)

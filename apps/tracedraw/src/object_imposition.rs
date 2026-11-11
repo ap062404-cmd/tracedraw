@@ -1128,4 +1128,82 @@ mod tests {
         assert_eq!((p.width_mm, p.height_mm), (40.0, 30.0));
         assert_eq!((p.x_mm, p.y_mm), (7.0, 7.0));
     }
+
+    fn crop_mark_test_design() -> DesignArtwork {
+        let mut source = tracedraw_core::Document::new(
+            "Source",
+            tracedraw_core::Size::new(30.0, 20.0),
+        );
+        let shape = tracedraw_core::Shape::new(
+            source.ids_mut().shape(),
+            tracedraw_core::ShapeKind::Rect {
+                rect: tracedraw_core::Rect::new(0.0, 0.0, 30.0, 20.0),
+                radius: 0.0,
+                corners: None,
+            },
+        );
+        DesignArtwork { id: 1, shapes: vec![shape] }
+    }
+
+    #[test]
+    fn document_builder_emits_eight_editable_crop_marks_for_isolated_object() {
+        let sheet = SheetSettings {
+            width_mm: 100.0, height_mm: 80.0,
+            margin_left_mm: 5.0, margin_right_mm: 5.0,
+            margin_top_mm: 5.0, margin_bottom_mm: 5.0,
+            gutter_x_mm: 2.0, gutter_y_mm: 2.0, bleed_mm: 0.0,
+        };
+        let plan = ImpositionPlan {
+            placements: vec![ObjectPlacement {
+                design_id: 1, copy_index: 0, sheet_index: 0,
+                x_mm: 20.0, y_mm: 20.0, width_mm: 30.0, height_mm: 20.0,
+                rotated: false,
+            }],
+            sheet_count: 1, total_copies: 1, utilization_percent: 7.5,
+        };
+        let design = crop_mark_test_design();
+
+        let with_marks = build_document("With marks", sheet, &plan, &[design.clone()], true).unwrap();
+        let shapes = &with_marks.pages[0].layers[0].shapes;
+        let marks: Vec<_> = shapes.iter().filter(|shape| shape.name.as_deref() == Some("Crop mark")).collect();
+        assert_eq!(marks.len(), 8, "an isolated object should receive four corner pairs");
+        assert!(marks.iter().all(|shape| {
+            matches!(shape.kind, tracedraw_core::ShapeKind::Path { closed: false, .. })
+                && shape.fill == tracedraw_core::Fill::None
+                && shape.stroke.as_ref().is_some_and(|stroke| (stroke.width - 0.2).abs() < 1e-7)
+        }));
+
+        let without_marks = build_document("Without marks", sheet, &plan, &[design], false).unwrap();
+        assert!(without_marks.pages[0].layers[0].shapes.iter()
+            .all(|shape| shape.name.as_deref() != Some("Crop mark")));
+    }
+
+    #[test]
+    fn crop_marks_are_suppressed_when_they_enter_neighbor_bleed() {
+        let sheet = SheetSettings {
+            width_mm: 100.0, height_mm: 80.0,
+            margin_left_mm: 5.0, margin_right_mm: 5.0,
+            margin_top_mm: 5.0, margin_bottom_mm: 5.0,
+            gutter_x_mm: 1.0, gutter_y_mm: 2.0, bleed_mm: 0.5,
+        };
+        let plan = ImpositionPlan {
+            placements: vec![
+                ObjectPlacement { design_id: 1, copy_index: 0, sheet_index: 0,
+                    x_mm: 20.0, y_mm: 20.0, width_mm: 30.0, height_mm: 20.0, rotated: false },
+                ObjectPlacement { design_id: 2, copy_index: 0, sheet_index: 0,
+                    x_mm: 51.0, y_mm: 20.0, width_mm: 20.0, height_mm: 20.0, rotated: false },
+            ],
+            sheet_count: 1, total_copies: 2, utilization_percent: 15.0,
+        };
+        let designs = [crop_mark_test_design(), DesignArtwork {
+            id: 2,
+            shapes: crop_mark_test_design().shapes,
+        }];
+        let document = build_document("Neighbor marks", sheet, &plan, &designs, true).unwrap();
+        let marks: Vec<_> = document.pages[0].layers[0].shapes.iter()
+            .filter(|shape| shape.name.as_deref() == Some("Crop mark"))
+            .collect();
+        assert!(marks.len() < 16, "marks entering a neighboring bleed must be omitted");
+        assert!(marks.len() > 0, "safe crop marks on the outer corners should remain");
+    }
 }

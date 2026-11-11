@@ -273,25 +273,31 @@ pub fn dialog(app: &mut App, ctx: &Context, state: &mut State, close: &mut bool)
                         app.settings.page_sizes.retain(|preset| preset.name != name);
                         app.settings.save();
                     }
+                    let mut save_sheet_preset = None;
+                    let mut cancel_sheet_preset = false;
                     if let Some(name) = &mut state.saving_sheet_preset {
                         ui.horizontal(|ui| {
                             ui.label("Template name:");
                             ui.text_edit_singleline(name);
                             if ui.button("Save").clicked() && !name.trim().is_empty() {
-                                let name = name.trim().to_string();
-                                app.settings.page_sizes.retain(|preset| preset.name != name);
-                                app.settings.page_sizes.push(crate::settings::PageSizePreset {
-                                    name,
-                                    width_mm: state.sheet_width_mm,
-                                    height_mm: state.sheet_height_mm,
-                                });
-                                app.settings.save();
-                                state.saving_sheet_preset = None;
+                                save_sheet_preset = Some(name.trim().to_string());
                             }
                             if ui.button("Cancel").clicked() {
-                                state.saving_sheet_preset = None;
+                                cancel_sheet_preset = true;
                             }
                         });
+                    }
+                    if let Some(name) = save_sheet_preset {
+                        app.settings.page_sizes.retain(|preset| preset.name != name);
+                        app.settings.page_sizes.push(crate::settings::PageSizePreset {
+                            name,
+                            width_mm: state.sheet_width_mm,
+                            height_mm: state.sheet_height_mm,
+                        });
+                        app.settings.save();
+                        state.saving_sheet_preset = None;
+                    } else if cancel_sheet_preset {
+                        state.saving_sheet_preset = None;
                     }
                     ui.horizontal(|ui| {
                         ui.label("Width");

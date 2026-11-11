@@ -94,10 +94,11 @@ The document stores the profile names used for its colours.
 
 The screen target of the ICC engine is the built-in sRGB profile. This is
 the application's working display target, not a detected monitor profile.
-The Color Management dialog's Default tab reports this distinction: the
-operating-system monitor ICC is not queried and monitor compensation is
-not active. The application therefore keeps its existing sRGB screen
-output and does not silently change document colour values.
+The Color Management dialog's Default tab reports this distinction: monitor
+ICC discovery and compensation are deferred and are not release blockers.
+The application therefore keeps its existing sRGB screen output and does not
+silently change document colour values. Document RGB/CMYK/gray profile handling,
+colour conversion, soft proof and PDF OutputIntent remain in scope independently.
 
 A monitor profile must not simply replace the engine's sRGB target. The
 desktop compositor may already apply the monitor profile, depending on
@@ -160,8 +161,9 @@ compositor applies the monitor profile. No monitor transform should be
 enabled until the selected renderer's output encoding and the compositor
 path have been measured and tested.
 
-Until then, the monitor profile is diagnostic-only; working RGB/CMYK
-profiles, soft proof and PDF OutputIntent remain separate.
+For the current release, monitor-profile discovery and compensation are
+explicitly out of scope. Working RGB/CMYK profiles, soft proof and PDF
+OutputIntent remain separate and continue to be developed independently.
 
 ## PDF/X export
 

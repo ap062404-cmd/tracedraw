@@ -2956,6 +2956,18 @@ fn bmp_record(
     Some(b.done())
 }
 
+/// The id of an already written bitmap with exactly the same record
+/// payload. The leading four bytes are the record's id; all remaining
+/// bytes must match, including dimensions, colour model and transparency.
+fn identical_bitmap_id(bitmaps: &[Vec<u8>], record: &[u8]) -> Option<u32> {
+    bitmaps
+        .iter()
+        .find(|old| old.get(4..) == record.get(4..))
+        .and_then(|old| old.get(..4))
+        .and_then(|bytes| bytes.try_into().ok())
+        .map(u32::from_le_bytes)
+}
+
 /// `loda`: header (length, argument count, offsets table, types table,
 /// object type), the offsets table with the end marker, the types table
 /// in reverse order, then the argument bodies back to back. Arguments go
@@ -4105,11 +4117,8 @@ impl<'a> Writer<'a> {
         // Reuse an existing id only when every remaining byte matches:
         // this includes its colour model, physical resolution, pixels and
         // optional transparency mask.
-        if let Some(existing) = self.bitmaps.iter().find(|old| old.get(4..) == rec.get(4..)) {
-            return existing
-                .get(..4)
-                .and_then(|bytes| bytes.try_into().ok())
-                .map(u32::from_le_bytes);
+        if let Some(existing_id) = identical_bitmap_id(&self.bitmaps, &rec) {
+            return Some(existing_id);
         }
         self.next_bitmap += 1;
         self.bitmaps.push(rec);

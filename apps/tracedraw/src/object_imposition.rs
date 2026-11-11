@@ -290,31 +290,31 @@ pub fn build_document_with_crop_settings(
             .reduce(|a, b| a.union(b))
             .ok_or(PlanError::InvalidDesign { id: placement.design_id })?;
         let target_y = sheet.height_mm - placement.y_mm - placement.height_mm;
-        let source_center = source_bounds.center();
-        let rotate_about_center = if let Some(coeffs) = placement.shape_transform {
+        let world = if let Some(coeffs) = placement.shape_transform {
+            // Shape-aware nesting already returns the complete page-to-sheet
+            // transform. Applying another bounds-based translation here
+            // would shift asymmetric or multi-part artwork a second time.
             Affine::new(coeffs)
         } else {
+            let source_center = source_bounds.center();
             let angle = if placement.rotated { std::f64::consts::FRAC_PI_2 } else { 0.0 };
-            Affine::translate((source_center.x, source_center.y))
+            let rotate_about_center = Affine::translate((source_center.x, source_center.y))
                 * Affine::rotate(angle)
-                * Affine::translate((-source_center.x, -source_center.y))
+                * Affine::translate((-source_center.x, -source_center.y));
+            let rotated_corners = [
+                Point::new(source_bounds.x0, source_bounds.y0),
+                Point::new(source_bounds.x1, source_bounds.y0),
+                Point::new(source_bounds.x1, source_bounds.y1),
+                Point::new(source_bounds.x0, source_bounds.y1),
+            ].map(|p| rotate_about_center * p);
+            let min_x = rotated_corners.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
+            let min_y = rotated_corners.iter().map(|p| p.y).fold(f64::INFINITY, f64::min);
+            let move_to_sheet = Affine::translate((
+                placement.x_mm - min_x,
+                target_y - min_y,
+            ));
+            move_to_sheet * rotate_about_center
         };
-        let rotated_corners = [
-            Point::new(source_bounds.x0, source_bounds.y0),
-            Point::new(source_bounds.x1, source_bounds.y0),
-            Point::new(source_bounds.x1, source_bounds.y1),
-            Point::new(source_bounds.x0, source_bounds.y1),
-        ].map(|p| rotate_about_center * p);
-        let min_x = rotated_corners.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
-        let min_y = rotated_corners.iter().map(|p| p.y).fold(f64::INFINITY, f64::min);
-        let max_x = rotated_corners.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max);
-        let max_y = rotated_corners.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max);
-        let rotated_bounds = tracedraw_core::Rect::new(min_x, min_y, max_x, max_y);
-        let move_to_sheet = Affine::translate((
-            placement.x_mm - rotated_bounds.x0,
-            target_y - rotated_bounds.y0,
-        ));
-        let world = move_to_sheet * rotate_about_center;
         fn refresh_identity(
             shape: &mut Shape,
             allocate: &mut impl FnMut() -> tracedraw_core::ShapeId,

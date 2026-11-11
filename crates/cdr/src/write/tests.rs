@@ -12,6 +12,16 @@ fn doc_with(shapes: Vec<Shape>) -> Document {
 }
 
 #[test]
+fn identical_bitmap_records_reuse_the_existing_id() {
+    let first = vec![1, 0, 0, 0, 10, 20, 30, 40];
+    let same_payload_different_id = vec![2, 0, 0, 0, 10, 20, 30, 40];
+    let different_payload = vec![3, 0, 0, 0, 10, 20, 30, 41];
+
+    assert_eq!(identical_bitmap_id(&[first.clone()], &same_payload_different_id), Some(1));
+    assert_eq!(identical_bitmap_id(&[first], &different_payload), None);
+}
+
+#[test]
 fn document_palette_colours_round_trip_in_package() {
     let mut doc = Document::new("palette", Size::new(100.0, 100.0));
     doc.palette = vec![

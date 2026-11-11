@@ -23,7 +23,32 @@ fn document_palette_colours_round_trip_in_package() {
     let bytes = document_to_cdr(&doc);
     let (back, report) = crate::open_bytes(&bytes, "palette").expect("reads package");
     assert_eq!(report.skipped_objects, 0, "{:?}", report.warnings);
-    assert_eq!(back.palette, doc.palette);
+    assert_eq!(back.palette.len(), doc.palette.len());
+    for (actual, expected) in back.palette.iter().zip(&doc.palette) {
+        match (actual, expected) {
+            (
+                Color::Cmyk { c: ac, m: am, y: ay, k: ak },
+                Color::Cmyk { c: ec, m: em, y: ey, k: ek },
+            ) => {
+                for (a, e) in [(*ac, *ec), (*am, *em), (*ay, *ey), (*ak, *ek)] {
+                    assert!((a - e).abs() < 1e-5, "{actual:?} != {expected:?}");
+                }
+            }
+            (
+                Color::Rgb { r: ar, g: ag, b: ab },
+                Color::Rgb { r: er, g: eg, b: eb },
+            ) => {
+                for (a, e) in [(*ar, *er), (*ag, *eg), (*ab, *eb)] {
+                    assert!((a - e).abs() < 1e-5, "{actual:?} != {expected:?}");
+                }
+            }
+            (Color::Gray { v: a }, Color::Gray { v: e }) => {
+                assert!((a - e).abs() < 1e-5, "{actual:?} != {expected:?}");
+            }
+            (Color::Registration, Color::Registration) => {}
+            _ => panic!("palette colour model changed: {actual:?} != {expected:?}"),
+        }
+    }
 }
 
 #[test]

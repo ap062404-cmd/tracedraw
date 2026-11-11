@@ -2890,11 +2890,11 @@ fn bmp_record(
         .u32(0)
         .u32((image_len - pixels.len() - 40) as u32);
     b.u32(1)
-        .u32(1)
+        .u32(if cmyk { 3 } else { 1 })
         .u32(w)
         .u32(h)
         .u32(1)
-        .u32(24)
+        .u32(bpp as u32)
         .u32(stride as u32)
         .u32(pixels.len() as u32);
     b.u32(0)
@@ -4062,9 +4062,14 @@ impl<'a> Writer<'a> {
         id
     }
 
-    fn bitmap_id(&mut self, png: &[u8], size_mm: (f64, f64)) -> Option<u32> {
+    fn bitmap_id(
+        &mut self,
+        png: &[u8],
+        size_mm: (f64, f64),
+        picture_inks: Option<&tracedraw_core::picture_inks::PictureInks>,
+    ) -> Option<u32> {
         let id = self.next_bitmap;
-        let rec = bmp_record(id, png, size_mm)?;
+        let rec = bmp_record(id, png, size_mm, picture_inks)?;
         self.next_bitmap += 1;
         self.bitmaps.push(rec);
         Some(id)
@@ -5038,7 +5043,11 @@ impl<'a> Writer<'a> {
             let c = s.transform.as_coeffs();
             (c[0].hypot(c[1]), c[2].hypot(c[3]))
         };
-        let Some(image) = self.bitmap_id(\n            png,\n            (rect.width() * sx, rect.height() * sy),\n            s.picture_inks.as_deref(),\n        ) else {
+        let Some(image) = self.bitmap_id(
+            png,
+            (rect.width() * sx, rect.height() * sy),
+            s.picture_inks.as_deref(),
+        ) else {
             return Placed {
                 nodes: Vec::new(),
                 bounds: None,

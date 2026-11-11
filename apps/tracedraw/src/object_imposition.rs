@@ -1168,7 +1168,7 @@ mod tests {
         let marks: Vec<_> = shapes.iter().filter(|shape| shape.name.as_deref() == Some("Crop mark")).collect();
         assert_eq!(marks.len(), 8, "an isolated object should receive four corner pairs");
         assert!(marks.iter().all(|shape| {
-            matches!(shape.kind, tracedraw_core::ShapeKind::Path { closed: false, .. })
+            matches!(&shape.kind, tracedraw_core::ShapeKind::Path { closed: false, .. })
                 && shape.fill == tracedraw_core::Fill::None
                 && shape.stroke.as_ref().is_some_and(|stroke| (stroke.width - 0.2).abs() < 1e-7)
         }));

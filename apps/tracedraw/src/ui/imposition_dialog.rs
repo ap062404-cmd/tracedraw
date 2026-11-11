@@ -170,6 +170,7 @@ pub fn dialog(app: &mut App, ctx: &Context, state: &mut State, close: &mut bool)
     let mut add_selected = false;
     let mut remove_design = None;
     let mut create_document = false;
+    let mut create_booklet = false;
     let mut selected_sheet_preset: Option<(f64, f64)> = None;
     let mut delete_sheet_preset: Option<String> = None;
     egui::Window::new("Object Imposition")
@@ -187,6 +188,33 @@ pub fn dialog(app: &mut App, ctx: &Context, state: &mut State, close: &mut bool)
                 .show(ui, |ui| {
                     ui.label("Each selected top-level object is one production design. Groups stay together.");
                     ui.label("Select other objects on the canvas, then add them as separate designs.");
+                    ui.separator();
+                    ui.heading("Booklet imposition");
+                    let source_pages = app.doc().pages.len();
+                    let booklet_info = crate::imposition::booklet_info(
+                        source_pages,
+                        &crate::imposition::Booklet::default(),
+                    );
+                    ui.label(format!(
+                        "Process all {source_pages} document page(s) in page order. Adds {} blank page(s); output: {} sheet side(s) for duplex printing.",
+                        booklet_info.blanks, booklet_info.sheets * 2
+                    ));
+                    ui.small("Saddle stitch sequence: outer sheet first, then inner sheets. Each output page is one side of a printed sheet.");
+                    if source_pages > 0 {
+                        let sides = crate::imposition::booklet_sides(
+                            source_pages,
+                            &crate::imposition::Booklet::default(),
+                        );
+                        let sample = sides.iter().take(4).enumerate().map(|(i, side)| {
+                            let label = |p: Option<usize>| p.map(|n| (n + 1).to_string()).unwrap_or_else(|| "Blank".into());
+                            format!("Side {}: {} | {}", i + 1, label(side.left), label(side.right))
+                        }).collect::<Vec<_>>().join("   ·   ");
+                        ui.small(sample);
+                    }
+                    if ui.button("Create booklet from all pages").clicked() {
+                        create_booklet = true;
+                    }
+                    ui.separator();
                     ui.checkbox(&mut state.shape_nesting, "Nest by true object outlines (experimental)");
                     ui.small("Uses vector contours for tighter packing; rectangular mode remains the default fallback.");
                     ui.separator();
@@ -422,6 +450,42 @@ pub fn dialog(app: &mut App, ctx: &Context, state: &mut State, close: &mut bool)
             app.status = "Select valid objects or groups before adding designs.".into();
         } else {
             state.cached_plan = None;
+        }
+    }
+
+    if create_booklet {
+        let source = app.doc();
+        if source.pages.is_empty() {
+            app.status = "Booklet: the document has no pages.".into();
+        } else {
+            let options = crate::imposition::Options {
+                layout: crate::imposition::Layout::Booklet,
+                sheet: Some(tracedraw_core::Size::new(
+                    state.sheet_width_mm.max(1.0),
+                    state.sheet_height_mm.max(1.0),
+                )),
+                gutter: state.gutter_x_mm.max(0.0),
+                gutter_y: Some(state.gutter_y_mm.max(0.0)),
+                bleed: state.bleed_mm.max(0.0),
+                paper_margins: [
+                    state.margin_x_mm.max(0.0),
+                    state.margin_x_mm.max(0.0),
+                    state.margin_y_mm.max(0.0),
+                    state.margin_y_mm.max(0.0),
+                ],
+                booklet: crate::imposition::Booklet {
+                    gap: state.gutter_x_mm.max(0.0),
+                    ..Default::default()
+                },
+                marks: crate::imposition::Marks {
+                    crop: state.crop_marks,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let output = crate::imposition::impose(source, &options);
+            app.open_document(output, None);
+            *close = true;
         }
     }
 

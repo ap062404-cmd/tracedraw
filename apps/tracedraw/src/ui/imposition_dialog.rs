@@ -53,7 +53,7 @@ impl State {
         // Each top-level selected shape is a separate design. A Group remains
         // one Shape, so its children stay together as one production unit.
         let designs: Vec<DesignEntry> = shapes.into_iter().enumerate()
-            .filter_map(|(index, shape)| DesignEntry::from_shapes(index as u64 + 1, vec![shape], 10))
+            .filter_map(|(index, shape)| DesignEntry::from_shapes(index as u64 + 1, vec![shape], 1))
             .collect();
         if designs.is_empty() { return None; }
         let next_design_id = designs.iter().map(|design| design.id).max().unwrap_or(0).saturating_add(1);

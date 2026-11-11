@@ -42,7 +42,9 @@ pub struct State {
     pub crop_mark_length_mm: f64,
     pub crop_mark_offset_mm: f64,
     pub crop_mark_width_mm: f64,
+    pub shape_nesting: bool,
     pub preview_sheet_index: usize,
+    cached_shape_nesting: bool,
     cached_specs: Vec<DesignSpec>,
     cached_settings: Option<SheetSettings>,
     cached_plan: Option<Result<object_imposition::ImpositionPlan, object_imposition::PlanError>>,
@@ -71,7 +73,9 @@ impl State {
             crop_mark_length_mm: 3.0,
             crop_mark_offset_mm: 0.5,
             crop_mark_width_mm: 0.2,
+            shape_nesting: false,
             preview_sheet_index: 0,
+            cached_shape_nesting: false,
             cached_specs: Vec::new(),
             cached_settings: None,
             cached_plan: None,
@@ -162,6 +166,8 @@ pub fn dialog(app: &mut App, ctx: &Context, state: &mut State, close: &mut bool)
                 .show(ui, |ui| {
                     ui.label("Each selected top-level object is one production design. Groups stay together.");
                     ui.label("Select other objects on the canvas, then add them as separate designs.");
+                    ui.checkbox(&mut state.shape_nesting, "Nest by true object outlines (experimental)");
+                    ui.small("Uses vector contours for tighter packing; rectangular mode remains the default fallback.");
                     ui.separator();
 
                     ui.heading("Designs");
@@ -270,10 +276,23 @@ pub fn dialog(app: &mut App, ctx: &Context, state: &mut State, close: &mut bool)
                         copies: design.copies,
                         allow_rotation: design.allow_rotation,
                     }).collect();
-                    if state.cached_specs != specs || state.cached_settings != Some(settings) || state.cached_plan.is_none() {
-                        state.cached_plan = Some(object_imposition::plan(&specs, settings));
+                    if state.cached_specs != specs
+                        || state.cached_settings != Some(settings)
+                        || state.cached_shape_nesting != state.shape_nesting
+                        || state.cached_plan.is_none()
+                    {
+                        let artwork: Vec<DesignArtwork> = state.designs.iter().map(|design| DesignArtwork {
+                            id: design.id,
+                            shapes: design.shapes.clone(),
+                        }).collect();
+                        state.cached_plan = Some(if state.shape_nesting {
+                            object_imposition::plan_shape_aware(&artwork, &specs, settings)
+                        } else {
+                            object_imposition::plan(&specs, settings)
+                        });
                         state.cached_specs = specs;
                         state.cached_settings = Some(settings);
+                        state.cached_shape_nesting = state.shape_nesting;
                         state.preview_sheet_index = 0;
                     }
                     match state.cached_plan.as_ref().expect("plan cache initialized") {

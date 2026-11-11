@@ -391,7 +391,9 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         .size_range(need..=OPTIONS_MAX.max(need))
         .show(ui, |ui| {
             egui::ScrollArea::both().show(ui, |ui| {
-                ui.collapsing(tr("dialog.general"), |ui| {
+                egui::CollapsingHeader::new(tr("dialog.preview"))
+                    .default_open(true)
+                    .show(ui, |ui| {
                 let st = &mut pv.st;
                 // Two options to a row, so the panel has room for more
                 // (#951): which pages print, then the marks.
@@ -593,7 +595,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 });
                 });
                 ui.separator();
-                ui.collapsing(tr("dialog.layout"), |ui| {
+                ui.collapsing(tr("dialog.print"), |ui| {
                     crate::ui::dialogs::print_layout_fields(app, ui, &mut pv.st);
                 });
             })

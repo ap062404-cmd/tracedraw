@@ -520,14 +520,12 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 {
                     st.info_offset = (0.0, 0.0);
                 }
-                // Transform: the page stretched on the sheet by handles,
-                // or by these percentages (#595).
-                ui.checkbox(&mut pv.transform, tr("print.transform"))
-                    .rich_tip(tr("print.transform_tip"));
                 });
                 ui.separator();
                 ui.collapsing(tr("print.art_position"), |ui| {
                 let st = &mut pv.st;
+                // Transform: the page stretched on the sheet by handles,
+                // or by these percentages (#595).
                 ui.checkbox(&mut pv.transform, tr("print.transform"))
                     .rich_tip(tr("print.transform_tip"));
                 let st = &mut pv.st;
@@ -592,7 +590,6 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                     {
                         st.art_offset = (0.0, 0.0);
                     }
-                });
                 });
                 });
                 ui.separator();

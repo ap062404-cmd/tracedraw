@@ -43,6 +43,8 @@ pub struct State {
     pub crop_mark_offset_mm: f64,
     pub crop_mark_width_mm: f64,
     pub shape_nesting: bool,
+    /// Name entered while saving the current custom sheet size.
+    pub saving_sheet_preset: Option<String>,
     pub preview_sheet_index: usize,
     cached_shape_nesting: bool,
     cached_specs: Vec<DesignSpec>,
@@ -74,6 +76,7 @@ impl State {
             crop_mark_offset_mm: 0.5,
             crop_mark_width_mm: 0.2,
             shape_nesting: false,
+            saving_sheet_preset: None,
             preview_sheet_index: 0,
             cached_shape_nesting: false,
             cached_specs: Vec::new(),
@@ -167,6 +170,8 @@ pub fn dialog(app: &mut App, ctx: &Context, state: &mut State, close: &mut bool)
     let mut add_selected = false;
     let mut remove_design = None;
     let mut create_document = false;
+    let mut selected_sheet_preset: Option<(f64, f64)> = None;
+    let mut delete_sheet_preset: Option<String> = None;
     egui::Window::new("Object Imposition")
         .order(egui::Order::Foreground)
         .collapsible(false)
@@ -234,7 +239,60 @@ pub fn dialog(app: &mut App, ctx: &Context, state: &mut State, close: &mut bool)
                             state.sheet_width_mm = 320.0;
                             state.sheet_height_mm = 450.0;
                         }
+                        ui.menu_button("Saved sizes", |ui| {
+                            if app.settings.page_sizes.is_empty() {
+                                ui.label("No saved page sizes yet.");
+                            }
+                            for preset in app.settings.page_sizes.clone() {
+                                ui.horizontal(|ui| {
+                                    if ui.selectable_label(false, format!(
+                                        "{} · {:.1} × {:.1} mm", preset.name,
+                                        preset.width_mm, preset.height_mm
+                                    )).clicked() {
+                                        selected_sheet_preset = Some((preset.width_mm, preset.height_mm));
+                                        ui.close();
+                                    }
+                                    if ui.small_button("×").on_hover_text("Delete saved size").clicked() {
+                                        delete_sheet_preset = Some(preset.name.clone());
+                                        ui.close();
+                                    }
+                                });
+                            }
+                        });
+                        if ui.small_button("Save current size…").clicked() {
+                            state.saving_sheet_preset = Some(format!(
+                                "{:.0} × {:.0} mm", state.sheet_width_mm, state.sheet_height_mm
+                            ));
+                        }
                     });
+                    if let Some((width, height)) = selected_sheet_preset {
+                        state.sheet_width_mm = width;
+                        state.sheet_height_mm = height;
+                    }
+                    if let Some(name) = delete_sheet_preset {
+                        app.settings.page_sizes.retain(|preset| preset.name != name);
+                        app.settings.save();
+                    }
+                    if let Some(name) = &mut state.saving_sheet_preset {
+                        ui.horizontal(|ui| {
+                            ui.label("Template name:");
+                            ui.text_edit_singleline(name);
+                            if ui.button("Save").clicked() && !name.trim().is_empty() {
+                                let name = name.trim().to_string();
+                                app.settings.page_sizes.retain(|preset| preset.name != name);
+                                app.settings.page_sizes.push(crate::settings::PageSizePreset {
+                                    name,
+                                    width_mm: state.sheet_width_mm,
+                                    height_mm: state.sheet_height_mm,
+                                });
+                                app.settings.save();
+                                state.saving_sheet_preset = None;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                state.saving_sheet_preset = None;
+                            }
+                        });
+                    }
                     ui.horizontal(|ui| {
                         ui.label("Width");
                         ui.add(crate::ui::field::NumField::new(&mut state.sheet_width_mm).range(1.0..=10000.0));

@@ -8647,3 +8647,27 @@ fn font_records_and_the_style_table_name_the_faces_the_text_uses() {
     let (faces, _) = records(&document_to_cdr_version(&bold_doc, 15));
     assert_eq!(faces, vec![(1, 0x40), (1, 0x1000)], "15: {faces:x?}");
 }
+
+
+/// A CMYK bitmap record stores its colour model in the first DIB field,
+/// not in the following reserved field. CorelDRAW rejects records whose
+/// model is left as RGB while the pixel data is four-channel CMYK.
+#[test]
+fn cmyk_bitmap_record_marks_the_dib_colour_model() {
+    let mut picture = tiny_skia::Pixmap::new(2, 2).expect("picture");
+    picture.fill(tiny_skia::Color::WHITE);
+    let png = picture.encode_png().expect("picture png");
+
+    // Four stacked planes (C, M, Y, K), each the same size as the picture.
+    let mut planes = tiny_skia::Pixmap::new(2, 8).expect("ink planes");
+    planes.fill(tiny_skia::Color::WHITE);
+    let plane_png = planes.encode_png().expect("planes png");
+    let inks = tracedraw_core::picture_inks::PictureInks::cmyk(&png, plane_png.into());
+
+    let record = bmp_record(1, &png, (10.0, 10.0), Some(&inks)).expect("bitmap record");
+    let u32_at = |at: usize| u32::from_le_bytes(record[at..at + 4].try_into().expect("u32"));
+
+    // 4-byte id + 50-byte bitmap envelope precede the DIB fields.
+    assert_eq!(u32_at(54), 3, "CMYK colour model");
+    assert_eq!(u32_at(58), 0, "reserved field");
+}

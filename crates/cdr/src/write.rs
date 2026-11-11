@@ -15,7 +15,8 @@
 //! names, rectangles, ellipses (with
 //! arcs), curves for every other outline (polygons, paths, tables, symbols,
 //! expanded effects), groups, artistic text with one font, size and style
-//! per run, bitmaps (24-bit RGB or 32-bit CMYK when original ink planes remain valid), solid and fountain fills, outlines (width,
+//! per run, bitmaps (24-bit RGB or 32-bit CMYK when original ink planes
+//! remain valid), solid and fountain fills, outlines (width,
 //! caps, joins, dashes, nib, "scale with object", "behind fill") and
 //! uniform transparency. From version 11 a clip frame is a clip
 //! container: the frame object names, in argument 8005, a group of the
@@ -1395,10 +1396,17 @@ fn document_palette_xml(doc: &Document) -> String {
             Color::Registration => ("REGISTRATION", Vec::new()),
             other => {
                 let [r, g, b] = other.to_rgb8();
-                ("RGB", vec![r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0])
+                (
+                    "RGB",
+                    vec![r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0],
+                )
             }
         };
-        let tints = values.iter().map(|v| format!("{:.6}", v.clamp(0.0, 1.0))).collect::<Vec<_>>().join(",");
+        let tints = values
+            .iter()
+            .map(|v| format!("{:.6}", v.clamp(0.0, 1.0)))
+            .collect::<Vec<_>>()
+            .join(",");
         xml.push_str(&format!(
             "<color cs=\"{space}\" name=\"Color {}\" tints=\"{tints}\"/>",
             i + 1

@@ -5097,8 +5097,22 @@ impl<'a> Writer<'a> {
         let mut c = Buf::default();
         corners(&mut c);
         corners(&mut c);
+        let bits_per_pixel = if s.picture_inks.as_deref().is_some_and(|inks| {
+            inks.fits(png)
+                && inks.inks.as_slice()
+                    == [
+                        tracedraw_core::picture_inks::PictureInk::Process(0),
+                        tracedraw_core::picture_inks::PictureInk::Process(1),
+                        tracedraw_core::picture_inks::PictureInk::Process(2),
+                        tracedraw_core::picture_inks::PictureInk::Process(3),
+                    ]
+        }) {
+            32
+        } else {
+            24
+        };
         c.u16(2)
-            .u16(24)
+            .u16(bits_per_pixel)
             .u32(width_px)
             .u32(height_px)
             .u32(number)

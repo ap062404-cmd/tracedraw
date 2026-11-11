@@ -2794,15 +2794,39 @@ fn stlt(v: Ver, uses: StyleUses) -> Vec<u8> {
 /// 8): "RI", its length, 0, a 78-byte header (model 99, 1, size, 1 plane,
 /// 8 bits, stride, bytes, 64 at 62) and one byte per pixel, 255 opaque,
 /// rows bottom-up padded to 4 bytes.
-fn bmp_record(id: u32, png: &[u8], size_mm: (f64, f64)) -> Option<Vec<u8>> {
+fn bmp_record(
+    id: u32,
+    png: &[u8],
+    size_mm: (f64, f64),
+    picture_inks: Option<&tracedraw_core::picture_inks::PictureInks>,
+) -> Option<Vec<u8>> {
     let pm = tiny_skia::Pixmap::decode_png(png).ok()?;
     let (w, h) = (pm.width(), pm.height());
     if w == 0 || h == 0 {
         return None;
     }
-    let stride = (w as usize * 24).div_ceil(32) * 4;
+    // Keep the original CMYK separations when the ink planes still belong
+    // to these exact pixels. Edited/resampled pictures safely fall back to RGB.
+    let ink_planes = picture_inks
+        .filter(|inks| inks.fits(png))
+        .filter(|inks| {
+            inks.inks.as_slice()
+                == [
+                    tracedraw_core::picture_inks::PictureInk::Process(0),
+                    tracedraw_core::picture_inks::PictureInk::Process(1),
+                    tracedraw_core::picture_inks::PictureInk::Process(2),
+                    tracedraw_core::picture_inks::PictureInk::Process(3),
+                ]
+        })
+        .and_then(|inks| tiny_skia::Pixmap::decode_png(&inks.png).ok())
+        .filter(|planes| planes.width() == w && planes.height() == h.saturating_mul(4));
+    let cmyk = ink_planes.is_some();
+    let bpp = if cmyk { 32usize } else { 24usize };
+    let bytes_per_pixel = if cmyk { 4usize } else { 3usize };
+    let stride = (w as usize * bpp).div_ceil(32) * 4;
     let mut pixels = vec![0u8; stride * h as usize];
     let src = pm.pixels();
+    let planes = ink_planes.as_ref().map(|p| p.pixels());
     let mask_stride = (w as usize).div_ceil(4) * 4;
     let see_through = src.iter().any(|p| p.alpha() < 255);
     let mut mask = vec![
@@ -2823,7 +2847,16 @@ fn bmp_record(id: u32, png: &[u8], size_mm: (f64, f64)) -> Option<Vec<u8>> {
             if let Some(m) = mask.get_mut(mask_at + x) {
                 *m = p.alpha();
             }
-            if let Some(px) = pixels.get_mut(at + x * 3..at + x * 3 + 3) {
+            if cmyk {
+                let Some(planes) = planes else { continue };
+                for channel in 0..4 {
+                    let plane_at = channel * (w as usize * h as usize) + row * w as usize + x;
+                    let ink = planes.get(plane_at).map(|p| p.red()).unwrap_or(0);
+                    if let Some(dst) = pixels.get_mut(at + x * bytes_per_pixel + channel) {
+                        *dst = ink;
+                    }
+                }
+            } else if let Some(px) = pixels.get_mut(at + x * bytes_per_pixel..at + x * bytes_per_pixel + 3) {
                 px.copy_from_slice(&[p.blue(), p.green(), p.red()]);
             }
         }
@@ -5005,7 +5038,7 @@ impl<'a> Writer<'a> {
             let c = s.transform.as_coeffs();
             (c[0].hypot(c[1]), c[2].hypot(c[3]))
         };
-        let Some(image) = self.bitmap_id(png, (rect.width() * sx, rect.height() * sy)) else {
+        let Some(image) = self.bitmap_id(\n            png,\n            (rect.width() * sx, rect.height() * sy),\n            s.picture_inks.as_deref(),\n        ) else {
             return Placed {
                 nodes: Vec::new(),
                 bounds: None,

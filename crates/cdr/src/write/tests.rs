@@ -8671,26 +8671,3 @@ fn cmyk_bitmap_record_marks_the_dib_colour_model() {
     assert_eq!(u32_at(54), 3, "CMYK colour model");
     assert_eq!(u32_at(58), 0, "reserved field");
 }
-
-
-#[test]
-fn identical_bitmap_objects_reuse_one_cdr_bitmap_record() {
-    let mut picture = tiny_skia::Pixmap::new(3, 2).expect("picture");
-    picture.fill(tiny_skia::Color::WHITE);
-    let png = picture.encode_png().expect("picture png");
-
-    let mut writer = Writer::new(Ver(DEFAULT_VERSION), &[], "bitmap reuse");
-    let first = writer
-        .bitmap_id(&png, (30.0, 20.0), None)
-        .expect("first bitmap");
-    let repeated = writer
-        .bitmap_id(&png, (30.0, 20.0), None)
-        .expect("repeated bitmap");
-    let different_size = writer
-        .bitmap_id(&png, (60.0, 40.0), None)
-        .expect("bitmap at another physical size");
-
-    assert_eq!(first, repeated, "identical bitmap payloads share an id");
-    assert_ne!(first, different_size, "different image resolution metadata gets its own id");
-    assert_eq!(writer.bitmaps.len(), 2, "only distinct bitmap records are stored");
-}

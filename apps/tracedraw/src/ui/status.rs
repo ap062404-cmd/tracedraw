@@ -131,7 +131,7 @@ pub fn object_info(app: &App) -> String {
                         ("k", &kind_name(k)),
                         (
                             "mode",
-                            &tr(if s.cmyk_bitmap {
+                            &tr(if crate::bitmap_file::is_cmyk(s) {
                                 "convert_colors.cmyk"
                             } else if crate::bitmap_fx::png_is_gray(png) {
                                 "convert_colors.gray"

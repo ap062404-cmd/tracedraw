@@ -741,10 +741,10 @@ fn default_tab(ui: &mut Ui, st: &mut ColorManagementState, load: &mut Option<Spa
             ui.label(display_name);
             ui.end_row();
             row(ui, "Operating-system monitor ICC:");
-            ui.label("Not queried");
+            ui.label("Deferred — not required for this release");
             ui.end_row();
             row(ui, "Monitor compensation:");
-            ui.label("Not active — sRGB output is retained");
+            ui.label("Not applied — sRGB output is retained");
             ui.end_row();
         });
 }

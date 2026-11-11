@@ -77,7 +77,6 @@ jobs:
           - os: windows-latest
             target: i686-pc-windows-msvc
             name: windows-x86
-    if: github.event_name != 'pull_request' || matrix.target != 'i686-pc-windows-msvc'
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5

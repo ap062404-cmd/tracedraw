@@ -515,7 +515,14 @@ pub fn plan_shape_aware(
         rotations: Rotations::Quarter,
         holes: true,
         tolerance: 0.15,
-        rounds: 40,
+        // The improvement loop repeats a full geometry nest. Keep it
+        // generous for small jobs and bounded on larger production runs.
+        rounds: match parts.len() {
+            0..=32 => 40,
+            33..=100 => 12,
+            101..=300 => 3,
+            _ => 0,
+        },
         seed: 1,
     };
     let mut never_stop = || false;

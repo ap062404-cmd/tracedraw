@@ -1386,7 +1386,7 @@ fn document_styles(v: Ver) -> String {
 /// names, so stable generic names are used rather than inventing names.
 fn document_palette_xml(doc: &Document) -> String {
     let mut xml = String::from(
-        "<?xml version=\"1.0\"?>\\r\\n<palette guid=\"3f8e2a71-6c4d-4b19-a0e5-9d2c7b61f483\" name=\"Document Palette\">",
+        "<?xml version=\"1.0\"?>\r\n<palette guid=\"3f8e2a71-6c4d-4b19-a0e5-9d2c7b61f483\" name=\"Document Palette\">",
     );
     for (i, color) in doc.palette.iter().enumerate() {
         let (space, values) = match color.process() {
@@ -1404,7 +1404,7 @@ fn document_palette_xml(doc: &Document) -> String {
             i + 1
         ));
     }
-    xml.push_str("</palette>\\r\\n");
+    xml.push_str("</palette>\r\n");
     xml
 }
 

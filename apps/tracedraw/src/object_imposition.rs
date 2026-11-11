@@ -55,6 +55,8 @@ pub struct ObjectPlacement {
     pub width_mm: f64,
     pub height_mm: f64,
     pub rotated: bool,
+    /// Exact page-space transform for true-outline nesting; `None` uses the rectangular planner.
+    pub shape_transform: Option<[f64; 6]>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -289,10 +291,14 @@ pub fn build_document_with_crop_settings(
             .ok_or(PlanError::InvalidDesign { id: placement.design_id })?;
         let target_y = sheet.height_mm - placement.y_mm - placement.height_mm;
         let source_center = source_bounds.center();
-        let angle = if placement.rotated { std::f64::consts::FRAC_PI_2 } else { 0.0 };
-        let rotate_about_center = Affine::translate((source_center.x, source_center.y))
-            * Affine::rotate(angle)
-            * Affine::translate((-source_center.x, -source_center.y));
+        let rotate_about_center = if let Some(coeffs) = placement.shape_transform {
+            Affine::new(coeffs)
+        } else {
+            let angle = if placement.rotated { std::f64::consts::FRAC_PI_2 } else { 0.0 };
+            Affine::translate((source_center.x, source_center.y))
+                * Affine::rotate(angle)
+                * Affine::translate((-source_center.x, -source_center.y))
+        };
         let rotated_corners = [
             Point::new(source_bounds.x0, source_bounds.y0),
             Point::new(source_bounds.x1, source_bounds.y0),
@@ -429,6 +435,136 @@ pub fn build_document_with_crop_settings(
     Ok(doc)
 }
 
+/// Plan copies by their actual vector outlines using TraceCut's contour nesting engine.
+/// The returned transform is in page coordinates (mm, Y up), ready to apply to each source shape.
+pub fn plan_shape_aware(
+    designs: &[DesignArtwork],
+    specs: &[DesignSpec],
+    settings: SheetSettings,
+) -> Result<ImpositionPlan, PlanError> {
+    use tracedraw_tracecut::nest::{
+        shapes::{nest_shapes, Rotations, ShapeSettings},
+        SheetSpec,
+    };
+
+    if specs.len() != designs.len() {
+        return Err(PlanError::InvalidSheet);
+    }
+    let values = [
+        settings.width_mm, settings.height_mm, settings.margin_left_mm,
+        settings.margin_right_mm, settings.margin_top_mm, settings.margin_bottom_mm,
+        settings.gutter_x_mm, settings.gutter_y_mm, settings.bleed_mm,
+    ];
+    if values.iter().any(|v| !v.is_finite()) || settings.width_mm <= 0.0 || settings.height_mm <= 0.0 {
+        return Err(PlanError::InvalidSheet);
+    }
+    if values[2..].iter().any(|v| *v < 0.0) {
+        return Err(PlanError::InvalidMargins);
+    }
+
+    let mut parts = Vec::new();
+    let mut owners = Vec::new();
+    for (design, spec) in designs.iter().zip(specs) {
+        if design.id != spec.id || spec.copies == 0 {
+            if design.id != spec.id {
+                return Err(PlanError::InvalidDesign { id: spec.id });
+            }
+            continue;
+        }
+        if !spec.width_mm.is_finite() || !spec.height_mm.is_finite()
+            || spec.width_mm <= 0.0 || spec.height_mm <= 0.0
+        {
+            return Err(PlanError::InvalidDesign { id: spec.id });
+        }
+        let paths: Vec<_> = design.shapes.iter()
+            .flat_map(tracedraw_tracecut::outlines)
+            .collect();
+        if paths.is_empty() {
+            return Err(PlanError::InvalidDesign { id: spec.id });
+        }
+        for copy_index in 0..spec.copies {
+            parts.push(paths.clone());
+            owners.push((spec.id, copy_index));
+        }
+    }
+    if parts.is_empty() {
+        return Ok(ImpositionPlan {
+            placements: Vec::new(), sheet_count: 0, total_copies: 0,
+            utilization_percent: 0.0,
+        });
+    }
+
+    // The shape engine uses a uniform inset and spacing. Use the larger
+    // horizontal/vertical margins and gutter conservatively, and reserve
+    // bleed on every side so no artwork can enter a neighboring bleed.
+    let margin = settings.margin_left_mm
+        .max(settings.margin_right_mm)
+        .max(settings.margin_top_mm)
+        .max(settings.margin_bottom_mm)
+        + settings.bleed_mm;
+    let spacing = settings.gutter_x_mm.max(settings.gutter_y_mm)
+        + 2.0 * settings.bleed_mm;
+    let nest_settings = ShapeSettings {
+        sheet: SheetSpec {
+            width: settings.width_mm,
+            height: settings.height_mm,
+            margin,
+            spacing,
+            ..Default::default()
+        },
+        rotations: Rotations::Quarter,
+        holes: true,
+        tolerance: 0.15,
+        rounds: 40,
+        seed: 1,
+    };
+    let mut never_stop = || false;
+    let layout = nest_shapes(&parts, &nest_settings, &mut never_stop);
+    let mut placements = Vec::with_capacity(parts.len());
+    for (index, placement) in layout.placements.iter().enumerate() {
+        let Some(placement) = placement else {
+            let (id, _) = owners[index];
+            let spec = specs.iter().find(|s| s.id == id).expect("owner has spec");
+            return Err(PlanError::DoesNotFit {
+                id,
+                width_mm: spec.width_mm,
+                height_mm: spec.height_mm,
+            });
+        };
+        let bounds = tracedraw_tracecut::nest::shapes::placed_bounds(
+            &parts[index], placement.transform,
+        ).ok_or_else(|| {
+            let (id, _) = owners[index];
+            PlanError::InvalidDesign { id }
+        })?;
+        let (design_id, copy_index) = owners[index];
+        placements.push(ObjectPlacement {
+            design_id,
+            copy_index,
+            sheet_index: placement.sheet,
+            x_mm: bounds.x0,
+            y_mm: settings.height_mm - bounds.y1,
+            width_mm: bounds.width(),
+            height_mm: bounds.height(),
+            rotated: placement.angle.abs() > 1e-7,
+            shape_transform: Some(placement.transform.as_coeffs()),
+        });
+    }
+    let sheet_count = layout.sheets;
+    let artwork_area = layout.parts_area;
+    let sheet_area = settings.width_mm * settings.height_mm * sheet_count as f64;
+    Ok(ImpositionPlan {
+        total_copies: placements.len(),
+        placements,
+        sheet_count,
+        utilization_percent: if sheet_area > 0.0 {
+            artwork_area / sheet_area * 100.0
+        } else {
+            0.0
+        },
+    })
+}
+
 /// Plan regular grid and cross-rotated candidates, matching the calculator's
 /// deterministic "maximum copies, then simplest layout" strategy for a
 /// single design. Multiple designs retain the general MaxRects fallback.
@@ -539,7 +675,7 @@ pub fn plan(designs: &[DesignSpec], settings: SheetSettings) -> Result<Impositio
             let (pw, ph) = if pos.2 { (d.height_mm, d.width_mm) } else { (d.width_mm, d.height_mm) };
             placements.push(ObjectPlacement {
                 design_id: d.id, copy_index: copy, sheet_index,
-                x_mm: pos.0, y_mm: pos.1, width_mm: pw, height_mm: ph, rotated: pos.2,
+                x_mm: pos.0, y_mm: pos.1, width_mm: pw, height_mm: ph, rotated: pos.2, shape_transform: None,
             });
         }
         let sheet_count = (d.copies as usize + per_sheet - 1) / per_sheet;
@@ -687,7 +823,7 @@ pub fn plan(designs: &[DesignSpec], settings: SheetSettings) -> Result<Impositio
         placements.push(ObjectPlacement { design_id:item.id,copy_index:item.copy,sheet_index:si,
             x_mm:outer.x+bleed,y_mm:outer.y+bleed,
             width_mm:c.w-settings.gutter_x_mm-2.0*bleed,
-            height_mm:c.h-settings.gutter_y_mm-2.0*bleed,rotated:c.rotated });
+            height_mm:c.h-settings.gutter_y_mm-2.0*bleed,rotated:c.rotated,shape_transform:None });
         let (tw,th)=if c.rotated {(item.h-2.0*bleed,item.w-2.0*bleed)} else {(item.w-2.0*bleed,item.h-2.0*bleed)};
         artwork_area+=tw*th;
     }
@@ -1157,7 +1293,7 @@ mod tests {
             placements: vec![ObjectPlacement {
                 design_id: 1, copy_index: 0, sheet_index: 0,
                 x_mm: 20.0, y_mm: 20.0, width_mm: 30.0, height_mm: 20.0,
-                rotated: false,
+                rotated: false, shape_transform: None,
             }],
             sheet_count: 1, total_copies: 1, utilization_percent: 7.5,
         };
@@ -1189,9 +1325,9 @@ mod tests {
         let plan = ImpositionPlan {
             placements: vec![
                 ObjectPlacement { design_id: 1, copy_index: 0, sheet_index: 0,
-                    x_mm: 20.0, y_mm: 20.0, width_mm: 30.0, height_mm: 20.0, rotated: false },
+                    x_mm: 20.0, y_mm: 20.0, width_mm: 30.0, height_mm: 20.0, rotated: false, shape_transform: None },
                 ObjectPlacement { design_id: 2, copy_index: 0, sheet_index: 0,
-                    x_mm: 51.0, y_mm: 20.0, width_mm: 20.0, height_mm: 20.0, rotated: false },
+                    x_mm: 51.0, y_mm: 20.0, width_mm: 20.0, height_mm: 20.0, rotated: false, shape_transform: None },
             ],
             sheet_count: 1, total_copies: 2, utilization_percent: 15.0,
         };

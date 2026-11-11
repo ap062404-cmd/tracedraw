@@ -12,6 +12,21 @@ fn doc_with(shapes: Vec<Shape>) -> Document {
 }
 
 #[test]
+fn document_palette_colours_round_trip_in_package() {
+    let mut doc = Document::new("palette", Size::new(100.0, 100.0));
+    doc.palette = vec![
+        Color::cmyk_pct(100.0, 0.0, 0.0, 0.0),
+        Color::cmyk_pct(0.0, 100.0, 0.0, 0.0),
+        Color::rgb8(20, 120, 220),
+        Color::Gray { v: 0.4 },
+    ];
+    let bytes = document_to_cdr(&doc);
+    let (back, report) = crate::open_bytes(&bytes, "palette").expect("reads package");
+    assert_eq!(report.skipped_objects, 0, "{:?}", report.warnings);
+    assert_eq!(back.palette, doc.palette);
+}
+
+#[test]
 fn rectangle_ellipse_curve_and_text_round_trip() {
     let mut doc = Document::new("w", Size::new(200.0, 100.0));
     let mut ids = doc.ids().clone();

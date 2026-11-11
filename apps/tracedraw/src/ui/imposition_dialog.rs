@@ -100,7 +100,7 @@ impl State {
 
 /// Draw a compact first-sheet preview using the exact placement coordinates
 /// produced by the planner. This is a visual aid, not an editable canvas.
-fn draw_preview(ui: &mut egui::Ui, plan: &object_imposition::ImpositionPlan, sheet: SheetSettings, sheet_index: usize) {
+fn draw_preview(ui: &mut egui::Ui, plan: &object_imposition::ImpositionPlan, designs: &[DesignEntry], sheet: SheetSettings, sheet_index: usize) {
     use egui::{Align2, Color32, FontId, Stroke};
     let available = egui::vec2(380.0, 230.0);
     let (outer, painter) = ui.allocate_painter(available, egui::Sense::hover());
@@ -131,8 +131,24 @@ fn draw_preview(ui: &mut egui::Ui, plan: &object_imposition::ImpositionPlan, she
             egui::vec2(placement.width_mm as f32 * scale, placement.height_mm as f32 * scale),
         );
         let color = colors[(placement.design_id as usize) % colors.len()];
-        painter.rect_filled(rect, 1.0, color);
-        painter.rect_stroke(rect, 1.0, Stroke::new(0.7, Color32::WHITE), egui::StrokeKind::Inside);
+        let is_plain_ellipse = designs.iter()
+            .find(|d| d.id == placement.design_id)
+            .is_some_and(|d| d.shapes.len() == 1
+                && matches!(&d.shapes[0].kind, tracedraw_core::ShapeKind::Ellipse { arc: None, .. }));
+        if placement.shape_transform.is_some() && is_plain_ellipse {
+            let center = rect.center();
+            let radius = rect.size() * 0.5;
+            let points: Vec<_> = (0..48).map(|i| {
+                let angle = i as f32 * std::f32::consts::TAU / 48.0;
+                center + egui::vec2(radius.x * angle.cos(), radius.y * angle.sin())
+            }).collect();
+            painter.add(egui::Shape::convex_polygon(
+                points, color, Stroke::new(0.7, Color32::WHITE),
+            ));
+        } else {
+            painter.rect_filled(rect, 1.0, color);
+            painter.rect_stroke(rect, 1.0, Stroke::new(0.7, Color32::WHITE), egui::StrokeKind::Inside);
+        }
         if rect.width() > 24.0 && rect.height() > 14.0 {
             painter.text(rect.center(), Align2::CENTER_CENTER,
                 format!("D{}", placement.design_id), FontId::proportional(10.0), Color32::WHITE);
@@ -313,7 +329,7 @@ pub fn dialog(app: &mut App, ctx: &Context, state: &mut State, close: &mut bool)
                             } else {
                                 state.preview_sheet_index = 0;
                             }
-                            draw_preview(ui, plan, settings, state.preview_sheet_index);
+                            draw_preview(ui, plan, &state.designs, settings, state.preview_sheet_index);
                             ui.label(format!(
                                 "{} copies across {} design(s) · {} sheet(s) · {:.1}% artwork utilization",
                                 plan.total_copies, state.designs.len(), plan.sheet_count, plan.utilization_percent

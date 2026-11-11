@@ -850,6 +850,32 @@ mod tests {
     }
 
     #[test]
+    fn true_outline_nesting_packs_three_circles_in_a_staggered_sheet() {
+        use tracedraw_core::{Shape, ShapeId, ShapeKind};
+        let circle = Shape::new(
+            ShapeId(1),
+            ShapeKind::Ellipse {
+                rect: tracedraw_core::Rect::new(0.0, 0.0, 20.0, 20.0),
+                arc: None,
+            },
+        );
+        let designs = vec![DesignArtwork { id: 1, shapes: vec![circle] }];
+        let specs = vec![DesignSpec {
+            id: 1, width_mm: 20.0, height_mm: 20.0, copies: 3, allow_rotation: true,
+        }];
+        let settings = SheetSettings {
+            width_mm: 40.3, height_mm: 38.3,
+            margin_left_mm: 0.0, margin_right_mm: 0.0,
+            margin_top_mm: 0.0, margin_bottom_mm: 0.0,
+            gutter_x_mm: 0.0, gutter_y_mm: 0.0, bleed_mm: 0.0,
+        };
+        let result = plan_shape_aware(&designs, &specs, settings).unwrap();
+        assert_eq!(result.total_copies, 3);
+        assert_eq!(result.sheet_count, 1);
+        assert!(result.placements.iter().all(|p| p.shape_transform.is_some()));
+    }
+
+    #[test]
     fn business_cards_fit_twenty_five_up_on_a3_plus() {
         let settings = SheetSettings {
             width_mm: 320.0, height_mm: 480.0,

@@ -15,7 +15,7 @@
 //! names, rectangles, ellipses (with
 //! arcs), curves for every other outline (polygons, paths, tables, symbols,
 //! expanded effects), groups, artistic text with one font, size and style
-//! per run, bitmaps (24-bit), solid and fountain fills, outlines (width,
+//! per run, bitmaps (24-bit RGB or 32-bit CMYK when original ink planes remain valid), solid and fountain fills, outlines (width,
 //! caps, joins, dashes, nib, "scale with object", "behind fill") and
 //! uniform transparency. From version 11 a clip frame is a clip
 //! container: the frame object names, in argument 8005, a group of the
@@ -1381,9 +1381,32 @@ fn document_styles(v: Ver) -> String {
     )
 }
 
-/// `color/docPalette.xml`: the document palette (empty: the colours a
-/// drawing uses live in its fills).
-const DOC_PALETTE_XML: &str = "<?xml version=\"1.0\"?>\r\n<palette guid=\"3f8e2a71-6c4d-4b19-a0e5-9d2c7b61f483\" name=\"Document Palette\"/>\r\n";
+/// `color/docPalette.xml`: write the document's process colours. The
+/// document model currently keeps palette colours but not their original
+/// names, so stable generic names are used rather than inventing names.
+fn document_palette_xml(doc: &Document) -> String {
+    let mut xml = String::from(
+        "<?xml version=\"1.0\"?>\\r\\n<palette guid=\"3f8e2a71-6c4d-4b19-a0e5-9d2c7b61f483\" name=\"Document Palette\">",
+    );
+    for (i, color) in doc.palette.iter().enumerate() {
+        let (space, values) = match color.process() {
+            Color::Cmyk { c, m, y, k } => ("CMYK", vec![c, m, y, k]),
+            Color::Gray { v } => ("GRAY", vec![v]),
+            Color::Registration => ("REGISTRATION", Vec::new()),
+            other => {
+                let [r, g, b] = other.to_rgb8();
+                ("RGB", vec![r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0])
+            }
+        };
+        let tints = values.iter().map(|v| format!("{:.6}", v.clamp(0.0, 1.0))).collect::<Vec<_>>().join(",");
+        xml.push_str(&format!(
+            "<color cs=\"{space}\" name=\"Color {}\" tints=\"{tints}\"/>",
+            i + 1
+        ));
+    }
+    xml.push_str("</palette>\\r\\n");
+    xml
+}
 
 /// `color/color.xml` naming the document's CMYK profile, when it carries
 /// one (stored under `color/profiles/cmyk/`), before the colour model, as
@@ -1474,7 +1497,7 @@ fn zip_v16(
     }
     let members: [(&str, String); 6] = [
         ("META-INF/textinfo.xml", textinfo_xml(doc)),
-        ("color/docPalette.xml", DOC_PALETTE_XML.to_string()),
+        ("color/docPalette.xml", document_palette_xml(doc)),
         ("styles/document.cdss", document_styles(v)),
         ("META-INF/metadata.xml", metadata_xml(v, doc)),
         (

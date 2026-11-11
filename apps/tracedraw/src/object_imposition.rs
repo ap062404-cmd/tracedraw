@@ -504,6 +504,14 @@ pub fn plan_shape_aware(
         + settings.bleed_mm;
     let spacing = settings.gutter_x_mm.max(settings.gutter_y_mm)
         + 2.0 * settings.bleed_mm;
+    // The current contour engine exposes rotation as a job-wide setting.
+    // If any design forbids rotation, keep the whole job unrotated rather
+    // than silently violating that design's constraint.
+    let rotations = if specs.iter().all(|spec| spec.allow_rotation) {
+        Rotations::Quarter
+    } else {
+        Rotations::None
+    };
     let nest_settings = ShapeSettings {
         sheet: SheetSpec {
             width: settings.width_mm,
@@ -512,7 +520,7 @@ pub fn plan_shape_aware(
             spacing,
             ..Default::default()
         },
-        rotations: Rotations::Quarter,
+        rotations,
         holes: true,
         tolerance: 0.15,
         // The improvement loop repeats a full geometry nest. Keep it

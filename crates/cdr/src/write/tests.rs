@@ -8739,8 +8739,8 @@ fn rgb_bitmap_record_writes_pixels_and_transparency_mask() {
     // The transparency block starts immediately after the RGB pixels.
     // Its alpha rows are bottom-up and padded to four bytes.
     assert_eq!(&record[134..136], &[0x52, 0x49], "transparency block marker");
-    assert_eq!(u32_at(134 + 2 + 4 + 4 + 4), 78, "mask header size");
-    assert_eq!(u32_at(134 + 2 + 4 + 4 + 4 + 4), 99, "mask colour model");
-    assert_eq!(u32_at(134 + 2 + 4 + 4 + 4 + 4 + 4 + 4 + 4), 8, "8-bit alpha");
+    assert_eq!(u32_at(144), 78, "mask header size");
+    assert_eq!(u32_at(148), 99, "mask colour model");
+    assert_eq!(u32_at(168), 8, "8-bit alpha");
     assert_eq!(&record[212..220], &[0, 64, 0, 0, 255, 128, 0, 0], "bottom-up alpha mask");
 }

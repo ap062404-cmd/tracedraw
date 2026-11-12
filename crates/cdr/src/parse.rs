@@ -585,11 +585,11 @@ pub(crate) fn parse_document_kept(
     cmyk_profile: Option<&[u8]>,
     kept: &[crate::kept_blends::KeptBlend],
     kept_effects: &[crate::kept_effects::KeptEffect],
+    static_ids: &mut HashMap<u32, tracedraw_core::ShapeId>,
 ) -> (Document, ParseReport) {
     let mut ctx = Ctx::new(main, tree, version.0);
-    if !kept.is_empty() || !kept_effects.is_empty() {
-        ctx.static_ids = Some(HashMap::new());
-    }
+    // Keep source object ids for raw CDR records as well as blends/effects.
+    ctx.static_ids = Some(HashMap::new());
     ctx.report.version = Some(version);
     ctx.cmyk_profile = cmyk_profile
         .and_then(|b| tracedraw_core::icc::Profile::parse(b).ok())
@@ -838,26 +838,26 @@ pub(crate) fn parse_document_kept(
         });
     }
 
-    if let Some(ids) = ctx.static_ids.take() {
-        // Objects first: a blend's end may be one, and the blend then
-        // takes its copy from the object put back.
-        let n = crate::kept_effects::restore(&mut doc, kept_effects, &ids);
-        if n < kept_effects.len() {
-            log::warn!(
-                "{} of the file's {} objects with effects open as drawn: they changed",
-                kept_effects.len() - n,
-                kept_effects.len()
-            );
-        }
-        let n = crate::kept_blends::restore(&mut doc, kept, &ids);
-        if n < kept.len() {
-            log::warn!(
-                "{} of the file's {} blends open as drawn: their groups changed",
-                kept.len() - n,
-                kept.len()
-            );
-        }
+    let ids = ctx.static_ids.take().unwrap_or_default();
+    // Objects first: a blend's end may be one, and the blend then takes
+    // its copy from the object put back.
+    let n = crate::kept_effects::restore(&mut doc, kept_effects, &ids);
+    if n < kept_effects.len() {
+        log::warn!(
+            "{} of the file's {} objects with effects open as drawn: they changed",
+            kept_effects.len() - n,
+            kept_effects.len()
+        );
     }
+    let n = crate::kept_blends::restore(&mut doc, kept, &ids);
+    if n < kept.len() {
+        log::warn!(
+            "{} of the file's {} blends open as drawn: their groups changed",
+            kept.len() - n,
+            kept.len()
+        );
+    }
+    *static_ids = ids;
     if !ctx.library_inks.is_empty() {
         let n = ctx.library_inks.len();
         for (palette, number) in &ctx.library_inks {

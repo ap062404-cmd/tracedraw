@@ -6095,7 +6095,7 @@ fn a_kept_blend_that_no_longer_matches_opens_as_drawn() {
     let externals = crate::container::external_streams(&bytes, &container);
     let root = crate::riff::parse_with_externals(&riff, externals, 27).expect("tree");
     let open = |kept: &[crate::kept_blends::KeptBlend]| {
-        crate::parse::parse_document_kept(&root, &riff, container.version, None, kept, &[]).0
+        crate::parse::parse_document_kept(&root, &riff, container.version, None, kept, &[], &mut std::collections::HashMap::new()).0
     };
     let accel = |d: &Document, i: usize| match d.pages[0].layers[0].shapes[i].effects.first() {
         Some(tracedraw_core::live::Effect::Blend { accel_objects, .. }) => Some(*accel_objects),
@@ -6943,7 +6943,7 @@ fn a_kept_effect_in_a_group_comes_back_and_a_moved_one_stays_drawn() {
     let externals = crate::container::external_streams(&bytes, &container);
     let root = crate::riff::parse_with_externals(&riff, externals, 27).expect("tree");
     let open = |kept: &[crate::kept_effects::KeptEffect]| {
-        crate::parse::parse_document_kept(&root, &riff, container.version, None, &[], kept).0
+        crate::parse::parse_document_kept(&root, &riff, container.version, None, &[], kept, &mut std::collections::HashMap::new()).0
     };
     let kind_of = |d: &Document| match &d.pages[0].layers[0].shapes[0].kind {
         ShapeKind::Group { children } => children[0].kind.clone(),
@@ -8198,7 +8198,7 @@ fn text_spans_read(bytes: &[u8], kept: bool) -> Vec<TextSpan> {
         let externals = crate::container::external_streams(bytes, &container);
         let root =
             crate::riff::parse_with_externals(&riff, externals, container.version.0).expect("tree");
-        crate::parse::parse_document_kept(&root, &riff, container.version, None, &[], &[]).0
+        crate::parse::parse_document_kept(&root, &riff, container.version, None, &[], &[], &mut std::collections::HashMap::new()).0
     };
     match &doc.pages[0].layers[0].shapes[0].kind {
         ShapeKind::Text { spans, .. } => spans.clone(),

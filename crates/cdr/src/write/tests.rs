@@ -8704,3 +8704,43 @@ fn cmyk_bitmap_record_marks_the_dib_colour_model() {
         "CMYK channel bytes and row order"
     );
 }
+
+/// RGB bitmap records keep BGR pixels and a separate bottom-up alpha mask.
+#[test]
+fn rgb_bitmap_record_writes_pixels_and_transparency_mask() {
+    let mut picture = tiny_skia::Pixmap::new(2, 2).expect("picture");
+    let pixels = [
+        (255, 0, 0, 255),
+        (0, 255, 0, 128),
+        (0, 0, 255, 0),
+        (255, 255, 255, 64),
+    ];
+    for (pixel, (r, g, b, a)) in picture.pixels_mut().iter_mut().zip(pixels) {
+        *pixel = tiny_skia::ColorU8::from_rgba(r, g, b, a).premultiply();
+    }
+    let png = picture.encode_png().expect("picture png");
+
+    let record = bmp_record(7, &png, (10.0, 10.0), None).expect("bitmap record");
+    let u32_at = |at: usize| u32::from_le_bytes(record[at..at + 4].try_into().expect("u32"));
+
+    assert_eq!(u32_at(54), 1, "RGB colour model");
+    assert_eq!(u32_at(58), 1, "bitmap plane count");
+    assert_eq!(u32_at(74), 24, "24-bit RGB pixels");
+    assert_eq!(u32_at(78), 8, "two padded 24-bit pixels per row");
+    assert_eq!(u32_at(82), 16, "two rows of eight pixel bytes");
+
+    // BGR rows are stored bottom-up; each 2-pixel row has two padding bytes.
+    assert_eq!(
+        &record[118..134],
+        &[0, 0, 0, 255, 255, 255, 0, 0, 0, 0, 255, 0, 0, 128, 0, 0],
+        "RGB pixel bytes and row order"
+    );
+
+    // The transparency block starts immediately after the RGB pixels.
+    // Its alpha rows are bottom-up and padded to four bytes.
+    assert_eq!(&record[134..136], &[0x52, 0x49], "transparency block marker");
+    assert_eq!(u32_at(134 + 2 + 4 + 4 + 4), 78, "mask header size");
+    assert_eq!(u32_at(134 + 2 + 4 + 4 + 4 + 4), 99, "mask colour model");
+    assert_eq!(u32_at(134 + 2 + 4 + 4 + 4 + 4 + 4 + 4 + 4), 8, "8-bit alpha");
+    assert_eq!(&record[212..220], &[0, 64, 0, 0, 255, 128, 0, 0], "bottom-up alpha mask");
+}

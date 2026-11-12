@@ -113,11 +113,24 @@ pub fn open_bytes_keeping(
     bytes: &[u8],
     title: &str,
 ) -> Result<(tracedraw_core::Document, ParseReport, RawTable)> {
+    open_bytes_keeping_with_ids(bytes, title).map(|(doc, report, raw, _)| (doc, report, raw))
+}
+
+/// Also returns the mapping from source CDR object ids (usdn) to TraceDraw shape ids.
+pub fn open_bytes_keeping_with_ids(
+    bytes: &[u8],
+    title: &str,
+) -> Result<(
+    tracedraw_core::Document,
+    ParseReport,
+    RawTable,
+    std::collections::HashMap<u32, tracedraw_core::ShapeId>,
+)> {
     if cmx::is_cmx(bytes) {
-        return cmx::open_bytes(bytes, title).map(|(d, r)| (d, r, RawTable::default()));
+        return cmx::open_bytes(bytes, title).map(|(d, r)| (d, r, RawTable::default(), std::collections::HashMap::new()));
     }
     if wl::is_wl(bytes) {
-        return wl::open_bytes(bytes, title).map(|(d, r)| (d, r, RawTable::default()));
+        return wl::open_bytes(bytes, title).map(|(d, r)| (d, r, RawTable::default(), std::collections::HashMap::new()));
     }
     let container = container::detect(bytes)?;
     let riff = Arc::new(container::riff_stream(bytes, &container)?);
@@ -143,6 +156,7 @@ pub fn open_bytes_keeping(
     )
     .map(|b| kept_effects::decode(&b))
     .unwrap_or_default();
+    let mut static_ids = std::collections::HashMap::new();
     let mut doc_report = parse::parse_document_kept(
         &root,
         &riff,
@@ -150,6 +164,7 @@ pub fn open_bytes_keeping(
         cmyk_profile.as_ref().map(|p| p.data.as_slice()),
         &kept,
         &kept_effects,
+        &mut static_ids,
     );
     doc_report.0.title = title.to_string();
     doc_report.0.palette = container::document_palette(bytes, &container)
@@ -197,5 +212,5 @@ pub fn open_bytes_keeping(
     let version = doc_report.1.version.unwrap_or(container.version).0;
     let kept = raw::collect(&root, riff, version, &parse::known());
     doc_report.1.unknown = kept.summary();
-    Ok((doc_report.0, doc_report.1, kept))
+    Ok((doc_report.0, doc_report.1, kept, static_ids))
 }

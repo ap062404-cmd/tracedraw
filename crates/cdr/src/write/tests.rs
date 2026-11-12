@@ -8670,7 +8670,18 @@ fn cmyk_bitmap_record_marks_the_dib_colour_model() {
 
     // Four stacked planes (C, M, Y, K), each the same size as the picture.
     let mut planes = tiny_skia::Pixmap::new(2, 8).expect("ink planes");
-    planes.fill(tiny_skia::Color::WHITE);
+    // Give every channel and row distinct values. This catches channel
+    // swaps, plane-order mistakes and a top-down/bottom-up row inversion.
+    for channel in 0..4usize {
+        for row in 0..2usize {
+            for x in 0..2usize {
+                let value = (10 + channel * 10 + row * 2 + x) as u8;
+                let at = (channel * 2 + row) * 2 + x;
+                planes.pixels_mut()[at] =
+                    tiny_skia::ColorU8::from_rgba(value, value, value, 255).premultiply();
+            }
+        }
+    }
     let plane_png = planes.encode_png().expect("planes png");
     let inks = tracedraw_core::picture_inks::PictureInks::cmyk(&png, plane_png.into());
 
@@ -8680,4 +8691,16 @@ fn cmyk_bitmap_record_marks_the_dib_colour_model() {
     // 4-byte id + 50-byte bitmap envelope precede the DIB fields.
     assert_eq!(u32_at(54), 3, "CMYK colour model");
     assert_eq!(u32_at(58), 1, "bitmap plane count");
+    assert_eq!(u32_at(74), 32, "32-bit CMYK pixels");
+    assert_eq!(u32_at(78), 8, "two 32-bit pixels per row");
+    assert_eq!(u32_at(82), 16, "two rows of eight pixel bytes");
+
+    // The bitmap body begins after the 54-byte envelope, 32-byte DIB
+    // header and 32-byte resolution/palette section. Rows are bottom-up;
+    // each pixel stores C, M, Y, K in that order.
+    assert_eq!(
+        &record[118..134],
+        &[12, 22, 32, 42, 13, 23, 33, 43, 10, 20, 30, 40, 11, 21, 31, 41],
+        "CMYK channel bytes and row order"
+    );
 }

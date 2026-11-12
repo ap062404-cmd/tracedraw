@@ -8679,5 +8679,5 @@ fn cmyk_bitmap_record_marks_the_dib_colour_model() {
 
     // 4-byte id + 50-byte bitmap envelope precede the DIB fields.
     assert_eq!(u32_at(54), 3, "CMYK colour model");
-    assert_eq!(u32_at(58), 0, "reserved field");
+    assert_eq!(u32_at(58), 1, "bitmap plane count");
 }

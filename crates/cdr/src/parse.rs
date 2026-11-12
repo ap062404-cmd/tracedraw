@@ -6701,10 +6701,12 @@ pub(crate) mod tests {
             list(b"page", &list(b"layr", &obj)),
         ]
         .concat();
-        let (doc, rep, kept) =
-            crate::open_bytes_keeping(&riff(b"CDR9", &body), "t").expect("opens");
+        let (doc, rep, kept, static_ids) =
+            crate::open_bytes_keeping_with_ids(&riff(b"CDR9", &body), "t").expect("opens");
         assert_eq!(rep.shapes, 1, "{:?}", rep.warnings);
         assert_eq!(doc.pages.len(), 1);
+        let shape_id = doc.pages[0].layers.iter().flat_map(|l| &l.shapes).next().unwrap().id;
+        assert_eq!(static_ids.get(&42), Some(&shape_id));
         assert_eq!(
             rep.unknown.lines(),
             [

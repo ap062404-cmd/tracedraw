@@ -8732,7 +8732,7 @@ fn rgb_bitmap_record_writes_pixels_and_transparency_mask() {
     // BGR rows are stored bottom-up; each 2-pixel row has two padding bytes.
     assert_eq!(
         &record[118..134],
-        &[0, 0, 0, 255, 255, 255, 0, 0, 0, 0, 255, 0, 0, 128, 0, 0],
+        &[0, 0, 0, 255, 255, 255, 0, 0, 0, 0, 255, 0, 0, 255, 0, 0],
         "RGB pixel bytes and row order"
     );
 

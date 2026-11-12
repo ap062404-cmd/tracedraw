@@ -2921,7 +2921,7 @@ fn bmp_record(
         .u32(0)
         .u32((image_len - pixels.len() - 40) as u32);
     b.u32(if cmyk { 3 } else { 1 })
-        .u32(0)
+        .u32(1)
         .u32(w)
         .u32(h)
         .u32(1)

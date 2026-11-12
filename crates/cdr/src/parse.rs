@@ -571,7 +571,8 @@ pub fn parse_document_with(
     version: Version,
     cmyk_profile: Option<&[u8]>,
 ) -> (Document, ParseReport) {
-    parse_document_kept(tree, main, version, cmyk_profile, &[], &[])
+    let mut static_ids = HashMap::new();
+    parse_document_kept(tree, main, version, cmyk_profile, &[], &[], &mut static_ids)
 }
 
 /// [`parse_document_with`] that turns the groups `kept` names back into

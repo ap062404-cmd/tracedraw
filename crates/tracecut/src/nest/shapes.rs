@@ -116,6 +116,10 @@ struct Spot {
     pos: Vec2,
 }
 
+// Candidate placement and its compactness score while comparing existing sheets.
+type SpotScore = (f64, f64, f64, f64, f64, usize);
+type ScoredSpot = (usize, usize, Vec2, SpotScore);
+
 /// How good a layout is: lower is better, compared in order.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Score {
@@ -515,7 +519,7 @@ fn run(
         // Compare the increase in each sheet's occupied bounding rectangle,
         // so a part can fill a useful gap on a later sheet instead of making
         // the first sheet wider/taller and leaving fragmented offcuts.
-        let mut spot: Option<(usize, usize, Vec2, (f64, f64, f64, f64, f64, usize))> = None;
+        let mut spot: Option<ScoredSpot> = None;
         for (si, sheet) in sheets.iter().enumerate() {
             let Some((oi, pos)) = best_on(part, sheet, area) else {
                 continue;

@@ -462,20 +462,6 @@ pub fn plan_shape_aware(
         return Err(PlanError::InvalidMargins);
     }
 
-    // Different designs with identical trim dimensions should share one
-    // deterministic grid, just as they do in the rectangular planner.
-    // Running each outline independently through the nesting optimiser can
-    // scatter otherwise interchangeable designs into different gaps.
-    if specs.len() > 1
-        && specs.iter().all(|spec| {
-            (spec.width_mm - specs[0].width_mm).abs() < 1e-6
-                && (spec.height_mm - specs[0].height_mm).abs() < 1e-6
-                && spec.allow_rotation == specs[0].allow_rotation
-        })
-    {
-        return plan(specs, settings);
-    }
-
     let mut parts = Vec::new();
     let mut owners = Vec::new();
     for (design, spec) in designs.iter().zip(specs) {
@@ -501,6 +487,21 @@ pub fn plan_shape_aware(
             owners.push((spec.id, copy_index));
         }
     }
+
+    // Different designs with identical trim dimensions should share one
+    // deterministic grid, just as they do in the rectangular planner.
+    // Running each outline independently through the nesting optimiser can
+    // scatter otherwise interchangeable designs into different gaps.
+    if specs.len() > 1
+        && specs.iter().all(|spec| {
+            (spec.width_mm - specs[0].width_mm).abs() < 1e-6
+                && (spec.height_mm - specs[0].height_mm).abs() < 1e-6
+                && spec.allow_rotation == specs[0].allow_rotation
+        })
+    {
+        return plan(specs, settings);
+    }
+
     if parts.is_empty() {
         return Ok(ImpositionPlan {
             placements: Vec::new(), sheet_count: 0, total_copies: 0,

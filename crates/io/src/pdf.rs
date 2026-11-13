@@ -2639,9 +2639,14 @@ pub fn document_to_pdf_report(doc: &Document, opts: &PdfOptions) -> (Vec<u8>, Pd
         } else {
             "CGATS TR 001".to_string()
         };
-        let profile_ref = profile
-            .and_then(|_| pdf.icc_profile_ref())
-            .map(|id| format!(" /DestOutputProfile {id} 0 R"));
+        let profile_ref = profile.and_then(|icc| {
+            let id = if icc_channels(icc) == 4 {
+                pdf.icc_profile_ref()
+            } else {
+                Some(pdf.stream(&format!("/N {}", icc_channels(icc)), icc))
+            }?;
+            Some(format!(" /DestOutputProfile {id} 0 R"))
+        });
         let intent = pdf.add_str(format!(
             "<< /Type /OutputIntent /S /GTS_PDFX /OutputConditionIdentifier {} /OutputCondition {} /RegistryName (http://www.color.org) /Info {}{} >>",
             pdf_text_any(&condition),

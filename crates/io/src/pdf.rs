@@ -259,6 +259,10 @@ struct Pdf {
     bad_fonts: Vec<(usize, u32, fonts::SlotKind)>,
     report: PdfReport,
     images: PdfImages,
+    /// The CMYK profile associated with bitmap ink samples, shared by
+    /// ICCBased image colour spaces and the PDF/X output intent.
+    cmyk_profile: Option<Vec<u8>>,
+    cmyk_profile_ref: Option<usize>,
 }
 
 impl Pdf {
@@ -289,8 +293,9 @@ impl Pdf {
         if self.cmyk_only {
             let cmyk = rgb_to_cmyk_bytes(rgb);
             let data = flate(&cmyk);
+            let color_space = self.cmyk_color_space();
             return self.stream(
-                &format!("/Type /XObject /Subtype /Image /Width {w} /Height {h} /ColorSpace /DeviceCMYK /BitsPerComponent 8 /Filter /FlateDecode{smask}"),
+                &format!("/Type /XObject /Subtype /Image /Width {w} /Height {h} /ColorSpace {color_space} /BitsPerComponent 8 /Filter /FlateDecode{smask}"),
                 &data,
             );
         }
@@ -314,6 +319,23 @@ impl Pdf {
         } else {
             "/DeviceRGB"
         }
+    }
+
+    /// Embed the document's CMYK profile once and reuse its ICC stream.
+    fn icc_profile_ref(&mut self) -> Option<usize> {
+        let profile = self.cmyk_profile.as_deref()?;
+        if self.cmyk_profile_ref.is_none() {
+            let id = self.stream("/N 4", profile);
+            self.cmyk_profile_ref = Some(id);
+        }
+        self.cmyk_profile_ref
+    }
+
+    /// ICCBased CMYK when the drawing carries a profile, otherwise DeviceCMYK.
+    fn cmyk_color_space(&mut self) -> String {
+        self.icc_profile_ref()
+            .map(|id| format!("[/ICCBased {id} 0 R]"))
+            .unwrap_or_else(|| "/DeviceCMYK".to_string())
     }
 
     fn stream(&mut self, dict: &str, data: &[u8]) -> usize {
@@ -1339,11 +1361,11 @@ impl PageWriter<'_> {
                     .map(|id| format!(" /SMask {id} 0 R"))
                     .unwrap_or_default();
                 let cs = if channels == 1 {
-                    "/DeviceGray"
+                    "/DeviceGray".to_string()
                 } else if channels == 4 {
-                    "/DeviceCMYK"
+                    self.pdf.cmyk_color_space()
                 } else {
-                    self.pdf.color_space()
+                    self.pdf.color_space().to_string()
                 };
                 if channels == 3 && self.pdf.cmyk_only {
                     data = rgb_to_cmyk_bytes(&data);
@@ -2261,6 +2283,9 @@ pub fn document_to_pdf_with(doc: &Document, opts: &PdfOptions) -> Vec<u8> {
 pub fn document_to_pdf_report(doc: &Document, opts: &PdfOptions) -> (Vec<u8>, PdfReport) {
     let doc = &*crate::for_export(doc, None);
     let std_ = opts.standard;
+    let cmyk_profile = output_profile(opts, doc)
+        .filter(|icc| icc_channels(icc) == 4)
+        .map(|icc| icc.to_vec());
     let mut pdf = Pdf {
         objects: Vec::new(),
         spot_spaces: std::collections::HashMap::new(),
@@ -2271,6 +2296,8 @@ pub fn document_to_pdf_report(doc: &Document, opts: &PdfOptions) -> (Vec<u8>, Pd
         bad_fonts: Vec::new(),
         report: PdfReport::default(),
         images: opts.images,
+        cmyk_profile,
+        cmyk_profile_ref: None,
     };
     // PDF/X wants every font in the file.
     let text_mode = (!opts.text.as_curves).then_some(TextMode {
@@ -2613,11 +2640,9 @@ pub fn document_to_pdf_report(doc: &Document, opts: &PdfOptions) -> (Vec<u8>, Pd
         } else {
             "CGATS TR 001".to_string()
         };
-        let profile_ref = profile.map(|icc| {
-            let n = icc_channels(icc);
-            let id = pdf.stream(&format!("/N {n}"), icc);
-            format!(" /DestOutputProfile {id} 0 R")
-        });
+        let profile_ref = profile
+            .and_then(|_| pdf.icc_profile_ref())
+            .map(|id| format!(" /DestOutputProfile {id} 0 R"));
         let intent = pdf.add_str(format!(
             "<< /Type /OutputIntent /S /GTS_PDFX /OutputConditionIdentifier {} /OutputCondition {} /RegistryName (http://www.color.org) /Info {}{} >>",
             pdf_text_any(&condition),
@@ -4909,6 +4934,8 @@ mod text_tests {
             bad_fonts: Vec::new(),
             report: PdfReport::default(),
             images: PdfImages::default(),
+            cmyk_profile: None,
+            cmyk_profile_ref: None,
         };
         let mut w = PageWriter {
             content: String::new(),

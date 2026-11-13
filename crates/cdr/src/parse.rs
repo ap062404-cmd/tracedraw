@@ -695,7 +695,9 @@ pub(crate) fn parse_document_kept(
     // Read symbol definitions before page objects so instances can refer to them.
     let mut symbol_lists: Vec<&Chunk> = Vec::new();
     tree.root.walk(&mut |c, _| {
-        if c.is(b"sytr") { symbol_lists.push(c); }
+        if c.is(b"sytr") {
+            symbol_lists.push(c);
+        }
     });
     if !symbol_lists.is_empty() {
         let mut ids = std::mem::take(doc.ids_mut());
@@ -715,7 +717,10 @@ pub(crate) fn parse_document_kept(
                     group
                 }
             };
-            doc.symbols.push(Symbol { name: format!("Symbol {}", index + 1), shape });
+            doc.symbols.push(Symbol {
+                name: format!("Symbol {}", index + 1),
+                shape,
+            });
         }
         doc.set_ids(ids);
         if all_symbols_read && doc.symbols.len() == symbol_lists.len() {
@@ -3935,24 +3940,27 @@ impl<'a> Ctx<'a> {
         let mut loda = None;
         let mut trfd = None;
         chunk.walk(&mut |c, _| {
-            if (c.is(b"loda") || c.is(b"lobj")) && loda.is_none() { loda = Some(c); }
-            else if c.is(b"trfd") && trfd.is_none() { trfd = Some(c); }
+            if (c.is(b"loda") || c.is(b"lobj")) && loda.is_none() {
+                loda = Some(c);
+            } else if c.is(b"trfd") && trfd.is_none() {
+                trfd = Some(c);
+            }
         });
         let data = self.data(loda?);
         let table = self.read_loda(data)?;
-        let reference = table.args.iter()
+        let reference = table
+            .args
+            .iter()
             .find(|arg| arg.ty == ARG_SYMBOL_REFERENCE)
             .and_then(|arg| self.reader_at(data, arg.off).u32())?;
         // The symbol reference observed in version 21 is one-based.
         let index = usize::try_from(reference.checked_sub(1)?).ok()?;
-        if index >= self.symbol_count { return None; }
+        if index >= self.symbol_count {
+            return None;
+        }
         let mut shape = Shape::new(id, ShapeKind::SymbolInstance { index });
         shape.transform = self.outer_transform
             * trfd.map(|t| self.read_transform(t)).unwrap_or(Affine::IDENTITY);
-        if let Some(arg) = table.args.iter().find(|arg| arg.ty == ARG_NAME) {
-            let name = self.read_name(data.get(arg.off..arg.end)?);
-            if !name.is_empty() { shape.name = Some(name); }
-        }
         Some(shape)
     }
 

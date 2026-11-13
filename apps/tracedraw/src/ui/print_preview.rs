@@ -453,7 +453,9 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 st.all_pages = st.range != 1;
                 });
                 ui.separator();
-                ui.collapsing(tr("dialog.prepress"), |ui| {
+                egui::CollapsingHeader::new(tr("dialog.prepress"))
+                    .default_open(true)
+                    .show(ui, |ui| {
                 let st = &mut pv.st;
                 ui.checkbox(&mut st.separations, tr("dialog.separations"));
                 if st.separations {

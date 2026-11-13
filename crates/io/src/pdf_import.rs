@@ -2848,14 +2848,24 @@ impl<'a> Importer<'a> {
                             shrink_factor(jw, jh, self.max_pixels)
                         };
                         if jf == 1 && jw == ow && jh == oh {
-                            let plane = (jw as usize) * (jh as usize);
-                            let mut planes = vec![0u8; plane * 4];
-                            for (pixel, sample) in samples.chunks_exact(4).enumerate() {
-                                for channel in 0..4 {
-                                    planes[channel * plane + pixel] = sample[channel];
+                            let len = (jw as usize)
+                                .checked_mul(jh as usize)
+                                .and_then(|pixels| pixels.checked_mul(4));
+                            let mut planes = Vec::new();
+                            if let Some(len) =
+                                len.filter(|len| planes.try_reserve_exact(*len).is_ok())
+                            {
+                                planes.resize(len, 0);
+                                let plane = len / 4;
+                                for (pixel, sample) in samples.chunks_exact(4).enumerate() {
+                                    for channel in 0..4 {
+                                        planes[channel * plane + pixel] = sample[channel];
+                                    }
                                 }
+                                cmyk_planes = Some(planes);
+                            } else {
+                                self.warn("CMYK JPEG ink channels not retained: not enough memory");
                             }
-                            cmyk_planes = Some(planes);
                         }
                         rgba = preview;
                     } else {

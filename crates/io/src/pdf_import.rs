@@ -2181,22 +2181,23 @@ impl<'a> Importer<'a> {
                             .and_then(|stream| self.get(&stream.dict, b"N"))
                             .and_then(Self::num)
                             .unwrap_or(3.0) as usize;
+                        let profile_data = if n == 4 && self.cmyk_profile.is_none() {
+                            profile_stream.and_then(|stream| stream.decompressed_content().ok())
+                        } else {
+                            None
+                        };
                         if n == 4 {
-                            if let Some(stream) = profile_stream {
-                                if self.cmyk_profile.is_none() {
-                                    if let Ok(data) = stream.decompressed_content() {
-                                        if let Ok(profile) = tracedraw_core::icc::Profile::parse(&data) {
-                                            if profile.color_space() == tracedraw_core::icc::ColorSpace::Cmyk {
-                                                let name = profile
-                                                    .description()
-                                                    .unwrap_or("Embedded PDF CMYK")
-                                                    .to_string();
-                                                self.cmyk_lut = cmyk_lut_from_profile(&data);
-                                                self.cmyk_profile = Some(
-                                                    tracedraw_core::document::DocumentProfile::new(name, data),
-                                                );
-                                            }
-                                        }
+                            if let Some(data) = profile_data {
+                                if let Ok(profile) = tracedraw_core::icc::Profile::parse(&data) {
+                                    if profile.color_space() == tracedraw_core::icc::ColorSpace::Cmyk {
+                                        let name = profile
+                                            .description()
+                                            .unwrap_or("Embedded PDF CMYK")
+                                            .to_string();
+                                        self.cmyk_lut = cmyk_lut_from_profile(&data);
+                                        self.cmyk_profile = Some(
+                                            tracedraw_core::document::DocumentProfile::new(name, data),
+                                        );
                                     }
                                 }
                             }

@@ -2568,7 +2568,7 @@ impl<'a> Importer<'a> {
     }
 
     fn draw_image(&mut self, stream: &Stream, gs: &GState) {
-        let Some((png, w, h)) = self.decode_image(stream) else {
+        let Some((png, w, h, inks)) = self.decode_image(stream) else {
             return;
         };
         // The image fills the unit square of the current CTM.
@@ -2581,6 +2581,8 @@ impl<'a> Importer<'a> {
             fx: None,
         });
         shape.transform = gs.ctm;
+        shape.cmyk_bitmap = inks.is_some();
+        shape.picture_inks = inks.map(Box::new);
         shape.stroke = None;
         shape.fill = Fill::None;
         shape.opacity = gs.fill_alpha;
@@ -2605,14 +2607,25 @@ impl<'a> Importer<'a> {
     /// for, is shrunk by a whole factor, each pixel the mean of a block of
     /// the picture's own (#1804), and listed as shrunk; only one past
     /// [`MAX_SOURCE_SIDE`] or [`MAX_SOURCE_PIXELS`] is skipped.
-    fn decode_image(&mut self, stream: &Stream) -> Option<(Vec<u8>, u32, u32)> {
-        let (rgba, w, h) = self.decode_pixels(stream)?;
-        Some((tracedraw_render_png(w, h, &rgba), w, h))
+    fn decode_image(
+        &mut self,
+        stream: &Stream,
+    ) -> Option<(Vec<u8>, u32, u32, Option<tracedraw_core::picture_inks::PictureInks>)> {
+        let (rgba, w, h, planes) = self.decode_pixels(stream)?;
+        let png = tracedraw_render_png(w, h, &rgba);
+        let inks = planes.map(|planes| {
+            let gray = tracedraw_render_gray_png(w, h.saturating_mul(4), &planes);
+            tracedraw_core::picture_inks::PictureInks::cmyk(&png, gray.into())
+        });
+        Some((png, w, h, inks))
     }
 
     /// An image XObject's RGBA pixels and size, as [`Self::decode_image`]
     /// gives them before they are put into a PNG.
-    fn decode_pixels(&mut self, stream: &Stream) -> Option<(Vec<u8>, u32, u32)> {
+    fn decode_pixels(
+        &mut self,
+        stream: &Stream,
+    ) -> Option<(Vec<u8>, u32, u32, Option<Vec<u8>>)> {
         let d = &stream.dict;
         let w = self.get(d, b"Width").and_then(Self::num)? as u32;
         let h = self.get(d, b"Height").and_then(Self::num)? as u32;
@@ -2679,6 +2692,12 @@ impl<'a> Importer<'a> {
             .map(|o| self.nums(o))
             .unwrap_or_default();
         let inverted = decode_arr.first().map(|v| *v == 1.0).unwrap_or(false);
+        // Preserve source CMYK samples only when no resampling is needed.
+        // The RGB preview can be generated from these same samples, while
+        // the original four planes remain available for print separations.
+        let keep_cmyk = cs == ColorSpace::Cmyk && bpc == 8 && f == 1 && !is_mask
+            && !matches!(last, b"DCTDecode" | b"DCT" | b"JPXDecode");
+        let mut cmyk_planes = keep_cmyk.then(|| vec![0u8; (w as usize) * (h as usize) * 4]);
         match last {
             b"DCTDecode" | b"DCT" | b"JPXDecode" => {
                 // The decoder takes its own memory.
@@ -2764,7 +2783,7 @@ impl<'a> Importer<'a> {
                         };
                     rgba = rgba_j;
                     if jw != ow || jh != oh {
-                        return Some((rgba, jw, jh));
+                        return Some((rgba, jw, jh, None));
                     }
                 }
             }
@@ -2817,7 +2836,7 @@ impl<'a> Importer<'a> {
                         .collect(),
                     _ => Vec::new(),
                 };
-                for _ in 0..h {
+                for y in 0..h {
                     if source.read_exact(&mut row).is_err() {
                         self.warn("image data shorter than its size; skipped");
                         return None;
@@ -2845,15 +2864,26 @@ impl<'a> Importer<'a> {
                         }
                     }
                     let mut bits = BitReader::new(&row);
-                    for _ in 0..w {
+                    for x in 0..w {
                         let mut comps = [0f32; 4];
+                        let mut raw_comps = [0u32; 4];
                         let mut raw0 = 0u32;
                         for (ci, c) in comps.iter_mut().enumerate().take(ncomp.min(4)) {
                             let v = bits.read(bpc);
+                            raw_comps[ci] = v;
                             if ci == 0 {
                                 raw0 = v;
                             }
                             *c = v as f32 / max;
+                        }
+                        if let Some(planes) = cmyk_planes.as_mut() {
+                            let at = (y as usize) * (w as usize) + x as usize;
+                            let plane = (w as usize) * (h as usize);
+                            for ci in 0..4 {
+                                let sample = raw_comps[ci] as u8;
+                                planes[ci * plane + at] =
+                                    if inverted { 255 - sample } else { sample };
+                            }
                         }
                         for _ in 4..ncomp {
                             bits.read(bpc);
@@ -2929,7 +2959,7 @@ impl<'a> Importer<'a> {
                 px[3] = a;
             }
         }
-        Some((rgba, ow, oh))
+        Some((rgba, ow, oh, cmyk_planes))
     }
 
     /// An SMask as 8-bit alpha, resampled to `w` x `h` (nearest).
@@ -2937,7 +2967,7 @@ impl<'a> Importer<'a> {
         let was = std::mem::replace(&mut self.in_mask, true);
         let decoded = self.decode_pixels(sm);
         self.in_mask = was;
-        let (px, sw, sh) = decoded?;
+        let (px, sw, sh, _) = decoded?;
         let mut out = Vec::with_capacity((w * h) as usize);
         for y in 0..h {
             let sy = (y as u64 * sh as u64 / h as u64) as usize;
@@ -4288,6 +4318,19 @@ fn tracedraw_render_png(w: u32, h: u32, rgba: &[u8]) -> Vec<u8> {
         Ok(()) => out,
         Err(_) => crate::svg::encode_png(w, h, rgba),
     }
+}
+
+/// Encode the four stacked CMYK planes as one 8-bit greyscale PNG.
+fn tracedraw_render_gray_png(w: u32, h: u32, gray: &[u8]) -> Vec<u8> {
+    use image::ImageEncoder;
+    let mut out = Vec::new();
+    let _ = image::codecs::png::PngEncoder::new(&mut out).write_image(
+        gray,
+        w,
+        h,
+        image::ExtendedColorType::L8,
+    );
+    out
 }
 
 /// MSB-first bit reader for packed image samples.

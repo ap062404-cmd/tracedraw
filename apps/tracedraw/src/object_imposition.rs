@@ -372,13 +372,21 @@ pub fn build_document_with_crop_settings(
                 {
                     return;
                 }
-                if min_x < 0.0 || min_y < 0.0
-                    || max_x > sheet.width_mm || max_y > sheet.height_mm
+                // The stroke occupies space on both sides of the path.
+                // Test its painted bounds, not only the mathematical centerline,
+                // so a thick crop mark cannot touch the sheet edge or bleed.
+                let stroke_half = crop_settings.stroke_width_mm / 2.0;
+                if min_x - stroke_half < 0.0 || min_y - stroke_half < 0.0
+                    || max_x + stroke_half > sheet.width_mm
+                    || max_y + stroke_half > sheet.height_mm
                 {
                     return;
                 }
                 let mark_bounds = tracedraw_core::Rect::new(
-                    min_x - 1e-6, min_y - 1e-6, max_x + 1e-6, max_y + 1e-6,
+                    min_x - stroke_half - 1e-6,
+                    min_y - stroke_half - 1e-6,
+                    max_x + stroke_half + 1e-6,
+                    max_y + stroke_half + 1e-6,
                 );
                 let touches_neighbor = plan.placements.iter().any(|other| {
                     if other.sheet_index != placement.sheet_index
@@ -391,10 +399,10 @@ pub fn build_document_with_crop_settings(
                     // Keep marks clear of the neighboring design's
                     // reserved bleed and gutter area, not just its trim box.
                     let other_bounds = tracedraw_core::Rect::new(
-                        other.x_mm - sheet.bleed_mm,
-                        other_bottom - sheet.bleed_mm,
-                        other.x_mm + other.width_mm + sheet.bleed_mm,
-                        other_bottom + other.height_mm + sheet.bleed_mm,
+                        other.x_mm - sheet.bleed_mm - stroke_half,
+                        other_bottom - sheet.bleed_mm - stroke_half,
+                        other.x_mm + other.width_mm + sheet.bleed_mm + stroke_half,
+                        other_bottom + other.height_mm + sheet.bleed_mm + stroke_half,
                     );
                     mark_bounds.x0 < other_bounds.x1
                         && mark_bounds.x1 > other_bounds.x0

@@ -523,3 +523,29 @@ pub fn dialog(app: &mut App, ctx: &Context, state: &mut State, close: &mut bool)
         }
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selected_designs_start_with_one_copy() {
+        let mut source = tracedraw_core::Document::new(
+            "Selection",
+            tracedraw_core::Size::new(100.0, 100.0),
+        );
+        let shape = tracedraw_core::Shape::new(
+            source.ids_mut().shape(),
+            tracedraw_core::ShapeKind::Rect {
+                rect: tracedraw_core::Rect::new(0.0, 0.0, 40.0, 20.0),
+                radius: 0.0,
+                corners: None,
+            },
+        );
+
+        let state = State::from_selection(vec![shape]).expect("valid selected artwork");
+        assert_eq!(state.designs.len(), 1);
+        assert_eq!(state.designs[0].copies, 1);
+    }
+}

@@ -5525,6 +5525,23 @@ mod tests {
         assert!(retained.name.len() > 0);
         let shape = imported.pages[0].shapes.first().expect("bitmap");
         assert!(shape.cmyk_bitmap);
+        let ShapeKind::Bitmap { png, .. } = &shape.kind else {
+            panic!("bitmap shape");
+        };
+        let preview = image::load_from_memory(png)
+            .expect("RGB preview")
+            .to_rgba8()
+            .into_raw();
+        let lut = cmyk_lut_from_profile(&icc).expect("CMYK ICC transform");
+        let expected = lut.eval([
+            10.0 / 255.0,
+            20.0 / 255.0,
+            30.0 / 255.0,
+            40.0 / 255.0,
+        ]);
+        for (actual, expected) in preview[..3].iter().zip(expected) {
+            assert_eq!(*actual, (expected * 255.0).round() as u8);
+        }
         assert!(shape.picture_inks.as_deref().is_some_and(|inks| {
             matches!(inks.inks.as_slice(), [
                 tracedraw_core::picture_inks::PictureInk::Process(0),

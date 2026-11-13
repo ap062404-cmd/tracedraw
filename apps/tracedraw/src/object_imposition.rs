@@ -462,6 +462,20 @@ pub fn plan_shape_aware(
         return Err(PlanError::InvalidMargins);
     }
 
+    // Different designs with identical trim dimensions should share one
+    // deterministic grid, just as they do in the rectangular planner.
+    // Running each outline independently through the nesting optimiser can
+    // scatter otherwise interchangeable designs into different gaps.
+    if specs.len() > 1
+        && specs.iter().all(|spec| {
+            (spec.width_mm - specs[0].width_mm).abs() < 1e-6
+                && (spec.height_mm - specs[0].height_mm).abs() < 1e-6
+                && spec.allow_rotation == specs[0].allow_rotation
+        })
+    {
+        return plan(specs, settings);
+    }
+
     let mut parts = Vec::new();
     let mut owners = Vec::new();
     for (design, spec) in designs.iter().zip(specs) {
@@ -986,6 +1000,48 @@ mod tests {
                 assert!(!a_rect.intersects(b_rect), "grouped designs overlap: {a:?} and {b:?}");
             }
         }
+    }
+
+    #[test]
+    fn shape_aware_equal_size_designs_share_one_regular_grid_in_design_order() {
+        let settings = SheetSettings {
+            width_mm: 210.0, height_mm: 148.0,
+            margin_left_mm: 5.0, margin_right_mm: 5.0,
+            margin_top_mm: 5.0, margin_bottom_mm: 5.0,
+            gutter_x_mm: 2.0, gutter_y_mm: 2.0, bleed_mm: 0.0,
+        };
+        let mut source = tracedraw_core::Document::new(
+            "Equal-size artwork",
+            tracedraw_core::Size::new(90.0, 55.0),
+        );
+        let artwork = |source: &mut tracedraw_core::Document, id| DesignArtwork {
+            id,
+            shapes: vec![tracedraw_core::Shape::new(
+                source.ids_mut().shape(),
+                tracedraw_core::ShapeKind::Rect {
+                    rect: tracedraw_core::Rect::new(0.0, 0.0, 90.0, 55.0),
+                    radius: 0.0,
+                    corners: None,
+                },
+            )],
+        };
+        let designs = vec![artwork(&mut source, 31), artwork(&mut source, 32)];
+        let specs = vec![
+            DesignSpec { id: 31, width_mm: 90.0, height_mm: 55.0, copies: 3, allow_rotation: true },
+            DesignSpec { id: 32, width_mm: 90.0, height_mm: 55.0, copies: 7, allow_rotation: true },
+        ];
+
+        let actual = plan_shape_aware(&designs, &specs, settings).unwrap();
+        let expected = plan(&specs, settings).unwrap();
+
+        assert_eq!(actual.sheet_count, expected.sheet_count);
+        assert_eq!(actual.total_copies, 10);
+        assert_eq!(
+            actual.placements.iter().map(|p| (p.design_id, p.copy_index, p.x_mm, p.y_mm, p.rotated)).collect::<Vec<_>>(),
+            expected.placements.iter().map(|p| (p.design_id, p.copy_index, p.x_mm, p.y_mm, p.rotated)).collect::<Vec<_>>(),
+        );
+        assert!(actual.placements[..3].iter().all(|p| p.design_id == 31));
+        assert!(actual.placements[3..].iter().all(|p| p.design_id == 32));
     }
 
     #[test]

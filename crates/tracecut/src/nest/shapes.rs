@@ -121,6 +121,8 @@ struct Spot {
 struct Score {
     left_out: usize,
     sheets: usize,
+    /// Sum of occupied bounding-box areas; lower scores favour compact groups.
+    occupied_area: f64,
     last_length: f64,
     tops: f64,
 }
@@ -132,6 +134,7 @@ impl Score {
             .left_out
             .cmp(&o.left_out)
             .then(self.sheets.cmp(&o.sheets))
+            .then(self.occupied_area.total_cmp(&o.occupied_area))
             .then(self.last_length.total_cmp(&o.last_length))
             .then(self.tops.total_cmp(&o.tops));
         matches!(ord, Less | Equal)
@@ -546,6 +549,7 @@ fn run(
     let mut last_length: f64 = 0.0;
     let mut tops = 0.0;
     let mut left_out = 0;
+    let mut sheet_extents = vec![(0.0_f64, 0.0_f64); n_sheets];
     for (i, s) in spots.iter().enumerate() {
         let Some(Some(part)) = parts.get(i) else {
             continue;
@@ -555,6 +559,13 @@ fn run(
             Some(s) => {
                 let h = part.orients.get(s.orient).map_or(0.0, |o| o.h);
                 tops += s.pos.y + h;
+                if let (Some(extent), Some(orient)) = (
+                    sheet_extents.get_mut(s.sheet),
+                    part.orients.get(s.orient),
+                ) {
+                    extent.0 = extent.0.max(s.pos.x + orient.w);
+                    extent.1 = extent.1.max(s.pos.y + orient.h);
+                }
                 if s.sheet + 1 == n_sheets {
                     last_length = last_length.max(s.pos.y + h);
                 }
@@ -566,6 +577,7 @@ fn run(
         score: Score {
             left_out,
             sheets: n_sheets,
+            occupied_area: sheet_extents.iter().map(|(w, h)| w * h).sum(),
             last_length,
             tops,
         },

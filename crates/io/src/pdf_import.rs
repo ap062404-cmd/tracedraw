@@ -2805,15 +2805,57 @@ impl<'a> Importer<'a> {
                     };
                     let is_cmyk_jpeg =
                         img.color() == image::ColorType::Rgba8 && cs == ColorSpace::Cmyk;
-                    let _ = is_cmyk_jpeg;
-                    let rgb = img.to_rgba8();
-                    rgba = rgb.into_raw();
-                    if cs == ColorSpace::Cmyk && inverted {
-                        for px in rgba.chunks_exact_mut(4) {
-                            px[0] = 255 - px[0];
-                            px[1] = 255 - px[1];
-                            px[2] = 255 - px[2];
+                    if is_cmyk_jpeg {
+                        // The JPEG decoder exposes CMYK JPEG samples as four
+                        // bytes per pixel. Keep those as inks; the fourth
+                        // byte is K, not an alpha channel.
+                        let mut samples = img.to_rgba8().into_raw();
+                        let (jw, jh) = (img.width(), img.height());
+                        let mut preview = vec![0u8; samples.len()];
+                        for (source, target) in samples
+                            .chunks_exact_mut(4)
+                            .zip(preview.chunks_exact_mut(4))
+                        {
+                            if inverted {
+                                for channel in source.iter_mut() {
+                                    *channel = 255 - *channel;
+                                }
+                            }
+                            let cmyk = source.map(|v| v as f32 / 255.0);
+                            let rgb = if let Some(lut) = &self.cmyk_lut {
+                                lut.eval(cmyk)
+                            } else {
+                                let [c, m, y, k] = cmyk;
+                                [
+                                    (1.0 - c) * (1.0 - k),
+                                    (1.0 - m) * (1.0 - k),
+                                    (1.0 - y) * (1.0 - k),
+                                ]
+                            };
+                            target[0] = (rgb[0].clamp(0.0, 1.0) * 255.0).round() as u8;
+                            target[1] = (rgb[1].clamp(0.0, 1.0) * 255.0).round() as u8;
+                            target[2] = (rgb[2].clamp(0.0, 1.0) * 255.0).round() as u8;
+                            target[3] = 255;
                         }
+                        let jf = if jw == w && jh == h {
+                            f
+                        } else {
+                            shrink_factor(jw, jh, self.max_pixels)
+                        };
+                        if jf == 1 && jw == ow && jh == oh {
+                            let plane = (jw as usize) * (jh as usize);
+                            let mut planes = vec![0u8; plane * 4];
+                            for (pixel, sample) in samples.chunks_exact(4).enumerate() {
+                                for channel in 0..4 {
+                                    planes[channel * plane + pixel] = sample[channel];
+                                }
+                            }
+                            cmyk_planes = Some(planes);
+                        }
+                        rgba = preview;
+                    } else {
+                        let rgb = img.to_rgba8();
+                        rgba = rgb.into_raw();
                     }
                     if let ColorSpace::Separation(_) = cs {
                         // Grey samples are tints: 255 is full ink.

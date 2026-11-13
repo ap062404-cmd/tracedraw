@@ -5332,6 +5332,44 @@ mod tests {
     }
 
     #[test]
+    fn device_cmyk_image_keeps_its_original_ink_planes() {
+        let image_data = String::from_utf8(vec![10, 20, 30, 40]).expect("sample bytes");
+        let image = stream(
+            "/Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceCMYK /BitsPerComponent 8",
+            &image_data,
+        );
+        let bytes = one_page(
+            "q /Im0 Do Q",
+            "<< /XObject << /Im0 5 0 R >> >>",
+            &[image],
+        );
+        let mut ids = IdSource::default();
+        let imp = parse(&bytes, &mut ids).expect("parse");
+        let shape = imp.pages[0].shapes.first().expect("bitmap");
+        assert!(shape.cmyk_bitmap);
+        let inks = shape.picture_inks.as_deref().expect("retained CMYK");
+        assert_eq!(
+            inks.inks,
+            vec![
+                tracedraw_core::picture_inks::PictureInk::Process(0),
+                tracedraw_core::picture_inks::PictureInk::Process(1),
+                tracedraw_core::picture_inks::PictureInk::Process(2),
+                tracedraw_core::picture_inks::PictureInk::Process(3),
+            ]
+        );
+        assert!(matches!(shape.kind, ShapeKind::Bitmap { .. }));
+        let planes = image::load_from_memory(inks.png.as_ref())
+            .expect("plane PNG")
+            .to_luma8()
+            .into_raw();
+        assert_eq!(planes, vec![10, 20, 30, 40]);
+        assert!(inks.fits(match &shape.kind {
+            ShapeKind::Bitmap { png, .. } => png,
+            _ => unreachable!(),
+        }));
+    }
+
+    #[test]
     fn paths_fills_strokes_and_page_size() {
         let bytes = one_page(
             "1 0 0 RG 0 0 1 rg 4 w 10 10 m 60 10 l 60 40 l h B 0.5 g 100 50 50 30 re f",

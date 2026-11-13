@@ -15,7 +15,8 @@
 //! names, rectangles, ellipses (with
 //! arcs), curves for every other outline (polygons, paths, tables, symbols,
 //! expanded effects), groups, artistic text with one font, size and style
-//! per run, bitmaps (24-bit), solid and fountain fills, outlines (width,
+//! per run, bitmaps (24-bit RGB or 32-bit CMYK when original ink planes
+//! remain valid), solid and fountain fills, outlines (width,
 //! caps, joins, dashes, nib, "scale with object", "behind fill") and
 //! uniform transparency. From version 11 a clip frame is a clip
 //! container: the frame object names, in argument 8005, a group of the
@@ -1381,9 +1382,39 @@ fn document_styles(v: Ver) -> String {
     )
 }
 
-/// `color/docPalette.xml`: the document palette (empty: the colours a
-/// drawing uses live in its fills).
-const DOC_PALETTE_XML: &str = "<?xml version=\"1.0\"?>\r\n<palette guid=\"3f8e2a71-6c4d-4b19-a0e5-9d2c7b61f483\" name=\"Document Palette\"/>\r\n";
+/// `color/docPalette.xml`: write the document's process colours. The
+/// document model currently keeps palette colours but not their original
+/// names, so stable generic names are used rather than inventing names.
+fn document_palette_xml(doc: &Document) -> String {
+    let mut xml = String::from(
+        "<?xml version=\"1.0\"?>\r\n<palette guid=\"3f8e2a71-6c4d-4b19-a0e5-9d2c7b61f483\" name=\"Document Palette\">",
+    );
+    for (i, color) in doc.palette.iter().enumerate() {
+        let (space, values) = match color.process() {
+            Color::Cmyk { c, m, y, k } => ("CMYK", vec![c, m, y, k]),
+            Color::Gray { v } => ("GRAY", vec![v]),
+            Color::Registration => ("REGISTRATION", Vec::new()),
+            other => {
+                let [r, g, b] = other.to_rgb8();
+                (
+                    "RGB",
+                    vec![r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0],
+                )
+            }
+        };
+        let tints = values
+            .iter()
+            .map(|v| format!("{:.6}", v.clamp(0.0, 1.0)))
+            .collect::<Vec<_>>()
+            .join(",");
+        xml.push_str(&format!(
+            "<color cs=\"{space}\" name=\"Color {}\" tints=\"{tints}\"/>",
+            i + 1
+        ));
+    }
+    xml.push_str("</palette>\r\n");
+    xml
+}
 
 /// `color/color.xml` naming the document's CMYK profile, when it carries
 /// one (stored under `color/profiles/cmyk/`), before the colour model, as
@@ -1474,7 +1505,7 @@ fn zip_v16(
     }
     let members: [(&str, String); 6] = [
         ("META-INF/textinfo.xml", textinfo_xml(doc)),
-        ("color/docPalette.xml", DOC_PALETTE_XML.to_string()),
+        ("color/docPalette.xml", document_palette_xml(doc)),
         ("styles/document.cdss", document_styles(v)),
         ("META-INF/metadata.xml", metadata_xml(v, doc)),
         (
@@ -2794,15 +2825,39 @@ fn stlt(v: Ver, uses: StyleUses) -> Vec<u8> {
 /// 8): "RI", its length, 0, a 78-byte header (model 99, 1, size, 1 plane,
 /// 8 bits, stride, bytes, 64 at 62) and one byte per pixel, 255 opaque,
 /// rows bottom-up padded to 4 bytes.
-fn bmp_record(id: u32, png: &[u8], size_mm: (f64, f64)) -> Option<Vec<u8>> {
+fn bmp_record(
+    id: u32,
+    png: &[u8],
+    size_mm: (f64, f64),
+    picture_inks: Option<&tracedraw_core::picture_inks::PictureInks>,
+) -> Option<Vec<u8>> {
     let pm = tiny_skia::Pixmap::decode_png(png).ok()?;
     let (w, h) = (pm.width(), pm.height());
     if w == 0 || h == 0 {
         return None;
     }
-    let stride = (w as usize * 24).div_ceil(32) * 4;
+    // Keep the original CMYK separations when the ink planes still belong
+    // to these exact pixels. Edited/resampled pictures safely fall back to RGB.
+    let ink_planes = picture_inks
+        .filter(|inks| inks.fits(png))
+        .filter(|inks| {
+            inks.inks.as_slice()
+                == [
+                    tracedraw_core::picture_inks::PictureInk::Process(0),
+                    tracedraw_core::picture_inks::PictureInk::Process(1),
+                    tracedraw_core::picture_inks::PictureInk::Process(2),
+                    tracedraw_core::picture_inks::PictureInk::Process(3),
+                ]
+        })
+        .and_then(|inks| tiny_skia::Pixmap::decode_png(&inks.png).ok())
+        .filter(|planes| planes.width() == w && planes.height() == h.saturating_mul(4));
+    let cmyk = ink_planes.is_some();
+    let bpp = if cmyk { 32usize } else { 24usize };
+    let bytes_per_pixel = if cmyk { 4usize } else { 3usize };
+    let stride = (w as usize * bpp).div_ceil(32) * 4;
     let mut pixels = vec![0u8; stride * h as usize];
     let src = pm.pixels();
+    let planes = ink_planes.as_ref().map(|p| p.pixels());
     let mask_stride = (w as usize).div_ceil(4) * 4;
     let see_through = src.iter().any(|p| p.alpha() < 255);
     let mut mask = vec![
@@ -2823,7 +2878,16 @@ fn bmp_record(id: u32, png: &[u8], size_mm: (f64, f64)) -> Option<Vec<u8>> {
             if let Some(m) = mask.get_mut(mask_at + x) {
                 *m = p.alpha();
             }
-            if let Some(px) = pixels.get_mut(at + x * 3..at + x * 3 + 3) {
+            if cmyk {
+                let Some(planes) = planes else { continue };
+                for channel in 0..4 {
+                    let plane_at = channel * (w as usize * h as usize) + row * w as usize + x;
+                    let ink = planes.get(plane_at).map(|p| p.red()).unwrap_or(0);
+                    if let Some(dst) = pixels.get_mut(at + x * bytes_per_pixel + channel) {
+                        *dst = ink;
+                    }
+                }
+            } else if let Some(px) = pixels.get_mut(at + x * bytes_per_pixel..at + x * bytes_per_pixel + 3) {
                 px.copy_from_slice(&[p.blue(), p.green(), p.red()]);
             }
         }
@@ -2856,12 +2920,12 @@ fn bmp_record(id: u32, png: &[u8], size_mm: (f64, f64)) -> Option<Vec<u8>> {
         .u32((image_len - 40) as u32)
         .u32(0)
         .u32((image_len - pixels.len() - 40) as u32);
-    b.u32(1)
+    b.u32(if cmyk { 3 } else { 1 })
         .u32(1)
         .u32(w)
         .u32(h)
         .u32(1)
-        .u32(24)
+        .u32(bpp as u32)
         .u32(stride as u32)
         .u32(pixels.len() as u32);
     b.u32(0)
@@ -2890,6 +2954,18 @@ fn bmp_record(id: u32, png: &[u8], size_mm: (f64, f64)) -> Option<Vec<u8>> {
         b.bytes(&mask);
     }
     Some(b.done())
+}
+
+/// The id of an already written bitmap with exactly the same record
+/// payload. The leading four bytes are the record's id; all remaining
+/// bytes must match, including dimensions, colour model and transparency.
+fn identical_bitmap_id(bitmaps: &[Vec<u8>], record: &[u8]) -> Option<u32> {
+    bitmaps
+        .iter()
+        .find(|old| old.get(4..) == record.get(4..))
+        .and_then(|old| old.get(..4))
+        .and_then(|bytes| bytes.try_into().ok())
+        .map(u32::from_le_bytes)
 }
 
 /// `loda`: header (length, argument count, offsets table, types table,
@@ -4029,9 +4105,21 @@ impl<'a> Writer<'a> {
         id
     }
 
-    fn bitmap_id(&mut self, png: &[u8], size_mm: (f64, f64)) -> Option<u32> {
+    fn bitmap_id(
+        &mut self,
+        png: &[u8],
+        size_mm: (f64, f64),
+        picture_inks: Option<&tracedraw_core::picture_inks::PictureInks>,
+    ) -> Option<u32> {
         let id = self.next_bitmap;
-        let rec = bmp_record(id, png, size_mm)?;
+        let rec = bmp_record(id, png, size_mm, picture_inks)?;
+        // A bitmap record's first four bytes are its document-local id.
+        // Reuse an existing id only when every remaining byte matches:
+        // this includes its colour model, physical resolution, pixels and
+        // optional transparency mask.
+        if let Some(existing_id) = identical_bitmap_id(&self.bitmaps, &rec) {
+            return Some(existing_id);
+        }
         self.next_bitmap += 1;
         self.bitmaps.push(rec);
         Some(id)
@@ -5005,7 +5093,11 @@ impl<'a> Writer<'a> {
             let c = s.transform.as_coeffs();
             (c[0].hypot(c[1]), c[2].hypot(c[3]))
         };
-        let Some(image) = self.bitmap_id(png, (rect.width() * sx, rect.height() * sy)) else {
+        let Some(image) = self.bitmap_id(
+            png,
+            (rect.width() * sx, rect.height() * sy),
+            s.picture_inks.as_deref(),
+        ) else {
             return Placed {
                 nodes: Vec::new(),
                 bounds: None,
@@ -5055,8 +5147,22 @@ impl<'a> Writer<'a> {
         let mut c = Buf::default();
         corners(&mut c);
         corners(&mut c);
+        let bits_per_pixel = if s.picture_inks.as_deref().is_some_and(|inks| {
+            inks.fits(png)
+                && inks.inks.as_slice()
+                    == [
+                        tracedraw_core::picture_inks::PictureInk::Process(0),
+                        tracedraw_core::picture_inks::PictureInk::Process(1),
+                        tracedraw_core::picture_inks::PictureInk::Process(2),
+                        tracedraw_core::picture_inks::PictureInk::Process(3),
+                    ]
+        }) {
+            32
+        } else {
+            24
+        };
         c.u16(2)
-            .u16(24)
+            .u16(bits_per_pixel)
             .u32(width_px)
             .u32(height_px)
             .u32(number)

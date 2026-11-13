@@ -1100,6 +1100,7 @@ pub enum Dialog {
     RemoveBackground(crate::ui::bitmap_dialogs::BgRemoveState),
     /// The Shape tool's Align Nodes: on a common horizontal and/or
     /// vertical.
+    Imposition(Box<crate::ui::imposition_dialog::State>),
     NodeAlign {
         horizontal: bool,
         vertical: bool,
@@ -1756,11 +1757,17 @@ pub fn show(app: &mut App, ctx: &Context) {
         } else {
             Vec::new()
         };
-        crate::ui::chrome::modal_blocker_except(ctx, &holes);
+        // Object Imposition is intentionally non-modal: users must be able
+        // to select different artwork on the canvas while the dialog stays
+        // open, then Add or Replace the current selection from the dialog.
+        if !matches!(dialog, Dialog::Imposition(_)) {
+            crate::ui::chrome::modal_blocker_except(ctx, &holes);
+        }
     }
     let mut close = false;
     match &mut dialog {
         Dialog::None => {}
+        Dialog::Imposition(st) => crate::ui::imposition_dialog::dialog(app, ctx, st, &mut close),
         Dialog::LineStyle(st) => crate::ui::line_style::dialog(app, ctx, st, &mut close),
         Dialog::BitmapBw(s) => crate::ui::bitmap_dialogs::bw_dialog(app, ctx, s, &mut close),
         Dialog::RemoveBackground(st) => {

@@ -130,6 +130,7 @@ mod net;
 mod new_document;
 mod node_edit;
 mod object_clone;
+mod object_imposition;
 mod object_thumbs;
 mod ops;
 mod ops2;

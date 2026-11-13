@@ -116,11 +116,17 @@ struct Spot {
     pos: Vec2,
 }
 
+// Candidate placement and its compactness score while comparing existing sheets.
+type SpotScore = (f64, f64, f64, f64, f64, usize);
+type ScoredSpot = (usize, usize, Vec2, SpotScore);
+
 /// How good a layout is: lower is better, compared in order.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Score {
     left_out: usize,
     sheets: usize,
+    /// Sum of occupied bounding-box areas; lower scores favour compact groups.
+    occupied_area: f64,
     last_length: f64,
     tops: f64,
 }
@@ -132,6 +138,7 @@ impl Score {
             .left_out
             .cmp(&o.left_out)
             .then(self.sheets.cmp(&o.sheets))
+            .then(self.occupied_area.total_cmp(&o.occupied_area))
             .then(self.last_length.total_cmp(&o.last_length))
             .then(self.tops.total_cmp(&o.tops));
         matches!(ord, Less | Equal)
@@ -508,13 +515,32 @@ fn run(
         let Some(Some(part)) = parts.get(i) else {
             continue;
         };
-        let mut spot = None;
+        // Do not blindly use the first sheet that accepts this part.
+        // Compare the increase in each sheet's occupied bounding rectangle,
+        // so a part can fill a useful gap on a later sheet instead of making
+        // the first sheet wider/taller and leaving fragmented offcuts.
+        let mut spot: Option<ScoredSpot> = None;
         for (si, sheet) in sheets.iter().enumerate() {
-            if let Some((oi, pos)) = best_on(part, sheet, area) {
-                spot = Some((si, oi, pos));
-                break;
+            let Some((oi, pos)) = best_on(part, sheet, area) else {
+                continue;
+            };
+            let (used_right, used_top) = sheet.placed.iter().fold(
+                (0.0_f64, 0.0_f64),
+                |(right, top), placed| {
+                    (right.max(placed.bbox.x1), top.max(placed.bbox.y1))
+                },
+            );
+            let Some(orient) = part.orients.get(oi) else {
+                continue;
+            };
+            let right = used_right.max(pos.x + orient.w);
+            let top = used_top.max(pos.y + orient.h);
+            let score = (right * top, top, right, pos.y, pos.x, si);
+            if spot.as_ref().is_none_or(|(_, _, _, best)| score < *best) {
+                spot = Some((si, oi, pos, score));
             }
         }
+        let mut spot = spot.map(|(si, oi, pos, _)| (si, oi, pos));
         if spot.is_none() && (!roll || sheets.is_empty()) {
             let fresh = SheetState {
                 grid: area.new_grid(),
@@ -546,6 +572,7 @@ fn run(
     let mut last_length: f64 = 0.0;
     let mut tops = 0.0;
     let mut left_out = 0;
+    let mut sheet_extents = vec![(0.0_f64, 0.0_f64); n_sheets];
     for (i, s) in spots.iter().enumerate() {
         let Some(Some(part)) = parts.get(i) else {
             continue;
@@ -555,6 +582,13 @@ fn run(
             Some(s) => {
                 let h = part.orients.get(s.orient).map_or(0.0, |o| o.h);
                 tops += s.pos.y + h;
+                if let (Some(extent), Some(orient)) = (
+                    sheet_extents.get_mut(s.sheet),
+                    part.orients.get(s.orient),
+                ) {
+                    extent.0 = extent.0.max(s.pos.x + orient.w);
+                    extent.1 = extent.1.max(s.pos.y + orient.h);
+                }
                 if s.sheet + 1 == n_sheets {
                     last_length = last_length.max(s.pos.y + h);
                 }
@@ -566,6 +600,7 @@ fn run(
         score: Score {
             left_out,
             sheets: n_sheets,
+            occupied_area: sheet_extents.iter().map(|(w, h)| w * h).sum(),
             last_length,
             tops,
         },
@@ -605,7 +640,10 @@ pub fn nest_shapes(
     let area = Area {
         cw,
         ch,
-        cell: tol.max(cw / 256.0),
+        // Keep the search grid fine enough for print layouts. At 320 mm,
+        // the old 256-column cap forced 1.25 mm placement steps and skipped
+        // narrow but usable gaps. 1024 columns reduce that to about 0.31 mm.
+        cell: tol.max(cw / 1024.0),
     };
     let frame = Frame::new(&spec);
     let norm = frame.to_norm();

@@ -131,7 +131,7 @@ pub fn object_info(app: &App) -> String {
                         ("k", &kind_name(k)),
                         (
                             "mode",
-                            &tr(if s.cmyk_bitmap {
+                            &tr(if crate::bitmap_file::is_cmyk(s) {
                                 "convert_colors.cmyk"
                             } else if crate::bitmap_fx::png_is_gray(png) {
                                 "convert_colors.gray"
@@ -964,12 +964,24 @@ mod tests {
                 rect: PRect::new(0.0, 0.0, 10.0, 10.0),
                 width_px: 1,
                 height_px: 1,
-                png: png.into(),
+                png: png.clone().into(),
                 fx: None,
             })
             .expect("bitmap");
         app.select(vec![c]);
         assert_eq!(object_info(&app), "Bitmap 1 x 1 px (RGB) on Layer 1");
+        // A CDR bitmap can retain its original ink planes even when its
+        // screen pixels are RGB. The status bar must report the print mode.
+        let inks = tracedraw_core::picture_inks::PictureInks::cmyk(
+            &png,
+            tracedraw_core::SharedBytes::from(Vec::new()),
+        );
+        app.run(tracedraw_core::Command::SetPictureInks {
+            shape: c,
+            cmyk: false,
+            inks: Some(Box::new(inks)),
+        });
+        assert_eq!(object_info(&app), "Bitmap 1 x 1 px (CMYK) on Layer 1");
         app.run(tracedraw_core::Command::ConvertColors {
             shapes: vec![c],
             to: tracedraw_core::color_convert::ColorTarget::Cmyk,

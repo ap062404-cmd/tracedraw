@@ -90,6 +90,81 @@ CLI `tracedraw-cli icc <file>` prints a profile's class, spaces, version
 and the sRGB values of its primaries, which is how a profile is checked.
 The document stores the profile names used for its colours.
 
+## Display profile (monitor)
+
+The screen target of the ICC engine is the built-in sRGB profile. This is
+the application's working display target, not a detected monitor profile.
+The Color Management dialog's Default tab reports this distinction: monitor
+ICC discovery and compensation are deferred and are not release blockers.
+The application therefore keeps its existing sRGB screen output and does not
+silently change document colour values. Document RGB/CMYK/gray profile handling,
+colour conversion, soft proof and PDF OutputIntent remain in scope independently.
+
+A monitor profile must not simply replace the engine's sRGB target. The
+desktop compositor may already apply the monitor profile, depending on
+the operating system and display server. Applying the same profile in
+TraceDraw as well could compensate twice.
+
+### Platform discovery requirements
+
+A profile file in a standard ICC folder is not evidence that it belongs to the
+monitor showing the TraceDraw window. Discovery must start with that window's
+current display and must return an explicit unavailable or ambiguous result
+when the OS cannot identify the matching device.
+
+On Windows, the supported WCS display-profile API is
+`ColorProfileGetDisplayDefault` (in `mscms.dll`). It takes a display adapter
+LUID and source ID, not an HWND or a monitor name. The implementation therefore
+has to map the window's monitor to the corresponding active display path using
+the Windows display-configuration APIs, then request the current-user profile
+and, where useful, the system-wide profile. The returned path is only a
+candidate until it has been opened and parsed as an ICC profile. This WCS API
+requires Windows 10 build 20348 or later; older Windows versions must report
+that this lookup is unsupported and retain the sRGB fallback. The API allocates
+the returned path for the caller, which must release it with `LocalFree`.
+
+On Linux, colord is the desktop colour-management service. A client must
+identify the active display device and match it to colord's display device,
+typically using stable output/EDID metadata (for example
+`OutputEdidMd5` where available). It must then resolve the device's default
+profile using colord's device/profile semantics. The `Profiles` property is
+an association list and must not be treated as "the first profile is always
+the default". If colord, the session D-Bus, output identity, or a default
+profile is unavailable, TraceDraw must report that state and keep sRGB.
+X11 output names and Wayland/DRM connector identities are not interchangeable;
+the implementation must not guess a match from a connector name alone.
+
+The common result should carry the display identity, resolved profile path
+(and parsed profile data when valid), scope/source, and a status such as
+available, unsupported, not configured, ambiguous, or query failed. A change
+of window monitor, display topology, or profile association invalidates
+the result. These lookups are read-only: TraceDraw must not register, assign, or
+change OS profiles.
+
+The desktop build enables both eframe's `glow` and `wgpu`
+features. TraceDraw chooses its renderer at start-up: Hardware and Software
+modes use WGPU; GL mode uses Glow/OpenGL. The selected mode is recorded by
+the GPU startup diagnostics, so display behaviour must be checked for each
+renderer rather than assuming one native path.
+
+For Glow, the glutin config template does not explicitly request an sRGB
+framebuffer, and TraceDraw does not explicitly enable
+`GL_FRAMEBUFFER_SRGB`. The selected GL config's capabilities still need
+to be queried at runtime. For WGPU, eframe delegates surface and format
+selection to egui-wgpu. TraceDraw now logs the selected WGPU surface
+format at startup and labels whether the format is sRGB-encoded. This
+identifies the renderer's surface encoding, but does not establish whether
+the desktop compositor applies the monitor profile.
+
+Neither renderer inspection alone establishes whether the desktop
+compositor applies the monitor profile. No monitor transform should be
+enabled until the selected renderer's output encoding and the compositor
+path have been measured and tested.
+
+For the current release, monitor-profile discovery and compensation are
+explicitly out of scope. Working RGB/CMYK profiles, soft proof and PDF
+OutputIntent remain separate and continue to be developed independently.
+
 ## PDF/X export
 
 Export > PDF offers PDF 1.4, PDF/X-1a:2003, PDF/X-3:2003 and PDF/X-4
@@ -232,3 +307,64 @@ width.
 - Converting between CMYK profiles keeps pure black when asked, leaves
   other models alone, and recolours shapes inside groups
   (`color_policy::tests`).
+
+
+## Cross-platform display-colour plan (Windows and Linux)
+
+Windows and Linux are equal first-class desktop targets. The colour-management
+model and user-facing behaviour must be shared; only the operating-system
+adapter that discovers display devices and their assigned ICC profiles may
+differ.
+
+The implementation is split into three boundaries:
+
+1. **Shared application layer**: a platform-neutral display-profile result,
+   monitor identity, profile bytes/metadata, and explicit states such as
+   available, unavailable, unsupported, or temporarily unknown. The UI and
+   diagnostics consume this shared result; they must not contain
+   OS-specific branching.
+2. **Platform discovery adapters**: Windows obtains the active display and
+   its assigned profile through supported Windows colour-management/display
+   APIs. Linux discovers profiles through the desktop colour-management
+   service where available (commonly colord), while accounting for desktop,
+   display-server, permission, and multi-monitor differences. Missing
+   services or permissions are normal fallback states, not fatal errors.
+3. **Shared rendering policy**: the same policy decides whether a display
+   transform is safe to use. It considers the active monitor, renderer output
+   encoding, and whether the operating-system compositor already applies
+   display colour management. A profile being discoverable does not by itself
+   mean TraceDraw should apply it.
+
+Both platforms must retain the same document working-profile behaviour,
+soft-proof controls, output-profile selection, PDF OutputIntent semantics,
+and saved document data. Display-profile discovery must never rewrite object
+colour values, assign a monitor profile as a document working profile, or
+change PDF export.
+
+For multi-monitor desktops, the display associated with the application
+window is the relevant display, not an arbitrary system-wide default. Moving
+the window between displays or changing a display profile must invalidate
+stale diagnostic state. If the platform cannot reliably identify the
+window's display or its assigned profile, TraceDraw reports that state
+explicitly and keeps the safe sRGB display path.
+
+### Cross-platform acceptance requirements
+
+- The same source tree builds for supported Windows and Linux targets.
+- The same colour-management UI and document behaviour are available on
+  both platforms.
+- Platform discovery failure never prevents the editor from starting.
+- No monitor compensation is enabled solely because an ICC file was found.
+- WGPU and Glow paths are validated independently on both platforms before
+  display compensation is enabled.
+- Automated tests cover shared profile-selection and fallback logic without
+  depending on a particular desktop environment; platform adapters receive
+  platform-specific integration checks.
+- Release packages are produced and smoke-tested separately for Windows and
+  Linux, including opening, editing, saving, and exporting a representative
+  print document.
+
+This plan is intentionally diagnostic-first. Until compositor behaviour and
+renderer output encoding have been verified on each supported platform,
+monitor ICC discovery remains informational and sRGB remains the safe
+application display target.

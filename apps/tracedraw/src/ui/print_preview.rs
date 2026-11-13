@@ -391,6 +391,9 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         .size_range(need..=OPTIONS_MAX.max(need))
         .show(ui, |ui| {
             egui::ScrollArea::both().show(ui, |ui| {
+                egui::CollapsingHeader::new(tr("dialog.preview"))
+                    .default_open(true)
+                    .show(ui, |ui| {
                 let st = &mut pv.st;
                 // Two options to a row, so the panel has room for more
                 // (#951): which pages print, then the marks.
@@ -448,8 +451,12 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                     st.range = 0;
                 }
                 st.all_pages = st.range != 1;
+                });
                 ui.separator();
-                ui.strong(tr("dialog.prepress"));
+                egui::CollapsingHeader::new(tr("dialog.prepress"))
+                    .default_open(true)
+                    .show(ui, |ui| {
+                let st = &mut pv.st;
                 ui.checkbox(&mut st.separations, tr("dialog.separations"));
                 if st.separations {
                     // Each ink with a box under it, always in view: one
@@ -517,6 +524,10 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 {
                     st.info_offset = (0.0, 0.0);
                 }
+                });
+                ui.separator();
+                ui.collapsing(tr("print.art_position"), |ui| {
+                let st = &mut pv.st;
                 // Transform: the page stretched on the sheet by handles,
                 // or by these percentages (#595).
                 ui.checkbox(&mut pv.transform, tr("print.transform"))
@@ -584,8 +595,11 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                         st.art_offset = (0.0, 0.0);
                     }
                 });
+                });
                 ui.separator();
-                crate::ui::dialogs::print_layout_fields(app, ui, st);
+                ui.collapsing(tr("dialog.print"), |ui| {
+                    crate::ui::dialogs::print_layout_fields(app, ui, &mut pv.st);
+                });
             })
         });
     // A row wider than the panel (a longer language, a setting shown):

@@ -12,6 +12,56 @@ fn doc_with(shapes: Vec<Shape>) -> Document {
 }
 
 #[test]
+fn identical_bitmap_records_reuse_the_existing_id() {
+    let first = vec![1, 0, 0, 0, 10, 20, 30, 40];
+    let same_payload_different_id = vec![2, 0, 0, 0, 10, 20, 30, 40];
+    let different_payload = vec![3, 0, 0, 0, 10, 20, 30, 41];
+
+    assert_eq!(identical_bitmap_id(&[first.clone()], &same_payload_different_id), Some(1));
+    assert_eq!(identical_bitmap_id(&[first], &different_payload), None);
+}
+
+#[test]
+fn document_palette_colours_round_trip_in_package() {
+    let mut doc = Document::new("palette", Size::new(100.0, 100.0));
+    doc.palette = vec![
+        Color::cmyk_pct(100.0, 0.0, 0.0, 0.0),
+        Color::cmyk_pct(0.0, 100.0, 0.0, 0.0),
+        Color::rgb8(20, 120, 220),
+        Color::Gray { v: 0.4 },
+    ];
+    let bytes = document_to_cdr(&doc);
+    let (back, report) = crate::open_bytes(&bytes, "palette").expect("reads package");
+    assert_eq!(report.skipped_objects, 0, "{:?}", report.warnings);
+    assert_eq!(back.palette.len(), doc.palette.len());
+    for (actual, expected) in back.palette.iter().zip(&doc.palette) {
+        match (actual, expected) {
+            (
+                Color::Cmyk { c: ac, m: am, y: ay, k: ak },
+                Color::Cmyk { c: ec, m: em, y: ey, k: ek },
+            ) => {
+                for (a, e) in [(*ac, *ec), (*am, *em), (*ay, *ey), (*ak, *ek)] {
+                    assert!((a - e).abs() < 1e-5, "{actual:?} != {expected:?}");
+                }
+            }
+            (
+                Color::Rgb { r: ar, g: ag, b: ab },
+                Color::Rgb { r: er, g: eg, b: eb },
+            ) => {
+                for (a, e) in [(*ar, *er), (*ag, *eg), (*ab, *eb)] {
+                    assert!((a - e).abs() < 1e-5, "{actual:?} != {expected:?}");
+                }
+            }
+            (Color::Gray { v: a }, Color::Gray { v: e }) => {
+                assert!((a - e).abs() < 1e-5, "{actual:?} != {expected:?}");
+            }
+            (Color::Registration, Color::Registration) => {}
+            _ => panic!("palette colour model changed: {actual:?} != {expected:?}"),
+        }
+    }
+}
+
+#[test]
 fn rectangle_ellipse_curve_and_text_round_trip() {
     let mut doc = Document::new("w", Size::new(200.0, 100.0));
     let mut ids = doc.ids().clone();
@@ -6045,7 +6095,7 @@ fn a_kept_blend_that_no_longer_matches_opens_as_drawn() {
     let externals = crate::container::external_streams(&bytes, &container);
     let root = crate::riff::parse_with_externals(&riff, externals, 27).expect("tree");
     let open = |kept: &[crate::kept_blends::KeptBlend]| {
-        crate::parse::parse_document_kept(&root, &riff, container.version, None, kept, &[]).0
+        crate::parse::parse_document_kept(&root, &riff, container.version, None, kept, &[], &mut std::collections::HashMap::new()).0
     };
     let accel = |d: &Document, i: usize| match d.pages[0].layers[0].shapes[i].effects.first() {
         Some(tracedraw_core::live::Effect::Blend { accel_objects, .. }) => Some(*accel_objects),
@@ -6893,7 +6943,7 @@ fn a_kept_effect_in_a_group_comes_back_and_a_moved_one_stays_drawn() {
     let externals = crate::container::external_streams(&bytes, &container);
     let root = crate::riff::parse_with_externals(&riff, externals, 27).expect("tree");
     let open = |kept: &[crate::kept_effects::KeptEffect]| {
-        crate::parse::parse_document_kept(&root, &riff, container.version, None, &[], kept).0
+        crate::parse::parse_document_kept(&root, &riff, container.version, None, &[], kept, &mut std::collections::HashMap::new()).0
     };
     let kind_of = |d: &Document| match &d.pages[0].layers[0].shapes[0].kind {
         ShapeKind::Group { children } => children[0].kind.clone(),
@@ -8148,7 +8198,7 @@ fn text_spans_read(bytes: &[u8], kept: bool) -> Vec<TextSpan> {
         let externals = crate::container::external_streams(bytes, &container);
         let root =
             crate::riff::parse_with_externals(&riff, externals, container.version.0).expect("tree");
-        crate::parse::parse_document_kept(&root, &riff, container.version, None, &[], &[]).0
+        crate::parse::parse_document_kept(&root, &riff, container.version, None, &[], &[], &mut std::collections::HashMap::new()).0
     };
     match &doc.pages[0].layers[0].shapes[0].kind {
         ShapeKind::Text { spans, .. } => spans.clone(),
@@ -8606,4 +8656,91 @@ fn font_records_and_the_style_table_name_the_faces_the_text_uses() {
     }
     let (faces, _) = records(&document_to_cdr_version(&bold_doc, 15));
     assert_eq!(faces, vec![(1, 0x40), (1, 0x1000)], "15: {faces:x?}");
+}
+
+
+/// A CMYK bitmap record stores its colour model in the first DIB field,
+/// not in the following reserved field. CorelDRAW rejects records whose
+/// model is left as RGB while the pixel data is four-channel CMYK.
+#[test]
+fn cmyk_bitmap_record_marks_the_dib_colour_model() {
+    let mut picture = tiny_skia::Pixmap::new(2, 2).expect("picture");
+    picture.fill(tiny_skia::Color::WHITE);
+    let png = picture.encode_png().expect("picture png");
+
+    // Four stacked planes (C, M, Y, K), each the same size as the picture.
+    let mut planes = tiny_skia::Pixmap::new(2, 8).expect("ink planes");
+    // Give every channel and row distinct values. This catches channel
+    // swaps, plane-order mistakes and a top-down/bottom-up row inversion.
+    for channel in 0..4usize {
+        for row in 0..2usize {
+            for x in 0..2usize {
+                let value = (10 + channel * 10 + row * 2 + x) as u8;
+                let at = (channel * 2 + row) * 2 + x;
+                planes.pixels_mut()[at] =
+                    tiny_skia::ColorU8::from_rgba(value, value, value, 255).premultiply();
+            }
+        }
+    }
+    let plane_png = planes.encode_png().expect("planes png");
+    let inks = tracedraw_core::picture_inks::PictureInks::cmyk(&png, plane_png.into());
+
+    let record = bmp_record(1, &png, (10.0, 10.0), Some(&inks)).expect("bitmap record");
+    let u32_at = |at: usize| u32::from_le_bytes(record[at..at + 4].try_into().expect("u32"));
+
+    // 4-byte id + 50-byte bitmap envelope precede the DIB fields.
+    assert_eq!(u32_at(54), 3, "CMYK colour model");
+    assert_eq!(u32_at(58), 1, "bitmap plane count");
+    assert_eq!(u32_at(74), 32, "32-bit CMYK pixels");
+    assert_eq!(u32_at(78), 8, "two 32-bit pixels per row");
+    assert_eq!(u32_at(82), 16, "two rows of eight pixel bytes");
+
+    // The bitmap body begins after the 54-byte envelope, 32-byte DIB
+    // header and 32-byte resolution/palette section. Rows are bottom-up;
+    // each pixel stores C, M, Y, K in that order.
+    assert_eq!(
+        &record[118..134],
+        &[12, 22, 32, 42, 13, 23, 33, 43, 10, 20, 30, 40, 11, 21, 31, 41],
+        "CMYK channel bytes and row order"
+    );
+}
+
+/// RGB bitmap records keep BGR pixels and a separate bottom-up alpha mask.
+#[test]
+fn rgb_bitmap_record_writes_pixels_and_transparency_mask() {
+    let mut picture = tiny_skia::Pixmap::new(2, 2).expect("picture");
+    let pixels = [
+        (255, 0, 0, 255),
+        (0, 255, 0, 128),
+        (0, 0, 255, 0),
+        (255, 255, 255, 64),
+    ];
+    for (pixel, (r, g, b, a)) in picture.pixels_mut().iter_mut().zip(pixels) {
+        *pixel = tiny_skia::ColorU8::from_rgba(r, g, b, a).premultiply();
+    }
+    let png = picture.encode_png().expect("picture png");
+
+    let record = bmp_record(7, &png, (10.0, 10.0), None).expect("bitmap record");
+    let u32_at = |at: usize| u32::from_le_bytes(record[at..at + 4].try_into().expect("u32"));
+
+    assert_eq!(u32_at(54), 1, "RGB colour model");
+    assert_eq!(u32_at(58), 1, "bitmap plane count");
+    assert_eq!(u32_at(74), 24, "24-bit RGB pixels");
+    assert_eq!(u32_at(78), 8, "two padded 24-bit pixels per row");
+    assert_eq!(u32_at(82), 16, "two rows of eight pixel bytes");
+
+    // BGR rows are stored bottom-up; each 2-pixel row has two padding bytes.
+    assert_eq!(
+        &record[118..134],
+        &[0, 0, 0, 255, 255, 255, 0, 0, 0, 0, 255, 0, 255, 0, 0, 0],
+        "RGB pixel bytes and row order"
+    );
+
+    // The transparency block starts immediately after the RGB pixels.
+    // Its alpha rows are bottom-up and padded to four bytes.
+    assert_eq!(&record[134..136], &[0x52, 0x49], "transparency block marker");
+    assert_eq!(u32_at(144), 78, "mask header size");
+    assert_eq!(u32_at(148), 99, "mask colour model");
+    assert_eq!(u32_at(168), 8, "8-bit alpha");
+    assert_eq!(&record[212..220], &[0, 64, 0, 0, 255, 128, 0, 0], "bottom-up alpha mask");
 }

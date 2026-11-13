@@ -986,6 +986,7 @@ mod tests {
 
     fn app() -> App {
         let mut app = App::headless();
+        app.edit_master_guides = false;
         app.view.zoom = 1.0;
         app.canvas_rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
         app

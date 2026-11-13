@@ -40,6 +40,9 @@ pub struct ImportedPdf {
     /// The spot inks the pages' Separation colours name, numbered from 1
     /// in the order they came; `Color::Spot` of the shapes refers to them.
     pub inks: Vec<tracedraw_core::document::Ink>,
+    /// The CMYK ICC profile embedded in the PDF, when one was used by an
+    /// ICCBased CMYK colour space.
+    pub cmyk_profile: Option<tracedraw_core::document::DocumentProfile>,
     /// The pictures that came in smaller than the file holds them, past
     /// [`ImportOptions::max_picture_pixels`] or when there was no memory
     /// for them (#1835), for the caller to say so.
@@ -57,6 +60,21 @@ pub struct ShrunkPicture {
     /// Its size in the drawing.
     pub new_width: u32,
     pub new_height: u32,
+}
+
+/// Build the same CMYK-to-sRGB lookup used by native CDR bitmap import.
+fn cmyk_lut_from_profile(data: &[u8]) -> Option<tracedraw_core::icc::CmykLut> {
+    let source = tracedraw_core::icc::Profile::parse(data).ok()?;
+    if source.color_space() != tracedraw_core::icc::ColorSpace::Cmyk {
+        return None;
+    }
+    let transform = tracedraw_core::icc::Transform::new(
+        &source,
+        &tracedraw_core::icc::Profile::srgb(),
+        tracedraw_core::icc::Intent::default(),
+        false,
+    )?;
+    tracedraw_core::icc::CmykLut::new(&transform)
 }
 
 /// Does the buffer hold a PDF, possibly after an AI/PostScript preamble?
@@ -185,9 +203,17 @@ pub fn parse_with_options(
             max_pixels: options.max_picture_pixels.max(1),
             shrunk: Vec::new(),
             in_mask: false,
+            cmyk_profile: out.cmyk_profile.clone(),
+            cmyk_lut: out
+                .cmyk_profile
+                .as_ref()
+                .and_then(|p| cmyk_lut_from_profile(&p.data)),
         };
         let page = imp.import_page(*page_id, index);
         out.inks = std::mem::take(&mut imp.inks);
+        if out.cmyk_profile.is_none() {
+            out.cmyk_profile = imp.cmyk_profile.clone();
+        }
         out.shrunk_pictures.extend(
             imp.shrunk
                 .into_iter()
@@ -840,6 +866,10 @@ struct Importer<'a> {
     /// A picture's soft mask is being read (its shrinking is the
     /// picture's own).
     in_mask: bool,
+    /// ICC profile carried by an ICCBased CMYK colour space.
+    cmyk_profile: Option<tracedraw_core::document::DocumentProfile>,
+    /// Profile-based conversion used for the screen preview.
+    cmyk_lut: Option<tracedraw_core::icc::CmykLut>,
 }
 
 /// The text marked content gives its glyphs, shown in place of their own
@@ -2143,16 +2173,38 @@ impl<'a> Importer<'a> {
                     .unwrap_or(b"");
                 match family {
                     b"ICCBased" => {
-                        let n = a
-                            .get(1)
-                            .and_then(|s| self.dict_of(s))
-                            .and_then(|d| self.get(d, b"N"))
+                        let profile_stream = a.get(1).and_then(|s| match self.deref(s) {
+                            Object::Stream(stream) => Some(stream),
+                            _ => None,
+                        });
+                        let n = profile_stream
+                            .and_then(|stream| self.get(&stream.dict, b"N"))
                             .and_then(Self::num)
                             .unwrap_or(3.0) as usize;
-                        match n {
-                            1 => ColorSpace::Gray,
-                            4 => ColorSpace::Cmyk,
-                            _ => ColorSpace::Rgb,
+                        if n == 4 {
+                            if let Some(stream) = profile_stream {
+                                if self.cmyk_profile.is_none() {
+                                    if let Ok(data) = stream.decompressed_content() {
+                                        if let Ok(profile) = tracedraw_core::icc::Profile::parse(&data) {
+                                            if profile.color_space() == tracedraw_core::icc::ColorSpace::Cmyk {
+                                                let name = profile
+                                                    .description()
+                                                    .unwrap_or("Embedded PDF CMYK")
+                                                    .to_string();
+                                                self.cmyk_lut = cmyk_lut_from_profile(&data);
+                                                self.cmyk_profile = Some(
+                                                    tracedraw_core::document::DocumentProfile::new(name, data),
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            ColorSpace::Cmyk
+                        } else if n == 1 {
+                            ColorSpace::Gray
+                        } else {
+                            ColorSpace::Rgb
                         }
                     }
                     b"CalRGB" | b"Lab" => ColorSpace::Rgb,
@@ -2923,21 +2975,31 @@ impl<'a> Importer<'a> {
                             match cs {
                                 ColorSpace::Rgb => (to8(comps[0]), to8(comps[1]), to8(comps[2])),
                                 ColorSpace::Cmyk => {
-                                    let (c, m, yy, k) = if inverted {
-                                        (
+                                    let cmyk = if inverted {
+                                        [
                                             1.0 - comps[0],
                                             1.0 - comps[1],
                                             1.0 - comps[2],
                                             1.0 - comps[3],
+                                        ]
+                                    } else {
+                                        [comps[0], comps[1], comps[2], comps[3]]
+                                    };
+                                    if let Some(lut) = &self.cmyk_lut {
+                                        let rgb = lut.eval(cmyk);
+                                        (
+                                            to8(rgb[0]),
+                                            to8(rgb[1]),
+                                            to8(rgb[2]),
                                         )
                                     } else {
-                                        (comps[0], comps[1], comps[2], comps[3])
-                                    };
-                                    (
-                                        to8((1.0 - c) * (1.0 - k)),
-                                        to8((1.0 - m) * (1.0 - k)),
-                                        to8((1.0 - yy) * (1.0 - k)),
-                                    )
+                                        let [c, m, yy, k] = cmyk;
+                                        (
+                                            to8((1.0 - c) * (1.0 - k)),
+                                            to8((1.0 - m) * (1.0 - k)),
+                                            to8((1.0 - yy) * (1.0 - k)),
+                                        )
+                                    }
                                 }
                                 ColorSpace::DeviceN(_) => {
                                     let n = cs.components();

@@ -549,9 +549,9 @@ pub fn plan_shape_aware(
         // The improvement loop repeats a full geometry nest. Keep it
         // generous for small jobs and bounded on larger production runs.
         rounds: match parts.len() {
-            0..=32 => 40,
-            33..=100 => 12,
-            101..=300 => 3,
+            0..=32 => 120,
+            33..=100 => 32,
+            101..=300 => 6,
             _ => 0,
         },
         seed: 1,

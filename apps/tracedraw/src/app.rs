@@ -7196,6 +7196,7 @@ impl App {
                 let layer_name = doc2.pages[0].layers[0].name.clone();
                 doc2.pages.clear();
                 doc2.inks = std::mem::take(&mut imported.inks);
+                doc2.cmyk_profile = imported.cmyk_profile.take();
                 let mut ids = tracedraw_core::id::IdSource::default();
                 for (i, p) in imported.pages.into_iter().enumerate() {
                     let pid = ids.page();

@@ -2768,6 +2768,65 @@ mod tests {
     /// compressed when asked; a gray picture goes in with one channel; the
     /// page content can stay uncompressed (#550).
     #[test]
+    fn pdf_export_writes_retained_bitmap_cmyk_samples() {
+        let mut preview = std::io::Cursor::new(Vec::new());
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([138, 122, 107, 255]))
+            .write_to(&mut preview, image::ImageFormat::Png)
+            .expect("preview PNG");
+        let png = preview.into_inner();
+
+        let mut planes = std::io::Cursor::new(Vec::new());
+        image::GrayImage::from_raw(1, 4, vec![10, 20, 30, 40])
+            .expect("four ink planes")
+            .write_to(&mut planes, image::ImageFormat::Png)
+            .expect("planes PNG");
+        let inks = tracedraw_core::picture_inks::PictureInks::cmyk(
+            &png,
+            planes.into_inner().into(),
+        );
+
+        let mut doc = Document::default();
+        let layer = doc.pages[0].layers[0].id;
+        let id = doc.ids_mut().shape();
+        let mut shape = Shape::new(
+            id,
+            ShapeKind::Bitmap {
+                rect: Rect::new(10.0, 10.0, 30.0, 30.0),
+                width_px: 1,
+                height_px: 1,
+                png: png.into(),
+                fx: None,
+            },
+        );
+        shape.cmyk_bitmap = true;
+        shape.picture_inks = Some(Box::new(inks));
+        doc.layer_mut(layer).unwrap().shapes.push(shape);
+
+        let bytes = document_to_pdf(&doc);
+        let parsed = lopdf::Document::load_mem(&bytes).expect("PDF parses");
+        let image = parsed
+            .objects
+            .values()
+            .find_map(|object| match object {
+                lopdf::Object::Stream(stream)
+                    if stream
+                        .dict
+                        .get(b"ColorSpace")
+                        .and_then(lopdf::Object::as_name)
+                        .is_ok_and(|name| name == b"DeviceCMYK") =>
+                {
+                    Some(stream)
+                }
+                _ => None,
+            })
+            .expect("CMYK image XObject");
+        assert_eq!(
+            image.decompressed_content().expect("CMYK samples"),
+            vec![10, 20, 30, 40]
+        );
+    }
+
+    #[test]
     fn pictures_are_downsampled_and_compressed_as_asked() {
         let picture = |gray: bool| {
             let img = image::RgbImage::from_fn(600, 600, |x, y| {

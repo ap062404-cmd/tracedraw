@@ -2821,7 +2821,12 @@ impl<'a> Importer<'a> {
                                     *channel = 255 - *channel;
                                 }
                             }
-                            let cmyk = source.map(|v| v as f32 / 255.0);
+                            let cmyk = [
+                                source[0] as f32 / 255.0,
+                                source[1] as f32 / 255.0,
+                                source[2] as f32 / 255.0,
+                                source[3] as f32 / 255.0,
+                            ];
                             let rgb = if let Some(lut) = &self.cmyk_lut {
                                 lut.eval(cmyk)
                             } else {

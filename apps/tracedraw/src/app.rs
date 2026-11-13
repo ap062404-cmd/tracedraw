@@ -2844,7 +2844,7 @@ impl App {
             symmetry_doc: Default::default(),
             show_guides: true,
             selected_guides: Vec::new(),
-            edit_master_guides: true,
+            edit_master_guides: false,
             guide_rotate: None,
             guide_pivot: Point::ZERO,
             guide_form: Default::default(),

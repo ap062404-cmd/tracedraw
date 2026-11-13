@@ -323,9 +323,9 @@ impl Pdf {
 
     /// Embed the document's CMYK profile once and reuse its ICC stream.
     fn icc_profile_ref(&mut self) -> Option<usize> {
-        let profile = self.cmyk_profile.as_deref()?;
         if self.cmyk_profile_ref.is_none() {
-            let id = self.stream("/N 4", profile);
+            let profile = self.cmyk_profile.as_deref()?.to_vec();
+            let id = self.stream("/N 4", &profile);
             self.cmyk_profile_ref = Some(id);
         }
         self.cmyk_profile_ref

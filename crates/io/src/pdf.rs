@@ -2833,7 +2833,7 @@ mod tests {
                         .dict
                         .get(b"ColorSpace")
                         .and_then(lopdf::Object::as_name)
-                        .is_ok_and(|name| name == b"DeviceCMYK") =>
+                        .map_or(false, |name| name == b"DeviceCMYK") =>
                 {
                     Some(stream)
                 }

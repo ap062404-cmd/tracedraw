@@ -2697,7 +2697,19 @@ impl<'a> Importer<'a> {
         // the original four planes remain available for print separations.
         let keep_cmyk = cs == ColorSpace::Cmyk && bpc == 8 && f == 1 && !is_mask
             && !matches!(last, b"DCTDecode" | b"DCT" | b"JPXDecode");
-        let mut cmyk_planes = keep_cmyk.then(|| vec![0u8; (w as usize) * (h as usize) * 4]);
+        let mut cmyk_planes = if keep_cmyk {
+            let len = (w as usize) * (h as usize) * 4;
+            let mut planes = Vec::new();
+            if planes.try_reserve_exact(len).is_ok() {
+                planes.resize(len, 0);
+                Some(planes)
+            } else {
+                self.warn("CMYK ink channels not retained: not enough memory");
+                None
+            }
+        } else {
+            None
+        };
         match last {
             b"DCTDecode" | b"DCT" | b"JPXDecode" => {
                 // The decoder takes its own memory.
@@ -5357,7 +5369,7 @@ mod tests {
                 tracedraw_core::picture_inks::PictureInk::Process(3),
             ]
         );
-        assert!(matches!(shape.kind, ShapeKind::Bitmap { .. }));
+        assert!(matches!(&shape.kind, ShapeKind::Bitmap { .. }));
         let planes = image::load_from_memory(inks.png.as_ref())
             .expect("plane PNG")
             .to_luma8()

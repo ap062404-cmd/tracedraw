@@ -141,13 +141,33 @@ fn resample(data: &[u8], channels: u8, w: u32, h: u32, nw: u32, nh: u32) -> Opti
             FilterType::Triangle,
         )
         .into_raw(),
-        4 => resize(
-            &image::RgbaImage::from_raw(w, h, data.to_vec())?,
-            nw,
-            nh,
-            FilterType::Triangle,
-        )
-        .into_raw(),
+        4 => {
+            // CMYK channels are four independent inks, not RGBA (the
+            // fourth channel is black, not transparency). Resize each
+            // plane as greyscale, then interleave the samples again.
+            let mut planes = Vec::with_capacity((nw as usize) * (nh as usize) * 4);
+            let mut resized = Vec::with_capacity((nw as usize) * (nh as usize) * 4);
+            for channel in 0..4 {
+                planes.clear();
+                planes.extend(data.chunks_exact(4).map(|px| px[channel]));
+                let plane = resize(
+                    &image::GrayImage::from_raw(w, h, planes.clone())?,
+                    nw,
+                    nh,
+                    FilterType::Triangle,
+                )
+                .into_raw();
+                resized.push(plane);
+            }
+            let pixels = (nw as usize) * (nh as usize);
+            let mut out = Vec::with_capacity(pixels * 4);
+            for pixel in 0..pixels {
+                for channel in 0..4 {
+                    out.push(resized[channel][pixel]);
+                }
+            }
+            out
+        },
         _ => return None,
     };
     Some(out)

@@ -2869,6 +2869,15 @@ mod tests {
             image.decompressed_content().expect("CMYK samples"),
             vec![10, 20, 30, 40]
         );
+
+        // A regular PDF also carries the document profile in the bitmap's
+        // ICCBased colour space, not only as a PDF/X output intent.
+        let icc = tracedraw_core::icc::test_profiles::lut16_cmyk_profile();
+        doc.cmyk_profile = Some(tracedraw_core::DocumentProfile::new("press profile", icc));
+        let profiled = document_to_pdf(&doc);
+        let profiled = String::from_utf8_lossy(&profiled);
+        assert!(profiled.contains("/ColorSpace [/ICCBased"));
+        assert!(profiled.contains("/N 4"));
     }
 
     #[test]

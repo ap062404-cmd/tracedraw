@@ -1757,7 +1757,12 @@ pub fn show(app: &mut App, ctx: &Context) {
         } else {
             Vec::new()
         };
-        crate::ui::chrome::modal_blocker_except(ctx, &holes);
+        // Object Imposition is intentionally non-modal: users must be able
+        // to select different artwork on the canvas while the dialog stays
+        // open, then Add or Replace the current selection from the dialog.
+        if !matches!(dialog, Dialog::Imposition(_)) {
+            crate::ui::chrome::modal_blocker_except(ctx, &holes);
+        }
     }
     let mut close = false;
     match &mut dialog {

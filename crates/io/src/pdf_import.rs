@@ -2698,9 +2698,11 @@ impl<'a> Importer<'a> {
         let keep_cmyk = cs == ColorSpace::Cmyk && bpc == 8 && f == 1 && !is_mask
             && !matches!(last, b"DCTDecode" | b"DCT" | b"JPXDecode");
         let mut cmyk_planes = if keep_cmyk {
-            let len = (w as usize) * (h as usize) * 4;
+            let len = (w as usize)
+                .checked_mul(h as usize)
+                .and_then(|pixels| pixels.checked_mul(4));
             let mut planes = Vec::new();
-            if planes.try_reserve_exact(len).is_ok() {
+            if let Some(len) = len.filter(|len| planes.try_reserve_exact(*len).is_ok()) {
                 planes.resize(len, 0);
                 Some(planes)
             } else {

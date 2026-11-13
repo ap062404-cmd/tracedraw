@@ -1448,4 +1448,38 @@ mod tests {
         assert!(marks.len() < 16, "marks entering a neighboring bleed must be omitted");
         assert!(marks.len() > 0, "safe crop marks on the outer corners should remain");
     }
+
+    #[test]
+    fn crop_mark_stroke_must_stay_inside_the_sheet() {
+        let sheet = SheetSettings {
+            width_mm: 100.0, height_mm: 80.0,
+            margin_left_mm: 0.0, margin_right_mm: 0.0,
+            margin_top_mm: 0.0, margin_bottom_mm: 0.0,
+            gutter_x_mm: 0.0, gutter_y_mm: 0.0, bleed_mm: 0.0,
+        };
+        let plan = ImpositionPlan {
+            placements: vec![ObjectPlacement {
+                design_id: 1, copy_index: 0, sheet_index: 0,
+                x_mm: 3.6, y_mm: 20.0, width_mm: 30.0, height_mm: 20.0,
+                rotated: false, shape_transform: None,
+            }],
+            sheet_count: 1, total_copies: 1, utilization_percent: 7.5,
+        };
+        let document = build_document_with_crop_settings(
+            "Thick crop marks",
+            sheet,
+            &plan,
+            &[crop_mark_test_design()],
+            true,
+            CropMarkSettings { length_mm: 3.0, offset_mm: 0.5, stroke_width_mm: 2.0 },
+        ).unwrap();
+        let marks: Vec<_> = document.pages[0].layers[0].shapes.iter()
+            .filter(|shape| shape.name.as_deref() == Some("Crop mark"))
+            .collect();
+
+        // The two left horizontal marks have their centerlines inside the
+        // sheet, but their 2 mm stroke would extend past the left edge.
+        assert_eq!(marks.len(), 6);
+    }
+
 }

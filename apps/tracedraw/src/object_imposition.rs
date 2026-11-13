@@ -591,7 +591,7 @@ pub fn plan_shape_aware(
     let sheet_count = layout.sheets;
     let artwork_area = layout.parts_area;
     let sheet_area = settings.width_mm * settings.height_mm * sheet_count as f64;
-    Ok(ImpositionPlan {
+    let shape_plan = ImpositionPlan {
         total_copies: placements.len(),
         placements,
         sheet_count,
@@ -600,7 +600,20 @@ pub fn plan_shape_aware(
         } else {
             0.0
         },
-    })
+    };
+
+    // True-outline nesting is an optimisation, not permission to waste stock.
+    // Keep its result only when it uses no more sheets than the proven
+    // rectangular planner. If the contour heuristic scatters the parts and
+    // needs extra sheets, fall back to the safer rectangular arrangement.
+    if let Ok(rectangular_plan) = plan(specs, settings) {
+        if rectangular_plan.total_copies == shape_plan.total_copies
+            && rectangular_plan.sheet_count < shape_plan.sheet_count
+        {
+            return Ok(rectangular_plan);
+        }
+    }
+    Ok(shape_plan)
 }
 
 /// Plan regular grid and cross-rotated candidates, matching the calculator's

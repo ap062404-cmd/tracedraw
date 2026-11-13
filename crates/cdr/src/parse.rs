@@ -105,6 +105,7 @@ pub(crate) const KNOWN_ARGS: &[u32] = &[
     ARG_MESH,
     ARG_GUIDE_LINE,
     ARG_BLEND_STEPS,
+    ARG_SYMBOL_REFERENCE,
 ];
 
 /// What this reader interprets, for [`tracedraw_cdr_format::raw::collect`].
@@ -698,10 +699,14 @@ pub(crate) fn parse_document_kept(
     });
     if !symbol_lists.is_empty() {
         let mut ids = std::mem::take(doc.ids_mut());
+        let mut all_symbols_read = true;
         for (index, symbol_list) in symbol_lists.iter().enumerate() {
             let mut parts = ctx.read_objects(symbol_list, &mut ids, page_size, 0);
             let shape = match parts.len() {
-                0 => continue,
+                0 => {
+                    all_symbols_read = false;
+                    continue;
+                }
                 1 => parts.remove(0),
                 _ => {
                     let mut group = Shape::new(ids.shape(), ShapeKind::Group { children: parts });
@@ -713,9 +718,14 @@ pub(crate) fn parse_document_kept(
             doc.symbols.push(Symbol { name: format!("Symbol {}", index + 1), shape });
         }
         doc.set_ids(ids);
-        ctx.symbol_count = doc.symbols.len();
-        if doc.symbols.len() != symbol_lists.len() {
-            ctx.report.warn("one or more symbol definitions could not be read");
+        if all_symbols_read && doc.symbols.len() == symbol_lists.len() {
+            ctx.symbol_count = doc.symbols.len();
+        } else {
+            // Do not let a missing definition shift the indexes of later
+            // instances: keep the file's instances unresolved rather than wrong.
+            doc.symbols.clear();
+            ctx.symbol_count = 0;
+            ctx.report.warn("symbol definitions were incomplete; symbol instances were left unresolved");
         }
     }
     doc.pages.clear();

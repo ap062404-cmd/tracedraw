@@ -5447,6 +5447,38 @@ mod tests {
     }
 
     #[test]
+    fn iccbased_cmyk_profile_is_retained_and_used_for_preview() {
+        let icc = tracedraw_core::icc::test_profiles::lut16_cmyk_profile();
+        let hex: String = icc.iter().map(|b| format!("{b:02X}")).collect();
+        let profile = stream("/N 4 /Filter /ASCIIHexDecode", &hex);
+        let image_data = String::from_utf8(vec![10, 20, 30, 40]).expect("sample bytes");
+        let image = stream(
+            "/Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace [/ICCBased 6 0 R] /BitsPerComponent 8",
+            &image_data,
+        );
+        let bytes = one_page(
+            "q /Im0 Do Q",
+            "<< /XObject << /Im0 5 0 R >> >>",
+            &[image, profile],
+        );
+        let mut ids = IdSource::default();
+        let imported = parse(&bytes, &mut ids).expect("parse");
+        let retained = imported.cmyk_profile.expect("embedded CMYK profile");
+        assert_eq!(retained.data.as_slice(), icc.as_slice());
+        assert!(retained.name.len() > 0);
+        let shape = imported.pages[0].shapes.first().expect("bitmap");
+        assert!(shape.cmyk_bitmap);
+        assert!(shape.picture_inks.as_deref().is_some_and(|inks| {
+            matches!(inks.inks.as_slice(), [
+                tracedraw_core::picture_inks::PictureInk::Process(0),
+                tracedraw_core::picture_inks::PictureInk::Process(1),
+                tracedraw_core::picture_inks::PictureInk::Process(2),
+                tracedraw_core::picture_inks::PictureInk::Process(3)
+            ])
+        }));
+    }
+
+    #[test]
     fn paths_fills_strokes_and_page_size() {
         let bytes = one_page(
             "1 0 0 RG 0 0 1 rg 4 w 10 10 m 60 10 l 60 40 l h B 0.5 g 100 50 50 30 re f",

@@ -141,6 +141,13 @@ fn resample(data: &[u8], channels: u8, w: u32, h: u32, nw: u32, nh: u32) -> Opti
             FilterType::Triangle,
         )
         .into_raw(),
+        4 => resize(
+            &image::RgbaImage::from_raw(w, h, data.to_vec())?,
+            nw,
+            nh,
+            FilterType::Triangle,
+        )
+        .into_raw(),
         _ => return None,
     };
     Some(out)
@@ -1194,10 +1201,44 @@ impl PageWriter<'_> {
         {
             if let Some((mut rgb, alpha)) = decode_png_rgb_alpha(png) {
                 let name = format!("Im{}", self.images.len());
+                // Original CMYK planes are usable only while their fingerprint
+                // still matches the preview pixels and all four process inks
+                // are present in the expected order.
+                let mut cmyk = shape
+                    .picture_inks
+                    .as_deref()
+                    .filter(|inks| inks.fits(png))
+                    .filter(|inks| {
+                        inks.inks.as_slice()
+                            == [
+                                tracedraw_core::picture_inks::PictureInk::Process(0),
+                                tracedraw_core::picture_inks::PictureInk::Process(1),
+                                tracedraw_core::picture_inks::PictureInk::Process(2),
+                                tracedraw_core::picture_inks::PictureInk::Process(3),
+                            ]
+                    })
+                    .and_then(|inks| image::load_from_memory(inks.png.as_ref()).ok())
+                    .filter(|planes| {
+                        planes.width() == *width_px
+                            && planes.height() == height_px.saturating_mul(4)
+                    })
+                    .map(|planes| {
+                        let planes = planes.to_luma8().into_raw();
+                        let plane = (*width_px as usize) * (*height_px as usize);
+                        let mut interleaved = vec![0u8; plane * 4];
+                        for pixel in 0..plane {
+                            for channel in 0..4 {
+                                interleaved[pixel * 4 + channel] =
+                                    planes[channel * plane + pixel];
+                            }
+                        }
+                        interleaved
+                    });
                 let alpha = if self.pdf.allow_alpha {
                     alpha
                 } else {
-                    // No soft masks: composite over white.
+                    // No soft masks: composite over white. The same
+                    // coverage is applied to the original ink amounts.
                     if let Some(a) = &alpha {
                         for (px, a) in rgb.chunks_exact_mut(3).zip(a.iter()) {
                             let a = *a as u32;
@@ -1205,13 +1246,27 @@ impl PageWriter<'_> {
                                 *c = ((*c as u32 * a + 255 * (255 - a)) / 255) as u8;
                             }
                         }
+                        if let Some(inks) = cmyk.as_mut() {
+                            for (px, a) in inks.chunks_exact_mut(4).zip(a.iter()) {
+                                for c in px {
+                                    *c = ((*c as u16 * *a as u16 + 127) / 255) as u8;
+                                }
+                            }
+                        }
                     }
                     None
                 };
                 let opts = self.pdf.images;
-                let kind = image_kind(&rgb);
+                let kind = if cmyk.is_some() {
+                    ImageKind::Color
+                } else {
+                    image_kind(&rgb)
+                };
+                // Keep retained CMYK data; otherwise use the RGB preview.
                 // Gray and black-and-white pictures go in with one channel.
-                let (mut data, mut channels): (Vec<u8>, u8) = if kind == ImageKind::Color {
+                let (mut data, mut channels): (Vec<u8>, u8) = if let Some(inks) = cmyk {
+                    (inks, 4)
+                } else if kind == ImageKind::Color {
                     (rgb, 3)
                 } else {
                     (rgb.chunks_exact(3).map(|p| p[0]).collect(), 1)
@@ -1265,6 +1320,8 @@ impl PageWriter<'_> {
                     .unwrap_or_default();
                 let cs = if channels == 1 {
                     "/DeviceGray"
+                } else if channels == 4 {
+                    "/DeviceCMYK"
                 } else {
                     self.pdf.color_space()
                 };

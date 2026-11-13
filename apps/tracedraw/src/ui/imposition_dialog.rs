@@ -50,6 +50,9 @@ pub struct State {
     cached_specs: Vec<DesignSpec>,
     cached_settings: Option<SheetSettings>,
     cached_plan: Option<Result<object_imposition::ImpositionPlan, object_imposition::PlanError>>,
+    cached_capacity_spec: Option<DesignSpec>,
+    cached_capacity_settings: Option<SheetSettings>,
+    cached_capacity_plan: Option<Result<object_imposition::ImpositionPlan, object_imposition::PlanError>>,
 }
 
 impl State {
@@ -82,6 +85,9 @@ impl State {
             cached_specs: Vec::new(),
             cached_settings: None,
             cached_plan: None,
+            cached_capacity_spec: None,
+            cached_capacity_settings: None,
+            cached_capacity_plan: None,
         })
     }
 
@@ -97,6 +103,27 @@ impl State {
             }
         }
         added
+    }
+
+    fn replace_selection(&mut self, shapes: Vec<Shape>) -> bool {
+        let Some(mut replacement) = Self::from_selection(shapes) else {
+            return false;
+        };
+        replacement.sheet_width_mm = self.sheet_width_mm;
+        replacement.sheet_height_mm = self.sheet_height_mm;
+        replacement.margin_x_mm = self.margin_x_mm;
+        replacement.margin_y_mm = self.margin_y_mm;
+        replacement.gutter_x_mm = self.gutter_x_mm;
+        replacement.gutter_y_mm = self.gutter_y_mm;
+        replacement.bleed_mm = self.bleed_mm;
+        replacement.crop_marks = self.crop_marks;
+        replacement.crop_mark_length_mm = self.crop_mark_length_mm;
+        replacement.crop_mark_offset_mm = self.crop_mark_offset_mm;
+        replacement.crop_mark_width_mm = self.crop_mark_width_mm;
+        replacement.shape_nesting = self.shape_nesting;
+        replacement.saving_sheet_preset = self.saving_sheet_preset.take();
+        *self = replacement;
+        true
     }
 }
 
@@ -168,6 +195,7 @@ fn draw_preview(ui: &mut egui::Ui, plan: &object_imposition::ImpositionPlan, des
 
 pub fn dialog(app: &mut App, ctx: &Context, state: &mut State, close: &mut bool) {
     let mut add_selected = false;
+    let mut replace_selected = false;
     let mut remove_design = None;
     let mut create_document = false;
     let mut create_booklet = false;
@@ -243,9 +271,15 @@ pub fn dialog(app: &mut App, ctx: &Context, state: &mut State, close: &mut bool)
                             state.designs.retain(|design| design.id != id);
                         }
                     }
-                    if ui.button("+ Add selected design(s)").clicked() {
-                        add_selected = true;
-                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("+ Add selected design(s)").clicked() {
+                            add_selected = true;
+                        }
+                        if ui.button("Replace with current selection").clicked() {
+                            replace_selected = true;
+                        }
+                    });
+                    ui.small("Add appends the current canvas selection; Replace swaps the design list without closing this window.");
 
                     ui.separator();
                     ui.heading("Sheet settings");
@@ -403,6 +437,31 @@ pub fn dialog(app: &mut App, ctx: &Context, state: &mut State, close: &mut bool)
                         state.cached_shape_nesting = state.shape_nesting;
                         state.preview_sheet_index = 0;
                     }
+                    if state.designs.len() == 1 {
+                        let design = &state.designs[0];
+                        let capacity_spec = DesignSpec {
+                            id: design.id,
+                            width_mm: design.width_mm,
+                            height_mm: design.height_mm,
+                            copies: 10000,
+                            allow_rotation: design.allow_rotation,
+                        };
+                        if state.cached_capacity_spec.as_ref() != Some(&capacity_spec)
+                            || state.cached_capacity_settings != Some(settings)
+                            || state.cached_capacity_plan.is_none()
+                        {
+                            state.cached_capacity_plan = Some(object_imposition::plan(
+                                std::slice::from_ref(&capacity_spec), settings,
+                            ));
+                            state.cached_capacity_spec = Some(capacity_spec);
+                            state.cached_capacity_settings = Some(settings);
+                        }
+                    } else {
+                        state.cached_capacity_spec = None;
+                        state.cached_capacity_settings = None;
+                        state.cached_capacity_plan = None;
+                    }
+
                     match state.cached_plan.as_ref().expect("plan cache initialized") {
                         Ok(plan) => {
                             ui.separator();
@@ -426,6 +485,23 @@ pub fn dialog(app: &mut App, ctx: &Context, state: &mut State, close: &mut bool)
                                 "{} copies across {} design(s) · {} sheet(s) · {:.1}% artwork utilization",
                                 plan.total_copies, state.designs.len(), plan.sheet_count, plan.utilization_percent
                             ));
+                            if state.designs.len() == 1 {
+                                ui.separator();
+                                ui.heading("One-sheet capacity");
+                                match state.cached_capacity_plan.as_ref().expect("capacity plan initialized") {
+                                    Ok(capacity_plan) => {
+                                        let capacity = capacity_plan.placements.iter()
+                                            .filter(|placement| placement.sheet_index == 0)
+                                            .count();
+                                        ui.label(format!("This sheet fits up to {capacity} pcs of the selected object."));
+                                        draw_preview(ui, capacity_plan, &state.designs, settings, 0);
+                                        ui.small("Capacity uses the standard rectangular layout and the current sheet, margins, gutter, bleed, and rotation settings.");
+                                    }
+                                    Err(error) => {
+                                        ui.colored_label(egui::Color32::from_rgb(190, 70, 55), format!("Capacity cannot be calculated: {error:?}"));
+                                    }
+                                }
+                            }
                         }
                         Err(error) => {
                             ui.colored_label(egui::Color32::from_rgb(190, 70, 55), format!("Cannot fit artwork: {error:?}"));
@@ -444,12 +520,23 @@ pub fn dialog(app: &mut App, ctx: &Context, state: &mut State, close: &mut bool)
             });
         });
 
+    if replace_selected {
+        let selected = app.selected_shapes();
+        if !state.replace_selection(selected) {
+            app.status = "Select at least one valid object or group on the canvas to replace the designs.".into();
+        } else {
+            state.cached_plan = None;
+            state.cached_capacity_plan = None;
+        }
+    }
+
     if add_selected {
         let selected = app.selected_shapes();
         if !state.add_selection(selected) {
             app.status = "Select valid objects or groups before adding designs.".into();
         } else {
             state.cached_plan = None;
+            state.cached_capacity_plan = None;
         }
     }
 

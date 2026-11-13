@@ -18,7 +18,7 @@ use crate::text::{self, RunStyle, StyleRec};
 use std::collections::HashMap;
 use tracedraw_core::{
     document::{
-        Corners, EllipseArc, Layer, Page, ParagraphStyle, Shape, ShapeKind, TextAlign, TextSpan,
+        Corners, EllipseArc, Layer, Page, ParagraphStyle, Shape, ShapeKind, Symbol, TextAlign, TextSpan,
     },
     geometry::{Affine, BezPath, Point, Rect, Size},
     style::{
@@ -125,6 +125,8 @@ const ARG_LEGACY_TRANSFORM: u32 = 100;
 /// The object's style as a string (version 16 and later): fill, outline,
 /// character, frame and paragraph settings (seen in a version 21 file).
 pub(crate) const ARG_STYLE_STRING: u32 = 201;
+/// Reference to a symbol definition on a symb instance (observed in CDR 21).
+const ARG_SYMBOL_REFERENCE: u32 = 40170;
 pub(crate) const ARG_NAME: u32 = 1000;
 pub(crate) const ARG_OPACITY: u32 = 8000;
 const ARG_POLYGON: u32 = 11000;
@@ -417,6 +419,8 @@ struct Ctx<'a> {
     fills: HashMap<u32, FillDef>,
     outlines: HashMap<u32, OutlineDef>,
     bitmaps: HashMap<u32, BitmapDef>,
+    /// Number of symbol definitions read before the page objects.
+    symbol_count: usize,
     /// Pictures of objects embedded from other programs, by storage name
     /// (`ole2` chunks).
     embedded: HashMap<String, crate::ole::Picture>,
@@ -521,6 +525,7 @@ impl<'a> Ctx<'a> {
             fills: HashMap::new(),
             outlines: HashMap::new(),
             bitmaps: HashMap::new(),
+            symbol_count: 0,
             embedded: HashMap::new(),
             embedded_metafiles: HashMap::new(),
             pending_renumber: false,
@@ -685,6 +690,34 @@ pub(crate) fn parse_document_kept(
     }
 
     let mut doc = Document::new("Untitled", page_size);
+
+    // Read symbol definitions before page objects so instances can refer to them.
+    let mut symbol_lists: Vec<&Chunk> = Vec::new();
+    tree.root.walk(&mut |c, _| {
+        if c.is(b"sytr") { symbol_lists.push(c); }
+    });
+    if !symbol_lists.is_empty() {
+        let mut ids = std::mem::take(doc.ids_mut());
+        for (index, symbol_list) in symbol_lists.iter().enumerate() {
+            let mut parts = ctx.read_objects(symbol_list, &mut ids, page_size, 0);
+            let shape = match parts.len() {
+                0 => continue,
+                1 => parts.remove(0),
+                _ => {
+                    let mut group = Shape::new(ids.shape(), ShapeKind::Group { children: parts });
+                    group.fill = Fill::None;
+                    group.stroke = None;
+                    group
+                }
+            };
+            doc.symbols.push(Symbol { name: format!("Symbol {}", index + 1), shape });
+        }
+        doc.set_ids(ids);
+        ctx.symbol_count = doc.symbols.len();
+        if doc.symbols.len() != symbol_lists.len() {
+            ctx.report.warn("one or more symbol definitions could not be read");
+        }
+    }
     doc.pages.clear();
 
     // Pass 2: pages. Files store a master page (desktop, guides and grid
@@ -3882,6 +3915,37 @@ impl<'a> Ctx<'a> {
         outer
     }
 
+    /// A symb list is an instance rather than an ordinary obj.
+    /// Its loda names the symbol-table entry and its trfd places it.
+    fn read_symbol_instance(
+        &mut self,
+        chunk: &Chunk,
+        id: tracedraw_core::ShapeId,
+    ) -> Option<Shape> {
+        let mut loda = None;
+        let mut trfd = None;
+        chunk.walk(&mut |c, _| {
+            if (c.is(b"loda") || c.is(b"lobj")) && loda.is_none() { loda = Some(c); }
+            else if c.is(b"trfd") && trfd.is_none() { trfd = Some(c); }
+        });
+        let data = self.data(loda?);
+        let table = self.read_loda(data)?;
+        let reference = table.args.iter()
+            .find(|arg| arg.ty == ARG_SYMBOL_REFERENCE)
+            .and_then(|arg| self.reader_at(data, arg.off).u32())?;
+        // The symbol reference observed in version 21 is one-based.
+        let index = usize::try_from(reference.checked_sub(1)?).ok()?;
+        if index >= self.symbol_count { return None; }
+        let mut shape = Shape::new(id, ShapeKind::SymbolInstance { index });
+        shape.transform = self.outer_transform
+            * trfd.map(|t| self.read_transform(t)).unwrap_or(Affine::IDENTITY);
+        if let Some(arg) = table.args.iter().find(|arg| arg.ty == ARG_NAME) {
+            let name = self.read_name(data.get(arg.off..arg.end)?);
+            if !name.is_empty() { shape.name = Some(name); }
+        }
+        Some(shape)
+    }
+
     /// The objects of a layer or group list, bottom to top. Files store
     /// them front to back (confirmed with a version 21 file: text, then a patch,
     /// then the full-page picture underneath). `grp ` lists become groups.
@@ -3950,6 +4014,15 @@ impl<'a> Ctx<'a> {
                     }
                     None if std::mem::take(&mut self.last_was_guide) => {}
                     None => self.report.skipped_objects += 1,
+                }
+            } else if c.is(b"symb") {
+                let id = ids.shape();
+                match self.read_symbol_instance(c, id) {
+                    Some(shape) => out.push(shape),
+                    None => {
+                        self.report.skipped_objects += 1;
+                        self.report.warn("a symbol instance could not be resolved to a definition");
+                    }
                 }
             } else if c.is(b"grp ") {
                 // Version 3: the group's own `lobj` holds a matrix that

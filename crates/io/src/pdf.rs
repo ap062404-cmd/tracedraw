@@ -293,9 +293,8 @@ impl Pdf {
         if self.cmyk_only {
             let cmyk = rgb_to_cmyk_bytes(rgb);
             let data = flate(&cmyk);
-            let color_space = self.cmyk_color_space();
             return self.stream(
-                &format!("/Type /XObject /Subtype /Image /Width {w} /Height {h} /ColorSpace {color_space} /BitsPerComponent 8 /Filter /FlateDecode{smask}"),
+                &format!("/Type /XObject /Subtype /Image /Width {w} /Height {h} /ColorSpace /DeviceCMYK /BitsPerComponent 8 /Filter /FlateDecode{smask}"),
                 &data,
             );
         }

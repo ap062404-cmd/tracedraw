@@ -605,7 +605,10 @@ pub fn nest_shapes(
     let area = Area {
         cw,
         ch,
-        cell: tol.max(cw / 256.0),
+        // Keep the search grid fine enough for print layouts. At 320 mm,
+        // the old 256-column cap forced 1.25 mm placement steps and skipped
+        // narrow but usable gaps. 1024 columns reduce that to about 0.31 mm.
+        cell: tol.max(cw / 1024.0),
     };
     let frame = Frame::new(&spec);
     let norm = frame.to_norm();

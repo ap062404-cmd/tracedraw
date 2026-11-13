@@ -511,13 +511,32 @@ fn run(
         let Some(Some(part)) = parts.get(i) else {
             continue;
         };
-        let mut spot = None;
+        // Do not blindly use the first sheet that accepts this part.
+        // Compare the increase in each sheet's occupied bounding rectangle,
+        // so a part can fill a useful gap on a later sheet instead of making
+        // the first sheet wider/taller and leaving fragmented offcuts.
+        let mut spot: Option<(usize, usize, Vec2, (f64, f64, f64, f64, f64, usize))> = None;
         for (si, sheet) in sheets.iter().enumerate() {
-            if let Some((oi, pos)) = best_on(part, sheet, area) {
-                spot = Some((si, oi, pos));
-                break;
+            let Some((oi, pos)) = best_on(part, sheet, area) else {
+                continue;
+            };
+            let (used_right, used_top) = sheet.placed.iter().fold(
+                (0.0_f64, 0.0_f64),
+                |(right, top), placed| {
+                    (right.max(placed.bbox.x1), top.max(placed.bbox.y1))
+                },
+            );
+            let Some(orient) = part.orients.get(oi) else {
+                continue;
+            };
+            let right = used_right.max(pos.x + orient.w);
+            let top = used_top.max(pos.y + orient.h);
+            let score = (right * top, top, right, pos.y, pos.x, si);
+            if spot.as_ref().is_none_or(|(_, _, _, best)| score < *best) {
+                spot = Some((si, oi, pos, score));
             }
         }
+        let spot = spot.map(|(si, oi, pos, _)| (si, oi, pos));
         if spot.is_none() && (!roll || sheets.is_empty()) {
             let fresh = SheetState {
                 grid: area.new_grid(),

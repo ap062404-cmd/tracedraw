@@ -1503,4 +1503,48 @@ mod tests {
         assert_eq!(marks.len(), 6);
     }
 
+
+    #[test]
+    fn shape_nesting_coordinates_are_local_to_each_output_sheet() {
+        use tracedraw_core::{Shape, ShapeId, ShapeKind};
+        let circle = Shape::new(
+            ShapeId(1),
+            ShapeKind::Ellipse {
+                rect: tracedraw_core::Rect::new(0.0, 0.0, 20.0, 20.0),
+                arc: None,
+            },
+        );
+        let designs = vec![DesignArtwork { id: 1, shapes: vec![circle] }];
+        let specs = vec![DesignSpec {
+            id: 1, width_mm: 20.0, height_mm: 20.0, copies: 10, allow_rotation: true,
+        }];
+        let settings = SheetSettings {
+            width_mm: 40.3, height_mm: 38.3,
+            margin_left_mm: 0.0, margin_right_mm: 0.0,
+            margin_top_mm: 0.0, margin_bottom_mm: 0.0,
+            gutter_x_mm: 0.0, gutter_y_mm: 0.0, bleed_mm: 0.0,
+        };
+
+        let result = plan_shape_aware(&designs, &specs, settings).unwrap();
+        assert!(result.sheet_count > 1, "test must exercise multiple output sheets");
+        assert_eq!(result.total_copies, 10);
+        for placement in &result.placements {
+            assert!(placement.x_mm >= -1e-6, "x outside local sheet: {placement:?}");
+            assert!(placement.y_mm >= -1e-6, "y outside local sheet: {placement:?}");
+            assert!(
+                placement.x_mm + placement.width_mm <= settings.width_mm + 1e-6,
+                "right edge outside local sheet: {placement:?}"
+            );
+            assert!(
+                placement.y_mm + placement.height_mm <= settings.height_mm + 1e-6,
+                "bottom edge outside local sheet: {placement:?}"
+            );
+            if placement.sheet_index > 0 {
+                assert!(
+                    placement.shape_transform.is_some(),
+                    "shape-aware placements must retain their local transform"
+                );
+            }
+        }
+    }
 }

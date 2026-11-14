@@ -3458,13 +3458,10 @@ impl App {
         // A document's rendering intent overrides the default one. This
         // keeps Proof Colors and screen conversions in step with the
         // intent chosen on the Color Management dialog's Document tab.
-        let document_intent = &self.doc().metadata.rendering_intent;
-        let intent_name = if document_intent.trim().is_empty() {
-            c.intent.as_str()
-        } else {
-            document_intent.as_str()
-        };
-        let intent = Intent::from_name(intent_name).unwrap_or_default();
+        let intent = effective_rendering_intent(
+            &self.doc().metadata.rendering_intent,
+            &c.intent,
+        );
         let bpc = c.black_point_compensation;
         self.color_profile_key = carried.map(|p| std::sync::Arc::as_ptr(&p.data) as usize);
         tracedraw_core::color::engine::set_map_gray_to_black(c.map_gray_to_black);
@@ -3489,14 +3486,10 @@ impl App {
             .as_ref()
             .map(|p| std::sync::Arc::as_ptr(&p.data) as usize);
         let c = &self.settings.color;
-        let document_intent = &self.doc().metadata.rendering_intent;
-        let intent_name = if document_intent.trim().is_empty() {
-            c.intent.as_str()
-        } else {
-            document_intent.as_str()
-        };
-        let expected_intent = tracedraw_core::icc::Intent::from_name(intent_name)
-            .unwrap_or_default();
+        let expected_intent = effective_rendering_intent(
+            &self.doc().metadata.rendering_intent,
+            &c.intent,
+        );
         let intent_changed = tracedraw_core::color::engine::icc()
             .is_some_and(|engine| engine.intent() != expected_intent);
         if key != self.color_profile_key || intent_changed {
@@ -9471,6 +9464,19 @@ fn profile_matches_space(
     profile.color_space() == expected
 }
 
+/// The document's intent overrides the application default when set.
+fn effective_rendering_intent(
+    document_intent: &str,
+    default_intent: &str,
+) -> tracedraw_core::icc::Intent {
+    let name = if document_intent.trim().is_empty() {
+        default_intent
+    } else {
+        document_intent
+    };
+    tracedraw_core::icc::Intent::from_name(name).unwrap_or_default()
+}
+
 /// The pictures a version 16+ `.cdr` file stores with the drawing: a
 /// thumbnail and each page, 256 pixels on the longer side.
 pub(crate) fn cdr_previews(doc: &tracedraw_core::Document) -> tracedraw_cdr::write::Previews {
@@ -9698,6 +9704,23 @@ pub(crate) fn repeated_transform(t: Affine, before: Rect, now: Rect) -> Affine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn document_rendering_intent_overrides_default_but_empty_uses_default() {
+        use tracedraw_core::icc::Intent;
+        assert_eq!(
+            effective_rendering_intent("Perceptual", "Relative colorimetric"),
+            Intent::Perceptual
+        );
+        assert_eq!(
+            effective_rendering_intent("", "Saturation"),
+            Intent::Saturation
+        );
+        assert_eq!(
+            effective_rendering_intent("   ", "Absolute colorimetric"),
+            Intent::AbsoluteColorimetric
+        );
+    }
 
     #[test]
     fn icc_profiles_are_only_accepted_in_matching_colour_slots() {

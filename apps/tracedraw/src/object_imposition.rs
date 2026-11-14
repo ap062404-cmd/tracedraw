@@ -569,8 +569,16 @@ pub fn plan_shape_aware(
                 height_mm: spec.height_mm,
             });
         };
+
+        // TraceCut returns page-space transforms in a virtual layout where
+        // physical sheets are arranged side by side. The production document
+        // creates one independent page per sheet, so remove that sheet's
+        // virtual page offset before storing coordinates or the transform.
+        let virtual_sheet = nest_settings.sheet.sheet_rect(placement.sheet, 0.0);
+        let sheet_local_transform = tracedraw_core::Affine::translate((-virtual_sheet.x0, -virtual_sheet.y0))
+            * placement.transform;
         let bounds = tracedraw_tracecut::nest::shapes::placed_bounds(
-            &parts[index], placement.transform,
+            &parts[index], sheet_local_transform,
         ).ok_or_else(|| {
             let (id, _) = owners[index];
             PlanError::InvalidDesign { id }
@@ -585,7 +593,7 @@ pub fn plan_shape_aware(
             width_mm: bounds.width(),
             height_mm: bounds.height(),
             rotated: placement.angle.abs() > 1e-7,
-            shape_transform: Some(placement.transform.as_coeffs()),
+            shape_transform: Some(sheet_local_transform.as_coeffs()),
         });
     }
     let sheet_count = layout.sheets;

@@ -1165,6 +1165,8 @@ pub enum Dialog {
     BitmapPaletted(crate::bitmap_modes::PalettedSettings),
     /// Image > Remove Background (on this computer, no AI service).
     RemoveBackground(crate::ui::bitmap_dialogs::BgRemoveState),
+    /// Object-based imposition for arranging selected artwork on production sheets.
+    Imposition(Box<crate::ui::imposition_dialog::State>),
     /// The Shape tool's Align Nodes: on a common horizontal and/or
     /// vertical.
     NodeAlign {
@@ -1836,11 +1838,16 @@ pub fn show(app: &mut App, ctx: &Context) {
         } else {
             Vec::new()
         };
-        crate::ui::chrome::modal_blocker_except(ctx, &holes);
+        // Object Imposition is non-modal: canvas selection must remain available
+        // while the production dialog stays open.
+        if !matches!(dialog, Dialog::Imposition(_)) {
+            crate::ui::chrome::modal_blocker_except(ctx, &holes);
+        }
     }
     let mut close = false;
     match &mut dialog {
         Dialog::None => {}
+        Dialog::Imposition(st) => crate::ui::imposition_dialog::dialog(app, ctx, st, &mut close),
         Dialog::LineStyle(st) => crate::ui::line_style::dialog(app, ctx, st, &mut close),
         Dialog::BitmapBw(s) => crate::ui::bitmap_dialogs::bw_dialog(app, ctx, s, &mut close),
         Dialog::RemoveBackground(st) => {

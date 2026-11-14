@@ -45,10 +45,13 @@ pub struct State {
     pub crop_mark_offset_mm: f64,
     pub crop_mark_width_mm: f64,
     pub shape_nesting: bool,
+    /// Automatic or manually selected packing pattern for simple ellipses.
+    pub ellipse_pattern: object_imposition::EllipsePattern,
     /// Name entered while saving the current custom sheet size.
     pub saving_sheet_preset: Option<String>,
     pub preview_sheet_index: usize,
     cached_shape_nesting: bool,
+    cached_ellipse_pattern: object_imposition::EllipsePattern,
     cached_specs: Vec<DesignSpec>,
     cached_settings: Option<SheetSettings>,
     cached_plan: Option<Result<object_imposition::ImpositionPlan, object_imposition::PlanError>>,
@@ -82,9 +85,11 @@ impl State {
             crop_mark_offset_mm: 0.5,
             crop_mark_width_mm: 0.2,
             shape_nesting: false,
+            ellipse_pattern: object_imposition::EllipsePattern::Auto,
             saving_sheet_preset: None,
             preview_sheet_index: 0,
             cached_shape_nesting: false,
+            cached_ellipse_pattern: object_imposition::EllipsePattern::Auto,
             cached_specs: Vec::new(),
             cached_settings: None,
             cached_plan: None,
@@ -242,6 +247,23 @@ pub fn dialog(app: &mut App, ctx: &Context, state: &mut State, close: &mut bool)
                     ui.separator();
                     ui.checkbox(&mut state.shape_nesting, "Nest by true object outlines (experimental)");
                     ui.small("Uses vector contours for tighter packing; rectangular mode remains the default fallback.");
+                    ui.horizontal(|ui| {
+                        ui.label("Circle / oval layout:");
+                        egui::ComboBox::from_id_salt("imposition_ellipse_pattern")
+                            .selected_text(match state.ellipse_pattern {
+                                object_imposition::EllipsePattern::Auto => "Automatic",
+                                object_imposition::EllipsePattern::Grid => "Grid",
+                                object_imposition::EllipsePattern::Hexagonal => "Hexagonal",
+                                object_imposition::EllipsePattern::Staggered => "Staggered",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut state.ellipse_pattern, object_imposition::EllipsePattern::Auto, "Automatic (circle / oval)");
+                                ui.selectable_value(&mut state.ellipse_pattern, object_imposition::EllipsePattern::Grid, "Grid");
+                                ui.selectable_value(&mut state.ellipse_pattern, object_imposition::EllipsePattern::Hexagonal, "Hexagonal");
+                                ui.selectable_value(&mut state.ellipse_pattern, object_imposition::EllipsePattern::Staggered, "Staggered");
+                            });
+                    });
+                    ui.small("Automatic detects plain circles and ovals. Manual selection overrides the detected pattern.");
                     ui.separator();
 
                     ui.heading("Designs");
@@ -428,6 +450,7 @@ pub fn dialog(app: &mut App, ctx: &Context, state: &mut State, close: &mut bool)
                     if state.cached_specs != specs
                         || state.cached_settings != Some(settings)
                         || state.cached_shape_nesting != state.shape_nesting
+                        || state.cached_ellipse_pattern != state.ellipse_pattern
                         || state.cached_plan.is_none()
                     {
                         let artwork: Vec<DesignArtwork> = state.designs.iter().map(|design| DesignArtwork {
@@ -435,13 +458,14 @@ pub fn dialog(app: &mut App, ctx: &Context, state: &mut State, close: &mut bool)
                             shapes: design.shapes.clone(),
                         }).collect();
                         state.cached_plan = Some(if state.shape_nesting {
-                            object_imposition::plan_shape_aware(&artwork, &specs, settings)
+                            object_imposition::plan_shape_aware_with_ellipse_pattern(&artwork, &specs, settings, state.ellipse_pattern)
                         } else {
                             object_imposition::plan(&specs, settings)
                         });
                         state.cached_specs = specs;
                         state.cached_settings = Some(settings);
                         state.cached_shape_nesting = state.shape_nesting;
+                        state.cached_ellipse_pattern = state.ellipse_pattern;
                         state.preview_sheet_index = 0;
                     }
                     if state.designs.len() == 1 {

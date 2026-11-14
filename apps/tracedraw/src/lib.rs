@@ -106,6 +106,7 @@ mod i18n;
 mod image_dpi;
 mod import_place;
 mod imposition;
+mod object_imposition;
 #[cfg(test)]
 mod input_method_tests;
 #[cfg(not(target_arch = "wasm32"))]

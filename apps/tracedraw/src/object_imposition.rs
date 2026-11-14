@@ -1068,6 +1068,71 @@ mod tests {
     }
 
     #[test]
+    fn ellipse_auto_uses_hexagonal_rows_for_circles() {
+        use tracedraw_core::{Shape, ShapeId, ShapeKind, Rect as CoreRect};
+        let circle = Shape::new(
+            ShapeId(1),
+            ShapeKind::Ellipse { rect: CoreRect::new(0.0, 0.0, 30.0, 30.0), arc: None },
+        );
+        let designs = vec![DesignArtwork { id: 1, shapes: vec![circle] }];
+        let specs = vec![DesignSpec {
+            id: 1, width_mm: 30.0, height_mm: 30.0, copies: 20, allow_rotation: false,
+        }];
+        let settings = SheetSettings {
+            width_mm: 100.0, height_mm: 100.0,
+            margin_left_mm: 5.0, margin_right_mm: 5.0,
+            margin_top_mm: 5.0, margin_bottom_mm: 5.0,
+            gutter_x_mm: 2.0, gutter_y_mm: 2.0, bleed_mm: 0.0,
+        };
+        let hex = plan_shape_aware_with_ellipse_pattern(
+            &designs, &specs, settings, EllipsePattern::Auto,
+        ).unwrap();
+        let grid = plan_shape_aware_with_ellipse_pattern(
+            &designs, &specs, settings, EllipsePattern::Grid,
+        ).unwrap();
+        assert_eq!(hex.total_copies, 20);
+        assert!(hex.placements.iter().all(|p| p.shape_transform.is_some()));
+        assert!(hex.placements.iter().all(|p|
+            p.x_mm >= 5.0 - 1e-6 && p.y_mm >= 5.0 - 1e-6
+                && p.x_mm + p.width_mm <= 95.0 + 1e-6
+                && p.y_mm + p.height_mm <= 95.0 + 1e-6
+        ));
+        let hex_row_ys: std::collections::BTreeSet<_> =
+            hex.placements.iter().filter(|p| p.sheet_index == 0)
+                .map(|p| (p.y_mm * 1000.0).round() as i64).collect();
+        let grid_row_ys: std::collections::BTreeSet<_> =
+            grid.placements.iter().filter(|p| p.sheet_index == 0)
+                .map(|p| (p.y_mm * 1000.0).round() as i64).collect();
+        assert_ne!(hex_row_ys, grid_row_ys, "manual grid must override automatic hexagonal packing");
+    }
+
+    #[test]
+    fn ellipse_auto_uses_staggered_rows_for_ovals() {
+        use tracedraw_core::{Shape, ShapeId, ShapeKind, Rect as CoreRect};
+        let oval = Shape::new(
+            ShapeId(1),
+            ShapeKind::Ellipse { rect: CoreRect::new(0.0, 0.0, 40.0, 20.0), arc: None },
+        );
+        let designs = vec![DesignArtwork { id: 1, shapes: vec![oval] }];
+        let specs = vec![DesignSpec {
+            id: 1, width_mm: 40.0, height_mm: 20.0, copies: 12, allow_rotation: false,
+        }];
+        let settings = SheetSettings {
+            width_mm: 100.0, height_mm: 80.0,
+            margin_left_mm: 5.0, margin_right_mm: 5.0,
+            margin_top_mm: 5.0, margin_bottom_mm: 5.0,
+            gutter_x_mm: 2.0, gutter_y_mm: 2.0, bleed_mm: 0.0,
+        };
+        let result = plan_shape_aware(&designs, &specs, settings).unwrap();
+        assert_eq!(result.total_copies, 12);
+        assert!(result.placements.iter().all(|p| p.shape_transform.is_some()));
+        let first_sheet: Vec<_> = result.placements.iter()
+            .filter(|p| p.sheet_index == 0).collect();
+        assert!(first_sheet.len() >= 2);
+        assert!(first_sheet.iter().any(|p| (p.x_mm - 5.0).abs() > 1e-6));
+    }
+
+    #[test]
     fn true_outline_nesting_packs_three_circles_in_a_staggered_sheet() {
         use tracedraw_core::{Shape, ShapeId, ShapeKind};
         let circle = Shape::new(

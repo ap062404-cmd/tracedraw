@@ -4,6 +4,8 @@
 //! dimensions and copy counts into deterministic sheet placements. The UI
 //! and document builder can therefore be tested independently.
 
+use kurbo::Shape;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct DesignSpec {
     pub id: u64,

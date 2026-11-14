@@ -443,12 +443,167 @@ pub fn build_document_with_crop_settings(
     Ok(doc)
 }
 
+/// Preferred arrangement for simple ellipse artwork in shape-aware imposition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EllipsePattern {
+    /// Detect circles and ovals and choose a suitable staggered pattern.
+    #[default]
+    Auto,
+    /// Conventional rows and columns.
+    Grid,
+    /// Hexagonal packing (also useful for oval shapes).
+    Hexagonal,
+    /// Staggered rows for oval shapes.
+    Staggered,
+}
+
+/// Detect whether every design is one plain ellipse and share the same trim size.
+/// Complex/grouped artwork deliberately stays on the general contour engine.
+fn plan_plain_ellipses(
+    designs: &[DesignArtwork],
+    specs: &[DesignSpec],
+    settings: SheetSettings,
+    pattern: EllipsePattern,
+) -> Option<Result<ImpositionPlan, PlanError>> {
+    use tracedraw_core::{Affine, ShapeKind};
+
+    if designs.is_empty() || designs.len() != specs.len() {
+        return None;
+    }
+    let mut bounds_by_design = Vec::with_capacity(designs.len());
+    for (design, spec) in designs.iter().zip(specs) {
+        if design.id != spec.id || design.shapes.len() != 1
+            || !matches!(&design.shapes[0].kind, ShapeKind::Ellipse { arc: None, .. })
+        {
+            return None;
+        }
+        let paths = tracedraw_tracecut::outlines(&design.shapes[0]);
+        let bounds = paths.iter().map(|p| p.bounding_box())
+            .reduce(|a, b| a.union(b))?;
+        bounds_by_design.push(bounds);
+        if (bounds.width() - spec.width_mm).abs() > 0.05
+            || (bounds.height() - spec.height_mm).abs() > 0.05
+        {
+            return None;
+        }
+    }
+    let first = bounds_by_design[0];
+    if bounds_by_design.iter().any(|b|
+        (b.width() - first.width()).abs() > 0.05
+            || (b.height() - first.height()).abs() > 0.05
+    ) {
+        return None;
+    }
+
+    let w = first.width();
+    let h = first.height();
+    let is_circle = (w - h).abs() <= 0.05;
+    let effective = match pattern {
+        EllipsePattern::Auto if is_circle => EllipsePattern::Hexagonal,
+        EllipsePattern::Auto => EllipsePattern::Staggered,
+        other => other,
+    };
+    let bleed = settings.bleed_mm.max(0.0);
+    let outer_w = w + 2.0 * bleed;
+    let outer_h = h + 2.0 * bleed;
+    let left = settings.margin_left_mm.max(0.0);
+    let right = settings.width_mm - settings.margin_right_mm.max(0.0);
+    let bottom = settings.margin_bottom_mm.max(0.0);
+    let top = settings.height_mm - settings.margin_top_mm.max(0.0);
+    let usable_w = right - left;
+    let usable_h = top - bottom;
+    if usable_w + 1e-7 < outer_w || usable_h + 1e-7 < outer_h {
+        return Some(Err(PlanError::DoesNotFit {
+            id: specs[0].id, width_mm: w, height_mm: h,
+        }));
+    }
+
+    let step_x = outer_w + settings.gutter_x_mm.max(0.0);
+    let grid_step_y = outer_h + settings.gutter_y_mm.max(0.0);
+    let stagger_step_y = outer_h * 0.8660254037844386 + settings.gutter_y_mm.max(0.0);
+    let row_step = if effective == EllipsePattern::Grid { grid_step_y } else { stagger_step_y };
+    let total: usize = specs.iter().map(|s| s.copies as usize).sum();
+    if total == 0 {
+        return Some(Ok(ImpositionPlan {
+            placements: Vec::new(), sheet_count: 0, total_copies: 0,
+            utilization_percent: 0.0,
+        }));
+    }
+    let mut slots: Vec<(usize, f64, f64)> = Vec::new();
+    let mut row = 0usize;
+    let mut y = bottom;
+    while y + outer_h <= top + 1e-7 {
+        let offset = if effective != EllipsePattern::Grid && row % 2 == 1 {
+            step_x * 0.5
+        } else { 0.0 };
+        let mut x = left + offset;
+        while x + outer_w <= right + 1e-7 {
+            slots.push((0, x + bleed, y + bleed));
+            x += step_x;
+        }
+        row += 1;
+        y += row_step;
+    }
+    if slots.is_empty() {
+        return Some(Err(PlanError::DoesNotFit {
+            id: specs[0].id, width_mm: w, height_mm: h,
+        }));
+    }
+    let per_sheet = slots.len();
+    let mut placements = Vec::with_capacity(total);
+    let mut design_index = 0usize;
+    let mut copy_index = 0u32;
+    for n in 0..total {
+        while design_index < specs.len() && copy_index >= specs[design_index].copies {
+            design_index += 1;
+            copy_index = 0;
+        }
+        if design_index >= specs.len() { break; }
+        let sheet_index = n / per_sheet;
+        let (_, x, y_bottom) = slots[n % per_sheet];
+        let source = bounds_by_design[design_index];
+        let dx = x - source.x0;
+        let dy = y_bottom - source.y0;
+        let transform = Affine::translate((dx, dy));
+        placements.push(ObjectPlacement {
+            design_id: specs[design_index].id,
+            copy_index,
+            sheet_index,
+            x_mm: x,
+            y_mm: settings.height_mm - (y_bottom + h),
+            width_mm: w,
+            height_mm: h,
+            rotated: false,
+            shape_transform: Some(transform.as_coeffs()),
+        });
+        copy_index += 1;
+    }
+    let sheet_count = (total + per_sheet - 1) / per_sheet;
+    let artwork_area = total as f64 * w * h;
+    let sheet_area = settings.width_mm * settings.height_mm * sheet_count as f64;
+    Some(Ok(ImpositionPlan {
+        placements,
+        sheet_count,
+        total_copies: total,
+        utilization_percent: if sheet_area > 0.0 { artwork_area / sheet_area * 100.0 } else { 0.0 },
+    }))
+}
+
 /// Plan copies by their actual vector outlines using TraceCut's contour nesting engine.
 /// The returned transform is in page coordinates (mm, Y up), ready to apply to each source shape.
 pub fn plan_shape_aware(
     designs: &[DesignArtwork],
     specs: &[DesignSpec],
     settings: SheetSettings,
+) -> Result<ImpositionPlan, PlanError> {
+    plan_shape_aware_with_ellipse_pattern(designs, specs, settings, EllipsePattern::Auto)
+}
+
+pub fn plan_shape_aware_with_ellipse_pattern(
+    designs: &[DesignArtwork],
+    specs: &[DesignSpec],
+    settings: SheetSettings,
+    ellipse_pattern: EllipsePattern,
 ) -> Result<ImpositionPlan, PlanError> {
     use tracedraw_tracecut::nest::{
         shapes::{nest_shapes, Rotations, ShapeSettings},
@@ -494,6 +649,10 @@ pub fn plan_shape_aware(
             parts.push(paths.clone());
             owners.push((spec.id, copy_index));
         }
+    }
+
+    if let Some(ellipse_plan) = plan_plain_ellipses(designs, specs, settings, ellipse_pattern) {
+        return ellipse_plan;
     }
 
     // Different designs with identical trim dimensions should share one

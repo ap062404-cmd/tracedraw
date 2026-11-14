@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=TraceDraw Imposition
+Comment=Vector illustration editor with object imposition
+Exec=tracedraw-imposition %F
+Icon=tracedraw-imposition
+Terminal=false
+Categories=Graphics;2DGraphics;VectorGraphics;
+StartupWMClass=tracedraw-imposition

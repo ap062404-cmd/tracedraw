@@ -314,6 +314,14 @@ jobs:
           rm -f dist/linuxdeploy.AppImage
           tar -C "target/${{ matrix.target }}/release" -czf "dist/tracedraw-${{ steps.ver.outputs.version }}-linux-$arch.tar.gz" tracedraw tracedraw-cli
 
+      # A separately installable Imposition DEB for x86_64 Linux.
+      # It deliberately does not register MIME handlers or overwrite the
+      # official executable, desktop entry, icon, or user configuration.
+      - name: Package (Imposition DEB)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          bash packaging/linux/build-imposition-deb.sh "${{ steps.ver.outputs.version }}" "target/${{ matrix.target }}/release" dist
+
       - uses: actions/upload-artifact@v4
         with:
           name: tracedraw-${{ matrix.name }}

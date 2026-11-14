@@ -1,0 +1,7 @@
+#!/bin/sh
+# Launch the isolated Imposition build without sharing TraceDraw's settings.
+set -eu
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/tracedraw-imposition"
+mkdir -p "$CONFIG_DIR"
+export TRACEDRAW_CONFIG_DIR="$CONFIG_DIR"
+exec /usr/lib/tracedraw-imposition/tracedraw "$@"

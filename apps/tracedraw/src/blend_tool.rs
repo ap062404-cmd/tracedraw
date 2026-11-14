@@ -197,6 +197,20 @@ impl App {
             .then_some(BlendHandle::Line)
     }
 
+    /// The object of the start or end square under `p` (page space): the
+    /// blend's first object for the start square, its end object for the
+    /// end square. `None` off the squares, and for an end that lives
+    /// only in the effect (it is no object of the page).
+    pub fn blend_end_object_at(&self, p: Point) -> Option<ShapeId> {
+        let handle = self.blend_handle_at(p)?;
+        let (start, e) = self.selected_blends().into_iter().next()?;
+        match (handle, e) {
+            (BlendHandle::Start, _) => Some(start),
+            (BlendHandle::End, Effect::Blend { end_id, .. }) => end_id,
+            _ => None,
+        }
+    }
+
     /// The slider `h` dragged to `p`: the blend's acceleration follows,
     /// the other one too when the accelerations are linked. A drag is one
     /// undo step.

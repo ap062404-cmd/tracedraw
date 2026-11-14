@@ -12,6 +12,7 @@ section of the [[docker.properties]] panel.
   arrowheads, calligraphy, [[docker.behind_fill]], [[docker.scale_with_object]],
   the variable outline's width nodes and [[outline_pen.overprint]]. The
   selected objects show each change live while the dialog box is open.
+  It opens with the width selected: type a number and press <kbd>Enter</kbd>.
   **OK** keeps only what you changed, on every selected object, as one undo
   step; **Cancel** or <kbd>Esc</kbd> puts the outlines back. With nothing
   selected it sets the outline of new objects. The width list offers the same

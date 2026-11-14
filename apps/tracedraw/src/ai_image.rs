@@ -596,6 +596,57 @@ fn http_error(r: &HttpResponse, v: Option<&Value>) -> String {
     crate::ai::http_error(r, v)
 }
 
+/// True when `words` (lower case) hold "limit: 0" as a whole number: a
+/// quota of nothing, not one of 0.5 or 05.
+fn names_a_zero_limit(words: &str) -> bool {
+    const MARK: &str = "limit: 0";
+    words.match_indices(MARK).any(|(at, _)| {
+        !words[at + MARK.len()..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_digit() || c == '.')
+    })
+}
+
+/// Why the image model cannot be used, said plainly with what to do
+/// (#2042), for the two error replies that say so; `None` for any other
+/// reply, which keeps its usual message ([`crate::ai::http_error`]).
+///
+/// - 429 whose message names a limit of 0: the plan of the key gives the
+///   model no quota at all, which is how Google's free keys answer for
+///   the image models. The usual message for 429 ("wait a little and try
+///   again") sent the user round in circles.
+/// - 400 or 404 whose message says the model does not make pictures (it
+///   takes no image output, or does not answer `generateContent`).
+///
+/// The service's own words follow, as in the other messages.
+pub fn image_model_error(model: &str, r: &HttpResponse) -> Option<String> {
+    if (200..300).contains(&r.status) {
+        return None;
+    }
+    let v: Option<Value> = serde_json::from_str(&r.body).ok();
+    let said = crate::ai::service_words(r, v.as_ref());
+    let lower = said.to_ascii_lowercase();
+    let key = match r.status {
+        429 if names_a_zero_limit(&lower) => "aiimg.error_no_quota",
+        400 | 404
+            if lower.contains("modalit")
+                || lower.contains("not supported for generatecontent")
+                || lower.contains("only supports text")
+                || lower.contains("does not support image") =>
+        {
+            "aiimg.error_not_image_model"
+        }
+        _ => return None,
+    };
+    let mut out = trf(key, &[("model", model), ("status", &r.status.to_string())]);
+    if !said.is_empty() {
+        out.push(' ');
+        out.push_str(&trf("ai.error_said", &[("message", &said)]));
+    }
+    Some(out)
+}
+
 /// The image models a service lists.
 pub fn parse_models(provider: ImageProvider, r: &HttpResponse) -> Result<Vec<String>, String> {
     let v: Option<Value> = serde_json::from_str(&r.body).ok();
@@ -609,6 +660,21 @@ pub fn parse_models(provider: ImageProvider, r: &HttpResponse) -> Result<Vec<Str
             .and_then(|m| m.as_array())
             .map(|l| {
                 l.iter()
+                    // Pictures are asked for with `generateContent`: a
+                    // model the service says does not answer it (the
+                    // Imagen models, which take `predict`) only fails
+                    // when picked (#2039).
+                    .filter(|m| {
+                        match m
+                            .get("supportedGenerationMethods")
+                            .and_then(|s| s.as_array())
+                        {
+                            Some(methods) => methods
+                                .iter()
+                                .any(|x| x.as_str() == Some("generateContent")),
+                            None => true,
+                        }
+                    })
                     .filter_map(|m| m.get("name").and_then(|n| n.as_str()))
                     .map(|n| n.trim_start_matches("models/").to_string())
                     .collect()
@@ -649,6 +715,8 @@ pub fn parse_images(provider: ImageProvider, r: &HttpResponse) -> Result<Vec<Vec
     }
     let v = v.ok_or_else(|| tr("ai.unreadable_reply"))?;
     let mut encoded: Vec<&str> = Vec::new();
+    // Pictures the model made while thinking, oldest first.
+    let mut drafts: Vec<&str> = Vec::new();
     let mut said = String::new();
     match provider {
         ImageProvider::Gemini => {
@@ -670,17 +738,33 @@ pub fn parse_images(provider: ImageProvider, r: &HttpResponse) -> Result<Vec<Vec
                     .into_iter()
                     .flatten()
                 {
+                    // What a thinking model made on its way (parts marked
+                    // `thought`: its notes and the drafts of the picture)
+                    // is not the answer: the Gemini Pro image model sends
+                    // them before the final picture, and they were placed
+                    // and traced like it (#2042).
+                    let thought = p.get("thought").and_then(|t| t.as_bool()) == Some(true);
                     let data = p
                         .get("inlineData")
                         .or_else(|| p.get("inline_data"))
                         .and_then(|d| d.get("data"))
                         .and_then(|d| d.as_str());
                     if let Some(d) = data {
-                        encoded.push(d);
+                        if thought {
+                            drafts.push(d);
+                        } else {
+                            encoded.push(d);
+                        }
                     } else if let Some(t) = p.get("text").and_then(|t| t.as_str()) {
-                        said.push_str(t);
+                        if !thought {
+                            said.push_str(t);
+                        }
                     }
                 }
+            }
+            // A reply with drafts only: the last one is the picture.
+            if encoded.is_empty() {
+                encoded.extend(drafts.last());
             }
         }
         ImageProvider::OpenAi => {
@@ -819,8 +903,10 @@ enum Job {
     Models,
 }
 
+/// A request on its way, with its further tries while the service is
+/// busy (`ai_retry.rs`).
 struct Pending {
-    rx: std::sync::mpsc::Receiver<HttpResult>,
+    call: crate::ai_retry::Call,
     job: Job,
 }
 
@@ -855,6 +941,9 @@ pub struct ImageSession {
     pub fake: Option<fn(&HttpRequest) -> HttpResult>,
     /// Tests: the requests sent, newest last.
     pub sent: Vec<HttpRequest>,
+    /// Tests: the wait before a request is sent again, in place of the
+    /// real waits (none: every try at once).
+    pub fake_wait: std::time::Duration,
 }
 
 impl Default for ImageSession {
@@ -882,6 +971,7 @@ impl Default for ImageSession {
             errors: Vec::new(),
             fake: None,
             sent: Vec::new(),
+            fake_wait: std::time::Duration::ZERO,
         }
     }
 }
@@ -889,6 +979,23 @@ impl Default for ImageSession {
 impl ImageSession {
     pub fn busy(&self) -> bool {
         !self.pending.is_empty()
+    }
+
+    /// The note to show while a request waits to be sent again because
+    /// the service was busy (#2037); none while every request is out.
+    pub fn retry_note(&self) -> Option<String> {
+        self.pending
+            .iter()
+            .find_map(|p| p.call.retrying())
+            .map(crate::ai_retry::note)
+    }
+
+    /// Keep `sent` to its newest eight.
+    fn remember_sent(&mut self, http: HttpRequest) {
+        self.sent.push(http);
+        if self.sent.len() > 8 {
+            self.sent.remove(0);
+        }
     }
 }
 
@@ -975,19 +1082,12 @@ impl App {
         }
     }
 
+    /// Send `http` for `job`. A service that is busy for the moment is
+    /// asked again by itself, a few times (`ai_retry.rs`, #2037).
     fn ai_image_send(&mut self, http: HttpRequest, job: Job) {
-        let (tx, rx) = std::sync::mpsc::channel();
-        match self.ai_image.fake {
-            Some(fake) => {
-                let _ = tx.send(fake(&http));
-            }
-            None => crate::net::spawn(http.clone(), MAX_REPLY, tx),
-        }
-        self.ai_image.sent.push(http);
-        if self.ai_image.sent.len() > 8 {
-            self.ai_image.sent.remove(0);
-        }
-        self.ai_image.pending.push(Pending { rx, job });
+        self.ai_image.remember_sent(http.clone());
+        let call = crate::ai_retry::Call::start(http, MAX_REPLY, self.ai_image.fake);
+        self.ai_image.pending.push(Pending { call, job });
     }
 
     fn ai_image_begin(&mut self, total: usize) {
@@ -1293,14 +1393,26 @@ impl App {
     /// Take in answers that arrived. True while some are still on their
     /// way.
     pub fn poll_ai_image(&mut self) -> bool {
+        use crate::ai_retry::Polled;
+        let (fake, fake_wait) = (self.ai_image.fake, self.ai_image.fake_wait);
         let mut i = 0;
         while i < self.ai_image.pending.len() {
-            let got = match self.ai_image.pending[i].rx.try_recv() {
-                Ok(r) => Some(r.map_err(crate::ai::network_error)),
-                Err(std::sync::mpsc::TryRecvError::Empty) => None,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    Some(Err(tr("ai.connection_lost")))
-                }
+            let mut again = Vec::new();
+            let polled = self.ai_image.pending[i]
+                .call
+                .poll(fake, fake_wait, &mut again);
+            for http in again {
+                self.ai_image.remember_sent(http);
+            }
+            let got = match polled {
+                Polled::Pending => None,
+                Polled::Lost => Some(Err(tr("ai.connection_lost"))),
+                Polled::Done(Err(e), _) => Some(Err(crate::ai::network_error(e))),
+                // Still busy after every try: said as such.
+                Polled::Done(Ok(r), tries) => Some(match crate::ai_retry::gave_up(&r, tries) {
+                    Some(e) => Err(e),
+                    None => Ok(r),
+                }),
             };
             match got {
                 Some(result) => {
@@ -1340,8 +1452,14 @@ impl App {
             self.ai_image_finish(done);
             return;
         }
+        // A model that cannot be used says so in words of its own
+        // (#2042); every other reply is read as before.
+        let model = self.ai_image_prefs().map(|p| p.model()).unwrap_or_default();
         let images = result
-            .and_then(|r| parse_images(provider, &r))
+            .and_then(|r| match image_model_error(&model, &r) {
+                Some(e) => Err(e),
+                None => parse_images(provider, &r),
+            })
             .and_then(|files| {
                 let pngs: Vec<GenImage> = files
                     .iter()
@@ -1957,6 +2075,143 @@ mod tests {
         assert_eq!(groups, 1);
     }
 
+    /// Create vectors with Picture + trace (#2042) through the Gemini
+    /// Pro image model: its reply holds the pictures it made while
+    /// thinking (parts marked `thought`) before the final one. Only the
+    /// final picture is taken and traced: one group of curves, no bitmap.
+    #[test]
+    fn the_pictures_a_model_thought_with_are_not_placed() {
+        let mut app = ready_app(ImageProvider::Gemini);
+        app.settings.ai.image_model = "gemini-3-pro-image-preview".into();
+        app.ai_image.fake = Some(|req| {
+            assert!(req
+                .url
+                .ends_with("/v1beta/models/gemini-3-pro-image-preview:generateContent"));
+            let draft = png(32, 32, |x, _| {
+                if x < 16 {
+                    [200, 30, 30, 255]
+                } else {
+                    [255, 255, 255, 255]
+                }
+            });
+            let last = png(64, 64, |x, y| {
+                if (x as i32 - 32).pow(2) + (y as i32 - 32).pow(2) < 400 {
+                    [20, 60, 200, 255]
+                } else {
+                    [255, 255, 255, 255]
+                }
+            });
+            Ok(HttpResponse {
+                retry_after: None,
+                status: 200,
+                body: json!({"candidates": [{"content": {"parts": [
+                    {"text": "Planning the cross.", "thought": true},
+                    {"inlineData": {"mimeType": "image/png", "data": b64(&draft)}, "thought": true},
+                    {"inlineData": {"mimeType": "image/png", "data": b64(&last)}, "thoughtSignature": "abc"},
+                ]}}]})
+                .to_string(),
+            })
+        });
+        app.ai_image.mode = Mode::Vector;
+        app.ai_image.vector_engine = VectorEngine::Trace;
+        app.ai_image.vector_style = Some(0);
+        app.ai_image.prompt = "Minimalist Maltese cross logo".into();
+        app.ai_generate();
+        assert_eq!(app.ai_image.status, ImageStatus::Done(1));
+        assert_eq!(app.ai_image.results.len(), 1);
+        assert_eq!(app.ai_image.results[0].width, 64, "the final picture");
+        assert_eq!(count_bitmaps(&app), 0);
+        let groups = app
+            .doc()
+            .all_layers()
+            .flat_map(|l| l.shapes.iter())
+            .filter(|s| matches!(s.kind, ShapeKind::Group { .. }))
+            .count();
+        assert_eq!(groups, 1);
+    }
+
+    /// When the image model cannot be used (#2042), the panel says why
+    /// and what to do instead of the service's bare error: a key whose
+    /// plan has no quota for the model (free keys and image models), and
+    /// a model that makes no pictures.
+    #[test]
+    fn an_image_model_that_cannot_be_used_is_said_plainly() {
+        let mut app = ready_app(ImageProvider::Gemini);
+        app.settings.ai.image_model = "gemini-3-pro-image-preview".into();
+        app.ai_image.mode = Mode::Vector;
+        app.ai_image.prompt = "Minimalist Maltese cross logo".into();
+        let failed = |app: &mut App| {
+            app.ai_image.sent.clear();
+            app.ai_generate();
+            assert_eq!(app.ai_image.sent.len(), 1, "not sent again");
+            match &app.ai_image.status {
+                ImageStatus::Failed(e) => e.clone(),
+                s => panic!("{s:?}"),
+            }
+        };
+        // A free key: the quota of the model is zero.
+        app.ai_image.fake = Some(|_| {
+            Ok(HttpResponse {
+                retry_after: None,
+                status: 429,
+                body: json!({"error": {"code": 429, "status": "RESOURCE_EXHAUSTED", "message": "You exceeded your current quota, please check your plan and billing details. * Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 0, model: gemini-3-pro-image"}}).to_string(),
+            })
+        });
+        let e = failed(&mut app);
+        assert!(
+            e.starts_with(&trf(
+                "aiimg.error_no_quota",
+                &[("model", "gemini-3-pro-image-preview"), ("status", "429")]
+            )),
+            "{e}"
+        );
+        assert!(e.contains("SVG"), "the way that needs no image model: {e}");
+        assert!(e.contains("limit: 0"), "the service's words follow: {e}");
+        // A quota that is used up, not zero, reads as before.
+        app.ai_image.fake = Some(|_| {
+            Ok(HttpResponse {
+                retry_after: None,
+                status: 429,
+                body:
+                    json!({"error": {"message": "Quota exceeded, limit: 100, please retry in 30s"}})
+                        .to_string(),
+            })
+        });
+        let e = failed(&mut app);
+        assert!(
+            e.starts_with(&trf("ai.error_rate_limited", &[("status", "429")])),
+            "{e}"
+        );
+        // A model that writes text only.
+        app.settings.ai.image_model = "gemini-2.5-flash".into();
+        app.ai_image.fake = Some(|_| {
+            Ok(HttpResponse {
+                retry_after: None,
+                status: 400,
+                body: json!({"error": {"code": 400, "status": "INVALID_ARGUMENT", "message": "The requested combination of response modalities (TEXT, IMAGE) is not supported by the model. models/gemini-2.5-flash accepts the following combination of response modalities: * TEXT"}}).to_string(),
+            })
+        });
+        let e = failed(&mut app);
+        assert!(
+            e.starts_with(&trf(
+                "aiimg.error_not_image_model",
+                &[("model", "gemini-2.5-flash"), ("status", "400")]
+            )),
+            "{e}"
+        );
+        // It answered with words and no picture.
+        app.ai_image.fake = Some(|_| {
+            Ok(HttpResponse {
+                retry_after: None,
+                status: 200,
+                body: json!({"candidates": [{"content": {"parts": [{"text": "Here is a description of a Maltese cross."}]}}]}).to_string(),
+            })
+        });
+        let e = failed(&mut app);
+        assert!(e.contains("Here is a description"), "{e}");
+        assert_eq!(count_bitmaps(&app), 0);
+    }
+
     #[test]
     fn remix_and_remove_background_work_on_the_selected_bitmap() {
         let mut app = ready_app(ImageProvider::Gemini);
@@ -2052,6 +2307,52 @@ mod tests {
             assert_ne!(crate::i18n::tr(key), key);
             assert!(words.contains("Keep its subject"));
         }
+    }
+
+    thread_local! {
+        /// How many more requests the test service answers "busy".
+        static BUSY: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    }
+
+    /// A busy image service (503, #2037) is asked again by itself, and
+    /// the picture comes.
+    #[test]
+    fn a_busy_image_service_is_asked_again() {
+        let mut app = ready_app(ImageProvider::Gemini);
+        BUSY.with(|b| b.set(2));
+        app.ai_image.fake = Some(|_| {
+            let left = BUSY.with(|b| b.get());
+            if left > 0 {
+                BUSY.with(|b| b.set(left - 1));
+                return Ok(HttpResponse {
+                    retry_after: None,
+                    status: 503,
+                    body: json!({"error": {"code": 503, "message": "The model is overloaded.", "status": "UNAVAILABLE"}}).to_string(),
+                });
+            }
+            gemini_reply(&png(8, 8, |_, _| [200, 30, 30, 255]))
+        });
+        app.ai_image.prompt = "a red square".into();
+        app.ai_create(false);
+        assert_eq!(app.ai_image.sent.len(), 3);
+        assert_eq!(app.ai_image.status, ImageStatus::Done(1));
+        assert_eq!(count_bitmaps(&app), 1);
+        // One that stays busy: every try, then the plain message.
+        BUSY.with(|b| b.set(100));
+        app.ai_image.sent.clear();
+        app.ai_create(false);
+        assert_eq!(app.ai_image.sent.len(), 4);
+        match &app.ai_image.status {
+            ImageStatus::Failed(e) => assert!(
+                e.starts_with(&trf(
+                    "ai.error_busy_retried",
+                    &[("status", "503"), ("n", "4")]
+                )) && e.contains("The model is overloaded"),
+                "{e}"
+            ),
+            s => panic!("{s:?}"),
+        }
+        assert!(!app.ai_image.busy());
     }
 
     #[test]

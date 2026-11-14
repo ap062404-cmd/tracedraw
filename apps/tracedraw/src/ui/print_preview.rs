@@ -18,9 +18,16 @@ pub struct PrintPreview {
     pub st: PrintState,
     /// Index of the sheet shown.
     pub sheet: usize,
+    /// With Print separations on, the plate of the sheet shown: 0 the
+    /// inks ticked together, else the plate at that place of [`plates`]
+    /// plus one, as File > Print sends it on a page of its own (#2379).
+    pub plate: usize,
     /// The inks shown while Print separations is on, one per plate of
     /// [`plates`] (all at first, #571).
     pub inks: Vec<bool>,
+    /// One ink ticked alone shows in the colour it prints, as several
+    /// do, instead of its plate in grey (#1652).
+    pub ink_in_color: bool,
     /// Zoom over the fitted size (1 = the sheet fits the window).
     pub zoom: f32,
     /// A drag on the sheet moves the page information, not the artwork.
@@ -31,6 +38,12 @@ pub struct PrintPreview {
     /// (#595), and the one being dragged (x and y sides, -1, 0 or 1).
     pub transform: bool,
     pub handle_drag: Option<(i8, i8)>,
+    /// The place on the sheet chosen with Transform on: Rotation turns
+    /// only its page, the same place on every sheet (#2587); `None` turns
+    /// them all.
+    pub chosen_cell: Option<usize>,
+    /// The pages on the sheet shown, on screen, with their places.
+    shown_cells: Vec<(usize, egui::Rect)>,
     /// The width the options panel needs for its widest row, as last
     /// laid out (0 until a row did not fit, #862).
     options_need: f32,
@@ -43,17 +56,44 @@ impl PrintPreview {
         PrintPreview {
             st,
             sheet: 0,
+            plate: 0,
             inks: Vec::new(),
+            ink_in_color: false,
             zoom: 1.0,
             move_info: false,
             margin_drag: None,
             transform: false,
             handle_drag: None,
+            chosen_cell: None,
+            shown_cells: Vec::new(),
             options_need: 0.0,
             built: None,
             texture: None,
         }
     }
+}
+
+/// The turn Rotation sets: every page's, or the page's in the place
+/// chosen on the sheet (#2587).
+fn rotation_of(st: &mut PrintState, chosen: Option<usize>) -> &mut f64 {
+    match chosen {
+        Some(n) => {
+            if st.cell_rotation.len() <= n {
+                st.cell_rotation.resize(n + 1, 0.0);
+            }
+            &mut st.cell_rotation[n]
+        }
+        None => &mut st.art_rotation,
+    }
+}
+
+/// The place on the sheet under a point (mm, y up): the page's clip
+/// frame there, with its box.
+fn cell_at(cells: &[(usize, tracedraw_core::geometry::Rect)], x: f64, y: f64) -> Option<usize> {
+    cells
+        .iter()
+        .find(|(_, r)| x >= r.x0 && x <= r.x1 && y >= r.y0 && y <= r.y1)
+        .map(|(n, _)| *n)
 }
 
 /// The bleed limit field's tip: its name, without the label's colon, and
@@ -143,12 +183,14 @@ pub fn shown_page(
 
 /// The page shown with the inks ticked: every ink, the sheet as it is; one
 /// ink, its plate in grey (black = full ink); some, the colours those
-/// inks print (#571).
+/// inks print (#571). With `one_in_color` one ink alone shows the colour
+/// it prints too, cyan ink in cyan (#1652).
 pub fn shown_page_inks(
     doc: &Document,
     sheet: usize,
     inks: &[bool],
     separations: bool,
+    one_in_color: bool,
 ) -> Option<tracedraw_core::document::Page> {
     let page = doc.pages.get(sheet)?;
     let all = plates(doc);
@@ -158,7 +200,7 @@ pub fn shown_page_inks(
     if !separations || on.len() == all.len() {
         return Some(page.clone());
     }
-    if let [one] = on.as_slice() {
+    if let ([one], false) = (on.as_slice(), one_in_color) {
         return shown_page(doc, sheet, one + 1, true);
     }
     let mut process = [false; 4];
@@ -171,6 +213,45 @@ pub fn shown_page_inks(
         }
     }
     Some(crate::export::inks_page(page, process, &spots, &doc.inks))
+}
+
+/// What the preview pages through: each sheet, and with Print
+/// separations on each plate of it that prints after it (the inks
+/// ticked), as File > Print sends one page per sheet and plate (#2379).
+/// Each is a sheet's index and a plate as [`PrintPreview::plate`] has it.
+pub fn preview_views(doc: &Document, inks: &[bool], separations: bool) -> Vec<(usize, usize)> {
+    let sheets = doc.pages.len().max(1);
+    let plates = if separations { plates(doc).len() } else { 0 };
+    let mut views = Vec::new();
+    for sheet in 0..sheets {
+        views.push((sheet, 0));
+        for i in 0..plates {
+            if inks.get(i).copied().unwrap_or(true) {
+                views.push((sheet, i + 1));
+            }
+        }
+    }
+    views
+}
+
+/// The page of a view of [`preview_views`]: the inks ticked together for
+/// plate 0, else that plate alone, in grey as it prints or, with
+/// `in_color`, in the colour of its ink.
+pub fn view_page(
+    doc: &Document,
+    (sheet, plate): (usize, usize),
+    inks: &[bool],
+    separations: bool,
+    in_color: bool,
+) -> Option<tracedraw_core::document::Page> {
+    if !separations || plate == 0 {
+        return shown_page_inks(doc, sheet, inks, separations, in_color);
+    }
+    if in_color {
+        let only: Vec<bool> = (0..plates(doc).len()).map(|i| i + 1 == plate).collect();
+        return shown_page_inks(doc, sheet, &only, true, true);
+    }
+    shown_page(doc, sheet, plate, true)
 }
 
 /// The names of the plates, translated for the process inks.
@@ -284,14 +365,32 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                     print = true;
                 }
                 ui.separator();
-                let n = sheets(app, &mut pv).pages.len().max(1);
+                // With separations, each plate of a sheet is a page of
+                // its own after the sheet, as it prints (#2379).
+                let separations = pv.st.separations;
+                let inks = pv.inks.clone();
+                let doc = sheets(app, &mut pv);
+                let n = doc.pages.len().max(1);
+                let names = if separations {
+                    plate_names(doc)
+                } else {
+                    Vec::new()
+                };
+                let views = preview_views(doc, &inks, separations);
                 pv.sheet = pv.sheet.min(n - 1);
+                let at = views
+                    .iter()
+                    .position(|v| *v == (pv.sheet, pv.plate))
+                    .or_else(|| views.iter().position(|v| v.0 == pv.sheet))
+                    .unwrap_or(0);
+                (pv.sheet, pv.plate) = views.get(at).copied().unwrap_or((0, 0));
+                let mut go = None;
                 if ui
-                    .add_enabled(pv.sheet > 0, egui::Button::new("<"))
+                    .add_enabled(at > 0, egui::Button::new("<"))
                     .rich_tip(tr("status.previous_page"))
                     .clicked()
                 {
-                    pv.sheet -= 1;
+                    go = Some(at - 1);
                 }
                 ui.label(trf(
                     "print.sheet_of",
@@ -300,12 +399,20 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                         ("total", &n.to_string()),
                     ],
                 ));
+                if separations {
+                    if let Some(name) = names.get(pv.plate) {
+                        ui.strong(name);
+                    }
+                }
                 if ui
-                    .add_enabled(pv.sheet + 1 < n, egui::Button::new(">"))
+                    .add_enabled(at + 1 < views.len(), egui::Button::new(">"))
                     .rich_tip(tr("status.next_page"))
                     .clicked()
                 {
-                    pv.sheet += 1;
+                    go = Some(at + 1);
+                }
+                if let Some(v) = go.and_then(|i| views.get(i)) {
+                    (pv.sheet, pv.plate) = *v;
                 }
                 ui.separator();
                 ui.label(tr("print.zoom"));
@@ -430,6 +537,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                                 // sheet, fitted (#1577).
                                 st.art_offset = (0.0, 0.0);
                                 st.art_stretch = (1.0, 1.0);
+                                st.art_rotation = 0.0;
                             }
                             if !st.fit_to_page {
                                 ui.add(
@@ -462,6 +570,10 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                                 ui.checkbox(on, name.clone());
                             }
                         });
+                        // One ink alone: its plate in grey, as it
+                        // prints, or the colour the ink gives (#1652).
+                        ui.checkbox(&mut pv.ink_in_color, tr("print.ink_in_color"))
+                            .rich_tip(tr("print.ink_in_color_tip"));
                     });
                 }
                 let st = &mut pv.st;
@@ -521,6 +633,8 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 // or by these percentages (#595).
                 ui.checkbox(&mut pv.transform, tr("print.transform"))
                     .rich_tip(tr("print.transform_tip"));
+                let chosen = pv.chosen_cell.filter(|_| pv.transform);
+                let transform = pv.transform;
                 let st = &mut pv.st;
                 ui.horizontal(|ui| {
                     let mut x = st.art_stretch.0 * 100.0;
@@ -554,6 +668,49 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                         st.art_stretch = (1.0, 1.0);
                     }
                 });
+                // Rotation: the page turned about its middle, by a quick
+                // 90/180/270 or any angle; every page, or only the one
+                // chosen on the sheet with Transform on (#2587).
+                ui.horizontal(|ui| {
+                    ui.label(tr("print.rotation"))
+                        .rich_tip(tr("print.rotation_pick_tip"));
+                    let turn = rotation_of(st, chosen);
+                    ui.add(
+                        crate::ui::field::NumField::new(turn)
+                            .range(-360.0..=360.0)
+                            .speed(0.5)
+                            .suffix(" \u{b0}")
+                            .width(70.0),
+                    );
+                    for q in [90.0, 180.0, 270.0] {
+                        if ui.small_button(format!("{q}\u{b0}")).clicked() {
+                            let turn = rotation_of(st, chosen);
+                            *turn = (*turn + q).rem_euclid(360.0);
+                        }
+                    }
+                    let turned = *rotation_of(st, chosen) != 0.0;
+                    if ui
+                        .add_enabled(turned, egui::Button::new(tr("print.art_reset")).small())
+                        .clicked()
+                    {
+                        *rotation_of(st, chosen) = 0.0;
+                    }
+                    if st.cell_rotation.iter().all(|t| *t == 0.0) {
+                        st.cell_rotation.clear();
+                    }
+                });
+                if transform {
+                    ui.label(
+                        egui::RichText::new(match chosen {
+                            Some(n) => trf("print.rotation_one", &[("n", &(n + 1).to_string())]),
+                            None => tr("print.rotation_all"),
+                        })
+                        .small()
+                        .weak(),
+                    )
+                    .rich_tip(tr("print.rotation_pick_tip"));
+                }
+                let st = &mut pv.st;
                 // Where the artwork sits on its page: a drag on the sheet
                 // moves it too (#536).
                 ui.horizontal(|ui| {
@@ -607,12 +764,23 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             let area = ui.available_rect_before_wrap();
             let separations = pv.st.separations;
             let sheet = pv.sheet;
+            let shown_plate = if separations { pv.plate } else { 0 };
             let inks = pv.inks.clone();
-            let Some(page) = shown_page_inks(sheets(app, &mut pv), sheet, &inks, separations)
-            else {
+            let in_color = pv.ink_in_color;
+            let Some(page) = view_page(
+                sheets(app, &mut pv),
+                (sheet, shown_plate),
+                &inks,
+                separations,
+                in_color,
+            ) else {
                 return;
             };
-            let plate: String = inks.iter().map(|on| if *on { '1' } else { '0' }).collect();
+            let mut plate: String = inks.iter().map(|on| if *on { '1' } else { '0' }).collect();
+            plate.push_str(&format!("p{shown_plate}"));
+            if in_color {
+                plate.push('c');
+            }
             // The edge the chosen printer cannot print on, as the system
             // reports it (#1924); none for a file.
             let hard = (pv.st.destination == 0)
@@ -648,7 +816,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 let avail = ui
                     .available_size()
                     .max(size + egui::vec2(2.0 * margin, 2.0 * margin));
-                let (r, resp) = ui.allocate_exact_size(avail, egui::Sense::drag());
+                let (r, resp) = ui.allocate_exact_size(avail, egui::Sense::click_and_drag());
                 let resp = resp.rich_tip(if info {
                     tr("print.info_drag_tip")
                 } else {
@@ -675,17 +843,39 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 };
                 // The page on the sheet (its clip frame), for Transform's
                 // handles: mm, y up, then on screen.
-                let cell = page.layers.first().and_then(|l| {
-                    l.shapes.iter().find_map(|s| match &s.kind {
-                        tracedraw_core::ShapeKind::ClipFrame { frame, .. } => match &frame.kind {
-                            tracedraw_core::ShapeKind::Rect { rect, .. } => {
-                                Some(s.transform.transform_rect_bbox(*rect))
-                            }
-                            _ => None,
-                        },
-                        _ => None,
+                // Every page on the sheet with its place, so that a click
+                // chooses the one Rotation turns (#2587); the handles go
+                // round the chosen one, or the first.
+                let cells: Vec<(usize, tracedraw_core::geometry::Rect)> = page
+                    .layers
+                    .first()
+                    .map(|l| {
+                        l.shapes
+                            .iter()
+                            .filter_map(|s| match &s.kind {
+                                tracedraw_core::ShapeKind::ClipFrame { frame, .. } => {
+                                    match &frame.kind {
+                                        tracedraw_core::ShapeKind::Rect { rect, .. } => Some((
+                                            crate::imposition::cell_of(s).unwrap_or(0),
+                                            s.transform.transform_rect_bbox(*rect),
+                                        )),
+                                        _ => None,
+                                    }
+                                }
+                                _ => None,
+                            })
+                            .collect()
                     })
-                });
+                    .unwrap_or_default();
+                let several = cells.len() > 1;
+                if !several {
+                    pv.chosen_cell = None;
+                }
+                let cell = pv
+                    .chosen_cell
+                    .and_then(|n| cells.iter().find(|(c, _)| *c == n))
+                    .or(cells.first())
+                    .map(|(_, r)| *r);
                 let to_screen = |x: f64, y: f64| {
                     egui::pos2(
                         sheet_rect.left() + (x * zoom) as f32,
@@ -775,6 +965,16 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                     pv.margin_drag = None;
                     pv.handle_drag = None;
                 }
+                // With Transform on, a click on a page chooses it for
+                // Rotation, again or off the pages turns them all.
+                if pv.transform && several && resp.clicked() {
+                    if let Some(p) = resp.interact_pointer_pos() {
+                        let x = f64::from(p.x - sheet_rect.left()) / zoom;
+                        let y = f64::from(sheet_rect.bottom() - p.y) / zoom;
+                        let hit = cell_at(&cells, x, y);
+                        pv.chosen_cell = if hit == pv.chosen_cell { None } else { hit };
+                    }
+                }
                 let p = ui.painter();
                 p.rect_filled(
                     sheet_rect.translate(egui::vec2(4.0, 4.0)),
@@ -788,6 +988,26 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                         egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                         egui::Color32::WHITE,
                     );
+                }
+                pv.shown_cells = cells
+                    .iter()
+                    .map(|(n, c)| {
+                        let r =
+                            egui::Rect::from_two_pos(to_screen(c.x0, c.y0), to_screen(c.x1, c.y1));
+                        (*n, r)
+                    })
+                    .collect();
+                // The pages a click can choose, outlined faintly.
+                if pv.transform && several {
+                    for (_, r) in &pv.shown_cells {
+                        let r = *r;
+                        p.rect_stroke(
+                            r,
+                            0.0,
+                            egui::Stroke::new(1.0, Tokens::ACCENT.gamma_multiply(0.35)),
+                            egui::StrokeKind::Middle,
+                        );
+                    }
                 }
                 // Transform's frame and handles round the page.
                 if let (true, Some(c)) = (pv.transform, cell) {
@@ -912,11 +1132,22 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             i.key_pressed(egui::Key::Escape),
         )
     });
-    if prev {
-        pv.sheet = pv.sheet.saturating_sub(1);
-    }
-    if next {
-        pv.sheet += 1;
+    if prev || next {
+        let separations = pv.st.separations;
+        let inks = pv.inks.clone();
+        let views = preview_views(sheets(app, &mut pv), &inks, separations);
+        let at = views
+            .iter()
+            .position(|v| *v == (pv.sheet, pv.plate))
+            .unwrap_or(0);
+        let to = if prev {
+            at.saturating_sub(1)
+        } else {
+            (at + 1).min(views.len().saturating_sub(1))
+        };
+        if let Some(v) = views.get(to) {
+            (pv.sheet, pv.plate) = *v;
+        }
     }
     if esc {
         close = true;
@@ -990,6 +1221,72 @@ fn render_sheet(
 mod tests {
     use super::*;
     use tracedraw_core::{Color, Fill, Shape, ShapeKind};
+
+    /// With Print separations on, the preview pages through each plate of
+    /// a sheet after the sheet, as File > Print sends one page per plate:
+    /// Cyan, Magenta, Yellow, Black and each spot ink, each in grey; an
+    /// unticked ink has no page. Before, only the inks ticked together
+    /// were shown, never a page per plate (#2379).
+    #[test]
+    fn separations_preview_a_page_per_plate() {
+        let mut doc = Document::new("t", tracedraw_core::geometry::Size::new(100.0, 100.0));
+        doc.inks.push(tracedraw_core::document::Ink {
+            id: 7,
+            name: "PANTONE 186 C".into(),
+            cmyk: [0.0, 1.0, 0.8, 0.05],
+        });
+        let id = doc.ids_mut().shape();
+        let mut s = Shape::new(
+            id,
+            ShapeKind::Rect {
+                rect: tracedraw_core::geometry::Rect::new(0.0, 0.0, 10.0, 10.0),
+                radius: 0.0,
+                corners: None,
+            },
+        );
+        s.fill = Fill::Solid(Color::Cmyk {
+            c: 1.0,
+            m: 0.5,
+            y: 0.0,
+            k: 0.0,
+        });
+        doc.pages[0].layers[0].shapes.push(s.clone());
+        s.id = doc.ids_mut().shape();
+        s.fill = Fill::Solid(doc.inks[0].color(0.6));
+        doc.pages[0].layers[0].shapes.push(s);
+        let views = preview_views(&doc, &[true; 5], true);
+        assert_eq!(views, vec![(0, 0), (0, 1), (0, 2), (0, 3), (0, 4), (0, 5)]);
+        let grey = |plate, shape: usize| {
+            let p = view_page(&doc, (0, plate), &[true; 5], true, false).expect("page");
+            match p.layers[0].shapes[shape].fill {
+                Fill::Solid(Color::Gray { v }) => v,
+                ref f => panic!("{f:?}"),
+            }
+        };
+        assert!(grey(1, 0).abs() < 1e-6, "cyan plate full");
+        assert!((grey(2, 0) - 0.5).abs() < 1e-6, "magenta plate half");
+        assert!((grey(4, 0) - 1.0).abs() < 1e-6, "black plate empty");
+        assert!((grey(5, 1) - 0.4).abs() < 1e-6, "spot plate at its tint");
+        assert!(
+            (grey(5, 0) - 1.0).abs() < 1e-6,
+            "process ink off the spot plate"
+        );
+        assert!(
+            (grey(1, 1) - 1.0).abs() < 1e-6,
+            "spot ink off the cyan plate"
+        );
+        // An unticked ink has no page; separations off, the sheets alone.
+        let views = preview_views(&doc, &[true, false, true, true, true], true);
+        assert!(!views.contains(&(0, 2)), "{views:?}");
+        assert_eq!(preview_views(&doc, &[true; 5], false), vec![(0, 0)]);
+        // A plate in the colour of its ink, with that option.
+        let p = view_page(&doc, (0, 1), &[true; 5], true, true).expect("page");
+        assert!(
+            matches!(p.layers[0].shapes[0].fill, Fill::Solid(Color::Cmyk { c, m, .. }) if c == 1.0 && m == 0.0),
+            "{:?}",
+            p.layers[0].shapes[0].fill
+        );
+    }
 
     /// #1924: the canvas's Printable Area and Print Preview use the
     /// printer's hard margins as the system reports them, 5 mm only
@@ -1092,7 +1389,10 @@ mod tests {
         // Ticked inks (#571): one alone is its plate in grey; cyan and
         // yellow together keep only those channels; every ink, the sheet.
         let fill = |inks: &[bool]| {
-            shown_page_inks(&doc, 0, inks, true).expect("page").layers[0].shapes[0]
+            shown_page_inks(&doc, 0, inks, true, false)
+                .expect("page")
+                .layers[0]
+                .shapes[0]
                 .fill
                 .clone()
         };
@@ -1126,6 +1426,102 @@ mod tests {
         );
     }
 
+    /// Four squares of pure cyan, magenta, yellow and black, each with a
+    /// black outline, as in the report (#1652). One ink ticked alone
+    /// shows its plate in grey: the cyan square black, which read as
+    /// black ink on the cyan plate. With "Show one ink in its color" the
+    /// one ink shows the colour it prints, as several inks do: the cyan
+    /// square cyan, the others and every outline paper white, and no
+    /// black anywhere unless Black is the ink ticked.
+    #[test]
+    fn one_ink_alone_shows_in_its_colour_when_asked() {
+        use tracedraw_core::{Color, Fill, Shape, ShapeKind};
+        let mut doc = Document::new("t", tracedraw_core::geometry::Size::new(100.0, 100.0));
+        let inks = [
+            (1.0, 0.0, 0.0, 0.0),
+            (0.0, 1.0, 0.0, 0.0),
+            (0.0, 0.0, 1.0, 0.0),
+            (0.0, 0.0, 0.0, 1.0),
+        ];
+        for (i, (c, m, y, k)) in inks.into_iter().enumerate() {
+            let id = doc.ids_mut().shape();
+            let x = 10.0 + 20.0 * i as f64;
+            let mut s = Shape::new(
+                id,
+                ShapeKind::Rect {
+                    rect: tracedraw_core::geometry::Rect::new(x, 10.0, x + 15.0, 25.0),
+                    radius: 0.0,
+                    corners: None,
+                },
+            );
+            s.fill = Fill::Solid(Color::Cmyk { c, m, y, k });
+            s.stroke = Some(tracedraw_core::Stroke {
+                color: Color::Cmyk {
+                    c: 0.0,
+                    m: 0.0,
+                    y: 0.0,
+                    k: 1.0,
+                },
+                ..Default::default()
+            });
+            doc.pages[0].layers[0].shapes.push(s);
+        }
+        // What the squares and their outlines show as, in CMYK.
+        let cmyk = |c: &Color| match c.convert_to("CMYK") {
+            Color::Cmyk { c, m, y, k } => [c, m, y, k],
+            other => panic!("{other:?}"),
+        };
+        let shown = |only: usize, in_color: bool| {
+            let mut ticked = [false; 4];
+            ticked[only] = true;
+            let p = shown_page_inks(&doc, 0, &ticked, true, in_color).expect("page");
+            p.layers[0]
+                .shapes
+                .iter()
+                .map(|s| {
+                    let fill = match &s.fill {
+                        Fill::Solid(c) => cmyk(c),
+                        f => panic!("{f:?}"),
+                    };
+                    (fill, cmyk(&s.stroke.as_ref().expect("outline").color))
+                })
+                .collect::<Vec<_>>()
+        };
+        let paper = [0.0f32; 4];
+        let near = |a: [f32; 4], b: [f32; 4]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 0.02);
+        for only in 0..4 {
+            // As a plate: grey, the ink's own square black.
+            let plate = shown(only, false);
+            for (i, (fill, line)) in plate.iter().enumerate() {
+                let want = if i == only { 1.0 } else { 0.0 };
+                assert!(
+                    near(*fill, [0.0, 0.0, 0.0, want]),
+                    "plate {only}, square {i}: {fill:?}"
+                );
+                let want = if only == 3 { 1.0 } else { 0.0 };
+                assert!(near(*line, [0.0, 0.0, 0.0, want]), "plate {only}: {line:?}");
+            }
+            // In its colour: the ink alone, nothing of the others.
+            let color = shown(only, true);
+            let mut ink = paper;
+            ink[only] = 1.0;
+            for (i, (fill, line)) in color.iter().enumerate() {
+                let want = if i == only { ink } else { paper };
+                assert!(near(*fill, want), "ink {only}, square {i}: {fill:?}");
+                let want = if only == 3 { ink } else { paper };
+                assert!(near(*line, want), "ink {only}: {line:?}");
+            }
+        }
+        // Several inks and every ink show the same either way.
+        for ticked in [[true, false, false, true], [true; 4]] {
+            let a = shown_page_inks(&doc, 0, &ticked, true, false).expect("page");
+            let b = shown_page_inks(&doc, 0, &ticked, true, true).expect("page");
+            for (x, y) in a.layers[0].shapes.iter().zip(b.layers[0].shapes.iter()) {
+                assert_eq!(x.fill, y.fill);
+            }
+        }
+    }
+
     /// Pictures split by ink in the preview too (#1659): one ink shows
     /// its plate in grey, some inks the colours they print, every ink
     /// the picture as it is.
@@ -1150,7 +1546,7 @@ mod tests {
         s.stroke = None;
         doc.pages[0].layers[0].shapes.push(s);
         let pixels = |inks: &[bool]| -> Vec<[u8; 4]> {
-            let p = shown_page_inks(&doc, 0, inks, true).expect("page");
+            let p = shown_page_inks(&doc, 0, inks, true, false).expect("page");
             let ShapeKind::Bitmap { png, .. } = &p.layers[0].shapes[0].kind else {
                 panic!("a picture");
             };
@@ -1167,7 +1563,7 @@ mod tests {
         let [r, g, b, _] = some[0];
         assert!(r > 200 && g > 200 && b < 80, "{some:?}");
         // Every ink: the picture as it is.
-        let all = shown_page_inks(&doc, 0, &[true; 4], true).expect("page");
+        let all = shown_page_inks(&doc, 0, &[true; 4], true, false).expect("page");
         assert!(matches!(
             &all.layers[0].shapes[0].kind,
             ShapeKind::Bitmap { png: p, .. } if tracedraw_core::SharedBytes::ptr_eq(p, &png)
@@ -1957,5 +2353,77 @@ mod tests {
         assert_eq!(count(&mut app), 1, "the current page, whatever the parity");
         let st = &app.print_preview.as_ref().expect("preview").st;
         assert!(!st.all_pages, "the current page alone");
+    }
+
+    /// With Transform on and several pages on the sheet, a click on a
+    /// page chooses it and Rotation turns only that place, on every
+    /// sheet; a second click turns them all again (#2587).
+    #[test]
+    fn a_click_chooses_the_page_rotation_turns() {
+        let ctx = crate::theme::ui_context();
+        let mut app = App::headless();
+        app.show_welcome = false;
+        app.print_preview(None);
+        if let Some(pv) = app.print_preview.as_mut() {
+            pv.st.looking_for_printers = false;
+            pv.st.layout_kind = 3;
+            pv.st.cols = 2;
+            pv.st.rows = 2;
+            pv.transform = true;
+        }
+        let run = |app: &mut App, events: Vec<egui::Event>| {
+            let mut out = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1400.0, 900.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(app, ui),
+            );
+            out.textures_delta.clear();
+        };
+        let click = |app: &mut App, at: egui::Pos2| {
+            run(app, vec![egui::Event::PointerMoved(at)]);
+            for pressed in [true, false] {
+                run(
+                    app,
+                    vec![egui::Event::PointerButton {
+                        pos: at,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    }],
+                );
+            }
+            run(app, Vec::new());
+        };
+        for _ in 0..3 {
+            run(&mut app, Vec::new());
+        }
+        let cells = app.print_preview.as_ref().unwrap().shown_cells.clone();
+        assert_eq!(cells.len(), 4, "{cells:?}");
+        let (second, r) = cells[1];
+        assert_eq!(second, 1);
+        click(&mut app, r.center() + egui::vec2(0.0, r.height() / 4.0));
+        let pv = app.print_preview.as_mut().unwrap();
+        assert_eq!(pv.chosen_cell, Some(1));
+        // What the 180 degree button does with the page chosen.
+        *rotation_of(&mut pv.st, pv.chosen_cell) += 180.0;
+        assert_eq!(pv.st.cell_rotation, vec![0.0, 180.0]);
+        assert_eq!(pv.st.art_rotation, 0.0);
+        click(&mut app, r.center() + egui::vec2(0.0, r.height() / 4.0));
+        let pv = app.print_preview.as_mut().unwrap();
+        assert_eq!(pv.chosen_cell, None);
+        assert_eq!(
+            cell_at(
+                &[(3, tracedraw_core::geometry::Rect::new(0.0, 0.0, 10.0, 10.0))],
+                5.0,
+                5.0
+            ),
+            Some(3)
+        );
     }
 }

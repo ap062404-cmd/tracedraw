@@ -111,6 +111,9 @@ pub struct ShownFrame {
     pub editing: bool,
     /// The text does not fit (drawn red, with a tab below).
     pub overflow: bool,
+    /// The frame holds no text, none flows into it and it is not being
+    /// edited: the screen shows a hint in it (#2524).
+    pub empty_hint: bool,
 }
 
 /// The factors of an axis-aligned scale by positive amounts (with any
@@ -165,7 +168,77 @@ fn resized_kind(s: &Shape, t: Affine) -> Option<ShapeKind> {
     })
 }
 
+/// The table kind of `s` (a table whose transform is an axis-aligned
+/// scale) resized to the image of its page-space box under `t`: the rows
+/// and columns grow or shrink in proportion, and the cells' text keeps its
+/// size, spacing and margins, as paragraph text does (#2433).
+fn resized_table(s: &Shape, t: Affine) -> Option<ShapeKind> {
+    axis_scale(s.transform)?;
+    let ShapeKind::Table(table) = &s.kind else {
+        return None;
+    };
+    let w: f64 = table.col_widths.iter().sum();
+    let h: f64 = table.row_heights.iter().sum();
+    if !(w > 1e-9 && h > 1e-9) {
+        return None;
+    }
+    // The grid, local space: from the left edge, down from the top edge.
+    let grid = Rect::new(
+        table.rect.x0,
+        table.rect.y1 - h,
+        table.rect.x0 + w,
+        table.rect.y1,
+    );
+    let to_new = t * s.transform;
+    let page = Rect::from_points(
+        to_new * Point::new(grid.x0, grid.y0),
+        to_new * Point::new(grid.x1, grid.y1),
+    );
+    let back = s.transform.inverse();
+    let new = Rect::from_points(
+        back * Point::new(page.x0, page.y0),
+        back * Point::new(page.x1, page.y1),
+    );
+    let (kx, ky) = (new.width() / w, new.height() / h);
+    if !(kx.is_finite() && ky.is_finite() && kx > 0.0 && ky > 0.0) {
+        return None;
+    }
+    let mut table = table.clone();
+    for c in &mut table.col_widths {
+        *c = (*c * kx).max(0.1);
+    }
+    for r in &mut table.row_heights {
+        *r = (*r * ky).max(0.1);
+    }
+    let w: f64 = table.col_widths.iter().sum();
+    let h: f64 = table.row_heights.iter().sum();
+    table.rect = Rect::new(new.x0, new.y1 - h, new.x0 + w, new.y1);
+    Some(ShapeKind::Table(table))
+}
+
+/// The kind `t` gives `s` in place of a scale: a paragraph text's new
+/// frame or a table's new rows and columns.
+fn resized_any(s: &Shape, t: Affine) -> Option<ShapeKind> {
+    resized_kind(s, t).or_else(|| resized_table(s, t))
+}
+
 impl App {
+    /// `t` (page space) resizes table `id` instead of scaling it (see
+    /// [`resized_table`]): `t` an axis-aligned scale by positive amounts
+    /// that is not just a move.
+    pub fn resizes_table(&self, id: ShapeId, t: Affine) -> bool {
+        let Some((sx, sy)) = axis_scale(t) else {
+            return false;
+        };
+        if (sx - 1.0).abs() < 1e-9 && (sy - 1.0).abs() < 1e-9 {
+            return false;
+        }
+        self.doc()
+            .shape(id)
+            .ok()
+            .is_some_and(|(_, s)| resized_table(s, t).is_some())
+    }
+
     /// `t` (page space) resizes the frame of `id` instead of scaling it: a
     /// paragraph text lying on a layer, neither turned nor slanted, and `t`
     /// an axis-aligned scale by positive amounts that is not just a move.
@@ -190,7 +263,7 @@ impl App {
         let frames: Vec<ShapeId> = shapes
             .iter()
             .copied()
-            .filter(|id| self.resizes_text_frame(*id, t))
+            .filter(|id| self.resizes_text_frame(*id, t) || self.resizes_table(*id, t))
             .collect();
         if frames.is_empty() {
             return false;
@@ -211,7 +284,7 @@ impl App {
             let Ok((_, s)) = self.doc().shape(*id) else {
                 continue;
             };
-            if let Some(kind) = resized_kind(s, t) {
+            if let Some(kind) = resized_any(s, t) {
                 cmds.push(Command::SetShapeKind { shape: *id, kind });
             }
             // A frame's symmetry goes with it, as an object's does in a
@@ -431,10 +504,14 @@ impl App {
             } else if let Some(t) = preview.filter(|_| selected) {
                 c = c.map(|p| t * p);
             }
+            let receives = self.prev_frame(s.id).is_some();
+            let empty = matches!(&s.kind, ShapeKind::Text { spans, .. }
+                if spans.iter().all(|sp| sp.text.is_empty()));
             out.push(ShownFrame {
                 id: s.id,
                 linked: self.next_frame(s.id).is_some(),
-                receives: self.prev_frame(s.id).is_some(),
+                receives,
+                empty_hint: empty && !receives && editing != Some(s.id),
                 corners: c,
                 chosen,
                 editing: editing == Some(s.id),
@@ -462,6 +539,43 @@ mod tests {
         id
     }
 
+    /// An empty paragraph text frame shows a hint on screen, until it
+    /// holds text or is being edited; a frame with text shows none
+    /// (#2524).
+    #[test]
+    fn an_empty_frame_shows_a_hint_until_it_has_text() {
+        let mut app = App::headless();
+        let shape = app
+            .new_shape(ShapeKind::Rect {
+                rect: kurbo::Rect::new(10.0, 10.0, 90.0, 50.0),
+                radius: 0.0,
+                corners: None,
+            })
+            .expect("shape");
+        app.select(vec![shape]);
+        app.object_to_text_frame();
+        let empty = app.selection[0];
+        let hint = |app: &App, id: ShapeId| {
+            app.shown_text_frames(None)
+                .into_iter()
+                .find(|f| f.id == id)
+                .expect("frame shown")
+                .empty_hint
+        };
+        assert!(hint(&app, empty), "an empty frame");
+        // Not picked either: Show Text Frames is on at first.
+        app.select(Vec::new());
+        assert!(hint(&app, empty), "an empty frame not selected");
+        let full = paragraph(&mut app);
+        assert!(!hint(&app, full), "a frame with text");
+        assert!(hint(&app, empty));
+        // The hint has words in every language.
+        assert_ne!(
+            crate::i18n::tr("canvas.empty_text_frame_hint"),
+            "canvas.empty_text_frame_hint"
+        );
+    }
+
     fn frame_of(app: &App, id: ShapeId) -> (Point, Size) {
         match app.doc().shape(id).map(|(_, s)| s.kind.clone()) {
             Ok(ShapeKind::Text {
@@ -471,6 +585,44 @@ mod tests {
             }) => (origin, f),
             other => panic!("not paragraph text: {other:?}"),
         }
+    }
+
+    /// A table scaled with the Pick tool (handles, or the property bar's
+    /// size) gets wider and taller rows and columns; its transform stays
+    /// as it was, so the cells' text keeps its size, spacing and margins
+    /// (#2433).
+    #[test]
+    fn scaling_a_table_resizes_its_cells_and_keeps_the_text() {
+        let mut app = App::headless();
+        let mut t = tracedraw_core::Table::new(Rect::new(10.0, 10.0, 130.0, 40.0), 3, 4, None);
+        t.col_widths = vec![20.0, 40.0, 30.0, 30.0];
+        t.cells[0].text = vec![TextSpan::new("Cell", "Arial", 10.0)];
+        let id = app.new_shape(ShapeKind::Table(t.clone())).expect("table");
+        app.select(vec![id]);
+        // Twice as wide and half as tall again, from the lower left.
+        let t2 = Affine::translate((10.0, 10.0))
+            * Affine::scale_non_uniform(2.0, 1.5)
+            * Affine::translate((-10.0, -10.0));
+        app.transform_selection(t2);
+        let s = app.doc().shape(id).expect("shape").1.clone();
+        assert_eq!(s.transform, Affine::IDENTITY);
+        let ShapeKind::Table(n) = &s.kind else {
+            panic!("table");
+        };
+        assert_eq!(n.col_widths, vec![40.0, 80.0, 60.0, 60.0]);
+        assert_eq!(n.row_heights, vec![15.0, 15.0, 15.0]);
+        assert_eq!(n.rect, Rect::new(10.0, 10.0, 250.0, 55.0));
+        assert_eq!(n.cells[0].text[0].size_pt, 10.0);
+        assert_eq!(n.cell_margins(), t.cell_margins());
+        // One undo step back to the table as it was.
+        app.undo();
+        let s = app.doc().shape(id).expect("shape").1.clone();
+        assert_eq!(s.kind, ShapeKind::Table(t));
+        // A turn still turns the whole table.
+        let turn = Affine::rotate(0.5);
+        app.transform_selection(turn);
+        let s = app.doc().shape(id).expect("shape").1.clone();
+        assert_eq!(s.transform, turn);
     }
 
     #[test]

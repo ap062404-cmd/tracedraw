@@ -28,6 +28,7 @@ use crate::document::{Shape, ShapeKind};
 use crate::geometry::{Affine, BezPath, PathEl, Point, Vec2};
 use crate::style::{lerp_color, Fill};
 use crate::Color;
+use kurbo::{ParamCurve, ParamCurveDeriv, ParamCurveNearest, PathSeg};
 use serde::{Deserialize, Serialize};
 
 /// How the body runs.
@@ -114,44 +115,224 @@ fn finite(p: Point) -> bool {
     p.x.is_finite() && p.y.is_finite()
 }
 
-/// The flattened subpaths of `path` and whether each closes.
-fn polylines(path: &BezPath) -> Vec<(Vec<Point>, bool)> {
-    let mut out: Vec<(Vec<Point>, bool)> = Vec::new();
-    let mut cur: Vec<Point> = Vec::new();
-    let flush = |cur: &mut Vec<Point>, closed: bool, out: &mut Vec<(Vec<Point>, bool)>| {
-        let mut pts = std::mem::take(cur);
-        // Points that repeat (a curve ending where it started) would make
-        // edges with no direction.
-        pts.dedup_by(|b, a| (*b - *a).hypot() < 1e-6);
-        // An outline that ends where it started is closed (an ellipse has
-        // no closing element).
-        let ends_at_start = pts.len() > 2 && (pts[0] - pts[pts.len() - 1]).hypot() < 1e-6;
-        let closed = closed || ends_at_start;
-        if ends_at_start {
-            pts.pop();
+/// Where the points of a flattened subpath lie on the outline it was
+/// flattened from, so a side can follow the outline's own curves.
+struct Source {
+    /// The subpath's segments, its closing line included.
+    segs: Vec<PathSeg>,
+    /// For each point its place along `segs`: a whole number `k` at the
+    /// end of segment `k - 1` (0 at the start), or `-(k + 1 + f)` inside
+    /// segment `k`, `f` (under 1) the point's share of the segment's
+    /// flattened points.
+    knots: Vec<f64>,
+}
+
+impl Source {
+    /// How far along `segs` point `i`, at `p`, lies: the segment's index
+    /// plus the parameter on it.
+    fn at(&self, i: usize, p: Point) -> Option<f64> {
+        let k = *self.knots.get(i)?;
+        if k >= 0.0 {
+            return Some(k);
         }
-        if pts.len() >= 2 {
-            if pts.len() > MAX_POINTS {
-                let step = pts.len() as f64 / MAX_POINTS as f64;
-                pts = (0..MAX_POINTS)
-                    .map(|i| pts[((i as f64 * step) as usize).min(pts.len() - 1)])
-                    .collect();
+        let seg = (-k - 1.0) as usize;
+        let guess = -k - 1.0 - seg as f64;
+        let curve = self.segs.get(seg)?;
+        // The flattened points lie on the curve or a hair off it: a few
+        // steps from the guess find the parameter.
+        let c = curve.to_cubic();
+        let (d1, d2) = (c.deriv(), c.deriv().deriv());
+        let mut t = guess;
+        for _ in 0..4 {
+            let (r, v, a) = (c.eval(t) - p, d1.eval(t).to_vec2(), d2.eval(t).to_vec2());
+            let den = v.dot(v) + r.dot(a);
+            if den.abs() < 1e-12 {
+                break;
             }
-            out.push((pts, closed));
+            t = (t - r.dot(v) / den).clamp(0.0, 1.0);
         }
+        if !t.is_finite() || (c.eval(t) - p).hypot() > 0.06 {
+            t = curve.nearest(p, 1e-6).t;
+        }
+        Some(seg as f64 + t.clamp(0.0, 1.0))
+    }
+
+    /// The outline from `a` to `b` (as [`Source::at`] gives them), going
+    /// round through the start when `wrap` and `b` is not past `a`.
+    fn piece(&self, a: f64, b: f64, wrap: bool) -> Vec<PathSeg> {
+        let n = self.segs.len() as f64;
+        let spans: Vec<(f64, f64)> = if b > a {
+            vec![(a, b)]
+        } else if wrap {
+            vec![(a, n), (0.0, b)]
+        } else {
+            Vec::new()
+        };
+        let mut out = Vec::new();
+        for (from, to) in spans {
+            for (k, seg) in self.segs.iter().enumerate() {
+                let t0 = (from - k as f64).max(0.0);
+                let t1 = (to - k as f64).min(1.0);
+                if t1 - t0 > 1e-9 {
+                    out.push(if t0 <= 0.0 && t1 >= 1.0 {
+                        *seg
+                    } else {
+                        seg.subsegment(t0..t1)
+                    });
+                }
+            }
+        }
+        out
+    }
+}
+
+/// `segs` end to end, each moved by `t`, appended to `path` after its
+/// current point; backwards when `reverse`.
+fn push_segs(path: &mut BezPath, segs: &[PathSeg], t: Affine, reverse: bool) {
+    let mut add = |seg: &PathSeg| match t * *seg {
+        PathSeg::Line(l) if reverse => path.line_to(l.p0),
+        PathSeg::Line(l) => path.line_to(l.p1),
+        PathSeg::Quad(q) if reverse => path.quad_to(q.p1, q.p0),
+        PathSeg::Quad(q) => path.quad_to(q.p1, q.p2),
+        PathSeg::Cubic(c) if reverse => path.curve_to(c.p2, c.p1, c.p0),
+        PathSeg::Cubic(c) => path.curve_to(c.p1, c.p2, c.p3),
     };
-    crate::geometry::flatten(path, 0.05, &mut |el| match el {
-        PathEl::MoveTo(p) => {
-            flush(&mut cur, false, &mut out);
-            cur.push(p);
+    if reverse {
+        segs.iter().rev().for_each(&mut add);
+    } else {
+        segs.iter().for_each(&mut add);
+    }
+}
+
+/// The whole subpath of `source` moved by `t` as a subpath of `path`,
+/// closed when `closed`; `reversed` runs it backwards from where its
+/// last segment starts, as the reversed points of its polyline run.
+fn push_sub(path: &mut BezPath, source: &Source, t: Affine, closed: bool, reversed: bool) {
+    let Some((last, rest)) = source.segs.split_last() else {
+        return;
+    };
+    // The line back to the start is what closing the subpath draws.
+    let closing = closed && matches!(last, PathSeg::Line(_));
+    if reversed {
+        path.move_to(t * last.start());
+        push_segs(path, rest, t, true);
+        if !closing {
+            push_segs(path, std::slice::from_ref(last), t, true);
         }
-        PathEl::LineTo(p) => cur.push(p),
-        PathEl::ClosePath => flush(&mut cur, true, &mut out),
-        _ => {}
-    });
-    flush(&mut cur, false, &mut out);
-    out.retain(|(pts, _)| pts.iter().all(|p| finite(*p)));
-    out
+    } else {
+        path.move_to(t * source.segs[0].start());
+        push_segs(path, if closing { rest } else { &source.segs }, t, false);
+    }
+    if closed {
+        path.close_path();
+    }
+}
+
+/// The flattened subpaths of `path` and whether each closes.
+#[cfg(test)]
+fn polylines(path: &BezPath) -> Vec<(Vec<Point>, bool)> {
+    polylines_from(path).0
+}
+
+/// The flattened subpaths of `path`, whether each closes and where its
+/// points lie on `path`.
+fn polylines_from(path: &BezPath) -> (Vec<(Vec<Point>, bool)>, Vec<Source>) {
+    let mut out: Vec<(Vec<Point>, bool)> = Vec::new();
+    let mut sources: Vec<Source> = Vec::new();
+    let mut cur: Vec<Point> = Vec::new();
+    let mut knots: Vec<f64> = Vec::new();
+    let mut segs: Vec<PathSeg> = Vec::new();
+    let mut flush =
+        |cur: &mut Vec<Point>, knots: &mut Vec<f64>, segs: &mut Vec<PathSeg>, closed: bool| {
+            let all = std::mem::take(cur);
+            let all_knots = std::mem::take(knots);
+            let mut segs = std::mem::take(segs);
+            // Points that repeat (a curve ending where it started) would make
+            // edges with no direction.
+            let mut pts: Vec<Point> = Vec::with_capacity(all.len());
+            let mut at: Vec<f64> = Vec::with_capacity(all.len());
+            for (p, k) in all.into_iter().zip(all_knots) {
+                if pts.last().is_some_and(|a| (p - *a).hypot() < 1e-6) {
+                    continue;
+                }
+                pts.push(p);
+                at.push(k);
+            }
+            // An outline that ends where it started is closed (an ellipse has
+            // no closing element).
+            let ends_at_start = pts.len() > 2 && (pts[0] - pts[pts.len() - 1]).hypot() < 1e-6;
+            let closed = closed || ends_at_start;
+            if ends_at_start {
+                pts.pop();
+                at.pop();
+            } else if closed {
+                if let (Some(a), Some(b)) = (pts.last(), pts.first()) {
+                    segs.push(PathSeg::Line(kurbo::Line::new(*a, *b)));
+                }
+            }
+            if pts.len() >= 2 {
+                if pts.len() > MAX_POINTS {
+                    let step = pts.len() as f64 / MAX_POINTS as f64;
+                    let pick = |i: usize| ((i as f64 * step) as usize).min(pts.len() - 1);
+                    at = (0..MAX_POINTS).map(|i| at[pick(i)]).collect();
+                    pts = (0..MAX_POINTS).map(|i| pts[pick(i)]).collect();
+                }
+                if pts.iter().all(|p| finite(*p)) {
+                    out.push((pts, closed));
+                    sources.push(Source { segs, knots: at });
+                }
+            }
+        };
+    for el in path.elements() {
+        let last = cur.last().copied();
+        match (*el, last) {
+            (PathEl::MoveTo(p), _) => {
+                flush(&mut cur, &mut knots, &mut segs, false);
+                cur.push(p);
+                knots.push(0.0);
+            }
+            (PathEl::ClosePath, _) => flush(&mut cur, &mut knots, &mut segs, true),
+            (PathEl::LineTo(p), None)
+            | (PathEl::QuadTo(_, p), None)
+            | (PathEl::CurveTo(_, _, p), None) => {
+                cur.push(p);
+                knots.push(0.0);
+            }
+            (PathEl::LineTo(p), Some(a)) => {
+                segs.push(PathSeg::Line(kurbo::Line::new(a, p)));
+                cur.push(p);
+                knots.push(segs.len() as f64);
+            }
+            (el, Some(a)) => {
+                let seg = match el {
+                    PathEl::QuadTo(p1, p2) => PathSeg::Quad(kurbo::QuadBez::new(a, p1, p2)),
+                    PathEl::CurveTo(p1, p2, p3) => {
+                        PathSeg::Cubic(kurbo::CubicBez::new(a, p1, p2, p3))
+                    }
+                    _ => continue,
+                };
+                let from = knots.len();
+                kurbo::flatten([PathEl::MoveTo(a), el], 0.05, |e| {
+                    if let PathEl::LineTo(p) = e {
+                        cur.push(p);
+                        knots.push(0.0);
+                    }
+                });
+                // Each point's share of the way, the last one the end.
+                let inside = segs.len() as f64 + 1.0;
+                let count = (knots.len() - from) as f64;
+                for (j, k) in knots[from..].iter_mut().enumerate() {
+                    *k = -(inside + (j + 1) as f64 / count);
+                }
+                segs.push(seg);
+                if let Some(k) = knots.last_mut() {
+                    *k = segs.len() as f64;
+                }
+            }
+        }
+    }
+    flush(&mut cur, &mut knots, &mut segs, false);
+    (out, sources)
 }
 
 /// Twice the signed area (counterclockwise positive).
@@ -189,6 +370,20 @@ fn scale(c: Color, k: f64) -> Color {
     )
 }
 
+/// A cap drawn in page space (its transform the identity) that looks like
+/// the object: a mesh fill's nodes and a mesh outline's are local to the
+/// object, so they go to the page through `t`, the object's transform and
+/// the move to the cap. Left local, the mesh stayed where the object was
+/// first drawn when it was moved, scaled or reshaped (#2337).
+pub(crate) fn place_paint(cap: &mut Shape, t: Affine) {
+    if let Fill::Mesh(m) = &mut cap.fill {
+        *m = m.transformed(t);
+    }
+    if let Some(Fill::Mesh(m)) = cap.stroke.as_mut().and_then(|s| s.fill.as_deref_mut()) {
+        *m = m.transformed(t);
+    }
+}
+
 impl Body {
     /// Where the copy of `p` goes.
     pub fn copy_of(&self, p: Point) -> Point {
@@ -197,6 +392,21 @@ impl Body {
             ExtrudeKind::BackParallel | ExtrudeKind::FrontParallel => p + self.vector,
             ExtrudeKind::SmallBack | ExtrudeKind::SmallFront => p + (self.vanishing - p) * d,
             ExtrudeKind::BigBack | ExtrudeKind::BigFront => p + (p - self.vanishing) * d,
+        }
+    }
+
+    /// [`Body::copy_of`] as a transform: the copy is the outline moved, or
+    /// scaled about the vanishing point.
+    fn copy_transform(&self) -> Affine {
+        let d = self.depth.clamp(0.0, 0.99);
+        let about =
+            |k: f64| Affine::translate(self.vanishing.to_vec2() * (1.0 - k)) * Affine::scale(k);
+        match self.kind {
+            ExtrudeKind::BackParallel | ExtrudeKind::FrontParallel => {
+                Affine::translate(self.vector)
+            }
+            ExtrudeKind::SmallBack | ExtrudeKind::SmallFront => about(1.0 - d),
+            ExtrudeKind::BigBack | ExtrudeKind::BigFront => about(1.0 + d),
         }
     }
 
@@ -354,12 +564,14 @@ impl Body {
         {
             return out;
         }
-        let subs = polylines(&shape.page_path());
+        let (subs, sources) = polylines_from(&shape.page_path());
         if subs.is_empty() {
             return out;
         }
         if !self.solid.is_plain() || (self.bevel.is_finite() && self.bevel > 0.0) {
-            // Each subpath with the outside on the right of travel.
+            // Each subpath with the outside on the right of travel, and
+            // the same with the outline's curves.
+            let mut curves = BezPath::new();
             let oriented: Vec<(Vec<Point>, bool, bool)> = subs
                 .iter()
                 .enumerate()
@@ -375,13 +587,15 @@ impl Body {
                             % 2
                             == 1;
                     let mut pts = pts.clone();
-                    if *c && (area2(&pts) >= 0.0) == hole {
+                    let reversed = *c && (area2(&pts) >= 0.0) == hole;
+                    if reversed {
                         pts.reverse();
                     }
+                    push_sub(&mut curves, &sources[i], Affine::IDENTITY, *c, reversed);
                     (pts, *c, hole)
                 })
                 .collect();
-            return crate::extrude3d::faces(self, shape, &oriented);
+            return crate::extrude3d::faces(self, shape, &oriented, &curves);
         }
         let base = shape.fill.preview_color().unwrap_or(Color::WHITE);
         let (from, to) = match self.coloring {
@@ -401,6 +615,7 @@ impl Body {
         };
         let light = Vec2::new(la.cos(), la.sin());
         let sign = if self.kind.front() { -1.0 } else { 1.0 };
+        let to_copy = self.copy_transform();
         let template = || {
             let mut s = shape.clone();
             s.effects.clear();
@@ -443,7 +658,9 @@ impl Body {
         let passes: &[f64] = if wire { &[-1.0, 1.0] } else { &[1.0] };
         for &pass in passes {
             let sign = sign * pass;
-            for ((pts, is_closed), hole) in subs.iter().zip(holes.iter().copied()) {
+            for (((pts, is_closed), hole), source) in
+                subs.iter().zip(holes.iter().copied()).zip(&sources)
+            {
                 let closed = *is_closed;
                 // An open subpath already shows both its sides.
                 if pass < 0.0 && !closed {
@@ -520,8 +737,37 @@ impl Body {
                         }
                         v
                     };
+                    // The side follows the outline's own curves between its
+                    // ends, and the copy's (the copy is the outline moved or
+                    // scaled), so it has the outline's nodes there and not a
+                    // node for each flattened edge (#2208).
+                    let curved = (|| {
+                        let (&first, &last) = (run.first()?, run.last()?);
+                        let end = (last + 1) % n;
+                        if all_round {
+                            return Some(source.segs.clone());
+                        }
+                        let a = source.at(first, pts[first])?;
+                        let b = source.at(end, pts[end])?;
+                        let piece = source.piece(a, b, closed);
+                        (!piece.is_empty()).then_some(piece)
+                    })();
                     let mut outline = BezPath::new();
-                    if all_round {
+                    if let Some(piece) = curved.filter(|_| !front.is_empty()) {
+                        let start = piece.first().map(|s| s.start()).unwrap_or(front[0]);
+                        if all_round {
+                            for t in [Affine::IDENTITY, to_copy] {
+                                push_sub(&mut outline, source, t, true, false);
+                            }
+                        } else {
+                            let end = piece.last().map(|s| s.end()).unwrap_or(start);
+                            outline.move_to(start);
+                            push_segs(&mut outline, &piece, Affine::IDENTITY, false);
+                            outline.line_to(to_copy * end);
+                            push_segs(&mut outline, &piece, to_copy, true);
+                            outline.close_path();
+                        }
+                    } else if all_round {
                         for loop_pts in [
                             front.clone(),
                             front.iter().map(|p| self.copy_of(*p)).collect::<Vec<_>>(),
@@ -580,19 +826,10 @@ impl Body {
         surfaces.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         let faces: Vec<Shape> = surfaces.into_iter().map(|(_, s)| s).collect();
         // The copy: the far face, or the near face looking like the object.
+        // The copy is the outline moved or scaled: its curves and nodes.
         let mut copy_path = BezPath::new();
-        for (pts, is_closed) in &subs {
-            for (i, p) in pts.iter().enumerate() {
-                let q = self.copy_of(*p);
-                if i == 0 {
-                    copy_path.move_to(q);
-                } else {
-                    copy_path.line_to(q);
-                }
-            }
-            if *is_closed {
-                copy_path.close_path();
-            }
+        for ((_, is_closed), source) in subs.iter().zip(&sources) {
+            push_sub(&mut copy_path, source, to_copy, *is_closed, false);
         }
         let any_closed = subs.iter().any(|(_, c)| *c);
         if self.kind.front() {
@@ -600,6 +837,7 @@ impl Body {
             near.effects.clear();
             near.shadow = None;
             near.transform = Affine::IDENTITY;
+            place_paint(&mut near, to_copy * shape.transform);
             near.kind = ShapeKind::Path {
                 path: copy_path,
                 closed: any_closed,
@@ -846,6 +1084,83 @@ mod tests {
         assert_eq!(Some(st.color), side.fill.preview_color());
     }
 
+    /// #2208: the sides and the copy of a curved outline are curves with
+    /// the outline's nodes, not a node for each flattened edge (a circle's
+    /// body broke apart into polygons of 36 nodes and more).
+    #[test]
+    fn a_body_keeps_the_curves_of_its_outline() {
+        use kurbo::{ParamCurveNearest, PathEl};
+        let mut c = square(Fill::Solid(Color::rgb8(0, 0, 200)));
+        c.kind = ShapeKind::Ellipse {
+            rect: Rect::new(0.0, 0.0, 20.0, 20.0),
+            arc: None,
+        };
+        let outline = c.page_path();
+        let near = |path: &BezPath, p: Point| {
+            path.segments()
+                .map(|s| s.nearest(p, 1e-9).distance_sq.sqrt())
+                .fold(f64::INFINITY, f64::min)
+        };
+        for kind in [
+            ExtrudeKind::BackParallel,
+            ExtrudeKind::FrontParallel,
+            ExtrudeKind::SmallBack,
+            ExtrudeKind::SmallFront,
+            ExtrudeKind::BigBack,
+            ExtrudeKind::BigFront,
+        ] {
+            let body = body(kind);
+            let f = body.faces(&c);
+            let parts: Vec<&Shape> = f.below.iter().chain(&f.above).collect();
+            assert_eq!(parts.len(), 2, "{kind:?}: the copy and one curved side");
+            for part in &parts {
+                let path = part.page_path();
+                let els = path.elements();
+                assert!(els.len() <= 12, "{kind:?}: {} elements", els.len());
+                assert!(
+                    els.iter().any(|e| matches!(e, PathEl::CurveTo(..))),
+                    "{kind:?}: {els:?}"
+                );
+            }
+            // The copy is the outline's copy, the side runs along the
+            // outline and its copy.
+            let (copy, side) = if kind.front() {
+                (parts[1].page_path(), parts[0].page_path())
+            } else {
+                (parts[0].page_path(), parts[1].page_path())
+            };
+            assert_eq!(copy.elements().len(), outline.elements().len(), "{kind:?}");
+            for seg in outline.segments() {
+                for t in [0.0, 0.3, 0.7] {
+                    let q = body.copy_of(kurbo::ParamCurve::eval(&seg, t));
+                    assert!(near(&copy, q) < 1e-6, "{kind:?}: {q:?} off the copy");
+                }
+            }
+            for el in side.elements() {
+                let p = match el {
+                    PathEl::MoveTo(p) | PathEl::LineTo(p) | PathEl::CurveTo(_, _, p) => *p,
+                    _ => continue,
+                };
+                assert!(
+                    near(&outline, p).min(near(&copy, p)) < 1e-6,
+                    "{kind:?}: the side's node {p:?} is on neither outline"
+                );
+            }
+        }
+        // The side of a parallel body covers what the half circle sweeps:
+        // its width across the offset times the offset's length.
+        let f = body(ExtrudeKind::BackParallel).faces(&c);
+        let area = kurbo::Shape::area(&f.below[1].page_path()).abs();
+        let want = 20.0 * Vec2::new(10.0, 10.0).hypot();
+        assert!((area - want).abs() < 2.0, "{area} vs {want}");
+        // Straight sides stay as they were: four nodes each.
+        let s = square(Fill::Solid(Color::rgb8(0, 0, 200)));
+        let f = body(ExtrudeKind::BackParallel).faces(&s);
+        for side in &f.below[1..] {
+            assert_eq!(side.page_path().elements().len(), 5);
+        }
+    }
+
     /// #1281: Area Fill reaches the curved side of a circle extruded
     /// backwards, with any Back type and wherever the body runs: the
     /// outlines that show (the far face and the side, cut where the
@@ -942,5 +1257,59 @@ mod tests {
             .faces(&empty)
             .below
             .is_empty());
+    }
+
+    /// The cap that looks like the object keeps the object's mesh on it
+    /// after the object is moved and scaled: the mesh's nodes are local
+    /// to the object and the cap is drawn in page space. They stayed
+    /// where the object was first drawn (#2337).
+    #[test]
+    fn a_mesh_fill_goes_with_the_cap() {
+        let mesh = crate::style::Mesh::new(Rect::new(0.0, 0.0, 20.0, 20.0), 1, 1, Color::BLACK);
+        let mut s = square(Fill::Mesh(mesh));
+        s.transform = Affine::translate((100.0, 40.0)) * Affine::scale(2.0);
+        let mesh_box = |f: &Fill| {
+            let Fill::Mesh(m) = f else {
+                panic!("a mesh: {f:?}");
+            };
+            m.nodes
+                .iter()
+                .map(|n| Rect::from_points(n.pos, n.pos))
+                .reduce(|a, b| a.union(b))
+                .expect("nodes")
+        };
+        let near_of = |f: &Faces| -> Shape {
+            f.above
+                .iter()
+                .rev()
+                .find(|c| matches!(c.fill, Fill::Mesh(_)))
+                .cloned()
+                .expect("a cap with the mesh")
+        };
+        // Front parallel: the near face is the copy, 10 by 10 off.
+        let near = near_of(&body(ExtrudeKind::FrontParallel).faces(&s));
+        let b = mesh_box(&near.fill);
+        assert!(
+            (b.x0 - 110.0).abs() < 1e-6
+                && (b.y0 - 50.0).abs() < 1e-6
+                && (b.x1 - 150.0).abs() < 1e-6,
+            "{b:?}"
+        );
+        let nb = near.bounds();
+        assert!(
+            (nb.x0 - b.x0).abs() < 1e-6 && (nb.y1 - b.y1).abs() < 1e-6,
+            "{nb:?} {b:?}"
+        );
+        // A bevelled body: its near cap is the object, the mesh on it.
+        let mut bevelled = body(ExtrudeKind::BackParallel);
+        bevelled.bevel = 1.0;
+        let near = near_of(&bevelled.faces(&s));
+        let b = mesh_box(&near.fill);
+        assert!(
+            (b.x0 - 100.0).abs() < 1e-6
+                && (b.y0 - 40.0).abs() < 1e-6
+                && (b.x1 - 140.0).abs() < 1e-6,
+            "{b:?}"
+        );
     }
 }

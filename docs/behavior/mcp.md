@@ -60,7 +60,7 @@ request with a JSON-RPC error (-32000) saying how to turn the option on.
 | `open` | `path` | Opens any supported file (`.cdr`, `.tdraw`, SVG, PDF, AI, EPS, DXF, PSD, EMF, WMF, images) and returns the document description |
 | `new_document` | `width_mm`, `height_mm`, `title` (all optional; A4 default) | A fresh document |
 | `save` | `path`, `version` (optional, `.cdr` only: 7 to 27) | Native `.tdraw`, or `.cdr` through the writer in `version` (default: the version of the `.cdr` the document came from or was last saved in, else the one in Options > Global > File Formats); marks the document saved |
-| `export` | `path`, `page_index` (0), `dpi` (96) | SVG, PDF, EPS, DXF, EMF, WMF, PLT, PSD, HTML or PNG by extension |
+| `export` | `path`, `page_index` (0), `dpi` (96) | SVG, PDF, EPS, PS, PRN, DXF, EMF, WMF, PLT, PSD, HTML or PNG by extension |
 | `run_script` | `source` | Runs the JavaScript object model (`Application`, `ActiveDocument`, `ActivePage`, `ActiveLayer`, `ActiveSelection`, `Shapes`, `CreateRectangle`, `CreateEllipse`, `CreateArtisticText`, `CreateCurve`, `Fill`, `Outline`, `Move`, `Rotate`, `Stretch`, `Duplicate`, `Delete`, ...) and returns what it printed; the whole script is one undo step |
 | `document_info` | | Title, file, modified flag, pages with size, layers with visibility and lock, every object with id, type, name, bounds in mm, fill, outline, opacity, text and font, group children, effect count; the selection |
 | `undo`, `redo` | | One step back or forward, then the description |
@@ -81,7 +81,7 @@ The same rule applies to drawing in the window.
 - `export` to svg, pdf, png and emf and `save` to cdr and tdraw each
   write a non-empty file; the saved `.cdr` opens again with its ellipse.
 - `save` with `version` 21 writes a file that reads back as version 21;
-  versions 3, 23, -1 and a string are refused and write nothing.
+  versions 3, 6, 28, -1 and a string are refused and write nothing.
 - The open window: with the option on, `initialize`, a notification and
   a script drawing an ellipse sent through the bridge get the server's
   name, no answer and `ok`, the window's drawing has one more object and

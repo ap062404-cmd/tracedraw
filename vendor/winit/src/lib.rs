@@ -213,6 +213,10 @@ pub mod monitor;
 // TraceDraw: a pen's pressure on X11 and macOS (vendor/README.md).
 #[allow(dead_code)]
 mod pen_pressure;
+// TraceDraw: a window's size bounds follow the monitor's scaling on
+// Windows (vendor/README.md, #2487).
+#[cfg(windows_platform)]
+pub(crate) mod size_bounds;
 // TraceDraw: files the system asks to open on macOS (vendor/README.md).
 #[cfg(macos_platform)]
 pub(crate) mod opened_files;
@@ -224,6 +228,10 @@ pub(crate) mod quit_request;
 // with its tool, for palm rejection (vendor/README.md).
 #[cfg(android_platform)]
 pub(crate) mod pointer_filter;
+// TraceDraw: a mouse's buttons, wheel and hover on Android
+// (vendor/README.md).
+#[cfg(android_platform)]
+pub(crate) mod android_mouse;
 // TraceDraw: files dragged over a window on Wayland (vendor/README.md).
 #[cfg(wayland_platform)]
 pub(crate) mod file_drop;

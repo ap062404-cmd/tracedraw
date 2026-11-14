@@ -9,6 +9,28 @@ objects are shown; `outline-pen.md`, `gradient-fill.md`,
 `vector-pattern-fill.md` and `transparency.md` have the sections'
 controls.
 
+## The buttons at the top (#2200)
+
+A row of buttons at the top has one button per section the selection
+has, lit while its section is open.
+
+- A click on a button shows its section alone: every other section is
+  closed and only its header bar remains, so the docker's content is
+  what was picked at the top and there is nothing to scroll past. The
+  sections of other kinds of object are closed too (Character while a
+  rectangle is selected), so the docker stays on the section picked
+  when the selection changes.
+- A click on the button of the only open section opens all of them
+  again.
+- Ctrl+click or Shift+click opens or closes the section beside the
+  others, as a click on its header bar does. Before #2200 a plain click
+  did this, and the docker was always the whole list of sections.
+- The tip of a button has the section's name and these clicks
+  (`docker.section_pick_hint`).
+
+`ui::dockers::pick_section`; test
+`a_section_button_shows_its_section_alone`.
+
 ## Fill and Outline (#1200)
 
 Besides the editors described in `gradient-fill.md` and `outline-pen.md`,

@@ -91,6 +91,7 @@ impl App {
         let Some(layer) = self.active_layer() else {
             return;
         };
+        self.bar_to_new_text_style();
         let span = TextSpan {
             bold: self.text_bold,
             italic: self.text_italic,

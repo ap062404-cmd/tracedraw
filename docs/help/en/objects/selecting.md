@@ -82,6 +82,10 @@ offers to move it there, copy it there, copy its fill, outline or all its
 properties to the object under the pointer, or place it inside that object
 as a [clip frame](clip-frames.md).
 
+Hold a key as you release over another object to skip the menu: `Shift`
+copies the outline to that object, `Alt` the fill, and `Ctrl` (`Cmd` on a
+Mac) both.
+
 ### The property bar {#pick-property-bar}
 
 With nothing selected, the property bar shows the page size and orientation,
@@ -118,9 +122,11 @@ that are like the selected ones:
 - [[menu.edit.similar_kind]]: the same kind of object (rectangles,
   ellipses, curves, artistic text, paragraph text, groups, bitmaps...).
 
-With several objects selected, an object like any of them is taken. Only
-the objects of the page itself are compared, not those inside groups;
-objects on locked layers stay out, as with [[menu.edit.select_all]].
+With several objects selected, an object like any of them is taken. The
+objects inside groups are compared too, each on its own, and a selected
+group stands for the objects in it (with
+[[menu.edit.similar_kind]], a selected group finds the other groups).
+Objects on locked layers stay out, as with [[menu.edit.select_all]].
 
 Each of these commands is one step of [[menu.edit.undo]]: right after
 it, with nothing changed in the drawing, Undo puts the selection back as

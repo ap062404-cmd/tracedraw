@@ -151,6 +151,14 @@ as outside (#440,
 `ui::color_picker::tests::a_choice_in_the_model_list_keeps_the_popup_open`,
 `ui::color_picker::tests::the_model_can_be_changed_on_demand`).
 
+Under the sliders a **Hex** field shows the colour's code (#364c9f). A
+code typed or pasted there, with or without the `#`, in capitals or
+small letters, six digits or three, sets the colour when Enter is
+pressed or the field is left; a colour in another model than RGB takes
+it in its own model; a code that does not read leaves the colour. Edit
+Fill's uniform page has the same field under its sliders (#2606,
+`ui::color_picker::tests::a_typed_hexadecimal_code_sets_the_colour`).
+
 Under the colour's description a **Harmony** list (Analogous,
 Complementary at first, Split complementary, Triadic, Tetradic,
 Monochromatic: the rules of the Color Styles docker's harmony editor,

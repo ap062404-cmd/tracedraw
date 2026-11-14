@@ -116,6 +116,38 @@ impl App {
         }
     }
 
+    /// Whether the guidelines being edited are shown: guidelines on, and
+    /// their own eye in the Objects docker open (#1775).
+    pub fn edited_guides_shown(&self) -> bool {
+        self.show_guides
+            && self
+                .doc()
+                .guides_shown((!self.edit_master_guides).then_some(self.page))
+    }
+
+    /// Whether the other set of guidelines on the page (see
+    /// [`App::other_guides_on_page`]) is shown.
+    pub fn other_guides_shown(&self) -> bool {
+        self.show_guides
+            && self
+                .doc()
+                .guides_shown(self.edit_master_guides.then_some(self.page))
+    }
+
+    /// Show or hide one set of guidelines by its eye: the master page's
+    /// (`page` `None`) or a page's own (#1775). One undo step. Showing a
+    /// set turns guidelines on when they were off.
+    pub fn set_guides_shown(&mut self, page: Option<tracedraw_core::PageId>, shown: bool) {
+        if self.doc().guides_shown(page) != shown {
+            self.run(tracedraw_core::Command::SetGuidesShown { page, shown });
+        }
+        if shown {
+            self.show_guides = true;
+        } else if page.is_none() == self.edit_master_guides {
+            self.selected_guides.clear();
+        }
+    }
+
     /// Choose which guidelines are edited: the master page's (every page
     /// shows them) or the active page's own (#1928). The selection of
     /// guidelines is dropped.
@@ -130,7 +162,7 @@ impl App {
     /// The topmost guideline under `p` (page coordinates), when guidelines
     /// are shown.
     pub fn guide_at(&self, p: Point) -> Option<usize> {
-        if !self.show_guides {
+        if !self.edited_guides_shown() {
             return None;
         }
         let tol = PICK_PX / self.view.zoom.max(1e-6) as f64;
@@ -148,7 +180,7 @@ impl App {
         if let Some(i) = self.guide_at(p) {
             return Some(i);
         }
-        if !self.show_guides {
+        if !self.other_guides_shown() {
             return None;
         }
         let tol = PICK_PX / self.view.zoom.max(1e-6) as f64;
@@ -375,6 +407,62 @@ impl App {
             .reduce(|a, b| a.union(b))
     }
 
+    /// The centre of rotation of the guideline in rotate mode, moved on
+    /// the canvas or where it was clicked, while guidelines and no objects
+    /// are selected: the Transformations docker's Rotate page turns the
+    /// selected guidelines about it with Relative centre on, as it turns
+    /// objects about their moved centre (#2335). A guideline out of rotate
+    /// mode, selected alone again, keeps the centre it was last given.
+    pub fn guide_rotation_center(&self) -> Option<Point> {
+        if !self.selection.is_empty() || self.selected_guides.is_empty() {
+            return None;
+        }
+        let p = match self.guide_rotate {
+            Some(index) => {
+                let unlocked = self.page_guides().get(index).is_some_and(|g| !g.locked);
+                unlocked.then_some(self.guide_pivot)?
+            }
+            None => match self.selected_guides.as_slice() {
+                [index] => self.remembered_guide_pivot(*index)?,
+                _ => return None,
+            },
+        };
+        (p.x.is_finite() && p.y.is_finite()).then_some(p)
+    }
+
+    /// The rotation centre guideline `index` was last given, while it is
+    /// where it was then and not locked (#2335).
+    pub fn remembered_guide_pivot(&self, index: usize) -> Option<Point> {
+        let g = self
+            .page_guides()
+            .get(index)
+            .copied()
+            .filter(|g| !g.locked)?;
+        self.guide_pivots
+            .iter()
+            .rev()
+            .find(|(line, _)| *line == g.line)
+            .map(|(_, p)| *p)
+    }
+
+    /// Remember the rotation centre of the guideline in rotate mode, for
+    /// when it is selected again (#2335).
+    fn remember_guide_pivot(&mut self) {
+        let Some(index) = self.guide_rotate else {
+            return;
+        };
+        let Some(line) = self.page_guides().get(index).map(|g| g.line) else {
+            return;
+        };
+        let p = self.guide_pivot;
+        self.guide_pivots.retain(|(l, _)| *l != line);
+        self.guide_pivots.push((line, p));
+        // A long session keeps only the latest ones.
+        if self.guide_pivots.len() > 256 {
+            self.guide_pivots.remove(0);
+        }
+    }
+
     /// The Transformations docker on guidelines (no objects selected): the
     /// selected ones moved, turned, scaled or skewed by `t` (page space),
     /// or with `copies` that many copies, each the one before transformed
@@ -544,11 +632,17 @@ impl App {
                 Some(i) if i == index => None,
                 _ => Some(index),
             };
-            if let Some(g) = self.page_guides().get(index).filter(|g| !g.locked) {
-                // The pivot is where the guideline was clicked.
-                let (o, d) = g.line.point_and_direction();
-                let t = (p - o).dot(d);
-                self.guide_pivot = o + d * t;
+            if self.guide_rotate.is_some() {
+                if let Some(c) = self.remembered_guide_pivot(index) {
+                    // The centre it was given before (#2335).
+                    self.guide_pivot = c;
+                } else if let Some(g) = self.page_guides().get(index).filter(|g| !g.locked) {
+                    // The pivot is where the guideline was clicked.
+                    let (o, d) = g.line.point_and_direction();
+                    let t = (p - o).dot(d);
+                    self.guide_pivot = o + d * t;
+                    self.remember_guide_pivot();
+                }
             }
         } else {
             self.selected_guides = vec![index];
@@ -818,9 +912,12 @@ impl App {
             }
             Drag::RotateGuide { index, guide, .. } => {
                 self.replace_guide(index, guide, "Rotate Guideline");
+                // The turned guideline keeps its centre (#2335).
+                self.remember_guide_pivot();
             }
-            // The rotation centre is where the drag left it.
-            Drag::GuidePivot => {}
+            // The rotation centre is where the drag left it, and stays
+            // there for the guideline selected again later (#2335).
+            Drag::GuidePivot => self.remember_guide_pivot(),
             other => self.drag = other,
         }
     }
@@ -991,6 +1088,66 @@ mod tests {
         app
     }
 
+    /// #1775: in a new drawing a guideline goes to the master page's
+    /// guidelines, so every page has it; choosing a page's own Guides
+    /// row makes the next ones that page's. Each row's eye hides its own
+    /// guidelines only: hidden, they are neither picked nor snapped to,
+    /// the other set stays, and the drawing keeps the choice.
+    #[test]
+    fn guidelines_are_shared_at_first_and_each_set_has_its_own_eye() {
+        let mut app = app();
+        app.add_page();
+        let pages: Vec<_> = app.doc().pages.iter().map(|p| p.id).collect();
+        app.goto_page(0);
+        app.add_guide(Guide::vertical(30.0));
+        assert_eq!(app.doc().master_guides.len(), 1, "shared by default");
+        assert!(app.doc().pages.iter().all(|p| p.guides.is_empty()));
+        app.choose_master_guides(false);
+        app.add_guide(Guide::horizontal(50.0));
+        assert_eq!(app.doc().page(pages[0]).unwrap().guides.len(), 1);
+        assert_eq!(app.doc().guides_on_page(pages[1]).unwrap().len(), 1);
+        assert_eq!(app.doc().guides_on_page(pages[0]).unwrap().len(), 2);
+
+        app.snap.guides = true;
+        app.snap.grid = false;
+        app.snap.objects = false;
+        // The master page's eye: page 1 keeps its own guideline.
+        app.set_guides_shown(None, false);
+        assert!(!app.doc().guides_shown(None));
+        assert!(app.show_guides, "the others still show");
+        let shown = app.doc().guides_on_page(pages[0]).unwrap();
+        assert_eq!(shown.len(), 1);
+        assert!(matches!(shown[0].line, GuideLine::Horizontal { .. }));
+        assert!(!app.other_guides_shown());
+        assert!(app.edited_guides_shown());
+        let p = app.snap_point(Point::new(30.4, 10.0));
+        assert!(
+            (p.x - 30.4).abs() < 1e-9,
+            "not snapped to a hidden one: {p:?}"
+        );
+        assert_eq!(app.pick_guide_at(Point::new(30.0, 10.0)), None);
+        assert_eq!(app.guide_at(Point::new(10.0, 50.0)), Some(0));
+        // The page's own eye too: nothing left on page 1, page 2 not
+        // touched.
+        app.set_guides_shown(Some(pages[0]), false);
+        assert!(app.doc().guides_on_page(pages[0]).unwrap().is_empty());
+        assert_eq!(app.guide_at(Point::new(10.0, 50.0)), None);
+        assert!(app.doc().guides_shown(Some(pages[1])));
+        // Saved with the drawing, and undone one eye at a time.
+        let json = app.doc().to_json().expect("save");
+        let back = tracedraw_core::Document::from_json(&json).expect("open");
+        assert!(!back.guides_shown(None) && !back.guides_shown(Some(pages[0])));
+        app.undo();
+        assert!(app.doc().guides_shown(Some(pages[0])));
+        app.undo();
+        assert!(app.doc().guides_shown(None));
+        // With guidelines off, an eye opened turns them on again.
+        app.show_guides = false;
+        app.set_guides_shown(None, false);
+        app.set_guides_shown(None, true);
+        assert!(app.show_guides && app.doc().guides_shown(None));
+    }
+
     /// #1928: with the master page's guidelines chosen (the Objects
     /// docker's "Guides (all pages)" row), a new guideline goes there
     /// once and every page shows it and snaps to it; it is picked,
@@ -1003,6 +1160,7 @@ mod tests {
         let pages: Vec<_> = app.doc().pages.iter().map(|p| p.id).collect();
         assert_eq!(pages.len(), 2);
         app.goto_page(0);
+        app.choose_master_guides(false);
         app.add_guide(Guide::horizontal(50.0));
         app.choose_master_guides(true);
         app.add_guide(Guide::vertical(30.0));
@@ -1309,6 +1467,99 @@ mod tests {
         .lines(Size::new(100.0, 50.0));
         assert_eq!(grid.len(), 5 + 3);
         assert!(grid.contains(&GuideLine::Horizontal { y: 25.0 }));
+    }
+
+    /// The Transformations docker turns a guideline in rotate mode about
+    /// its centre moved on the canvas, not about a point of the guideline
+    /// at the page's middle height (#2335).
+    #[test]
+    fn the_docker_turns_a_guideline_about_its_moved_centre() {
+        let mut app = app();
+        app.add_guide(Guide::vertical(100.0));
+        app.select(Vec::new());
+        // Rotate mode, the centre dragged up the guideline (#2335).
+        let p = Point::new(100.0, 150.0);
+        assert!(app.click_guide(p, false));
+        assert!(app.click_guide(p, false));
+        assert_eq!(app.guide_rotate, Some(0));
+        assert!(app.press_guide(p, false));
+        app.drag_guide_to(Point::new(100.0, 40.0));
+        app.finish_guide_move(egui::pos2(100.0, 100.0));
+        let centre = app.guide_pivot;
+        assert!((centre.y - 40.0).abs() < 1.0, "{centre:?}");
+        assert!((app.page_rect().center().y - centre.y).abs() > 20.0);
+        // The docker: 45 degrees, one copy, Relative centre on.
+        app.transform = Default::default();
+        app.transform.tab = crate::app::TransformTab::Rotate;
+        app.transform.angle = 45.0;
+        app.transform.copies = 1;
+        assert!(app.transform.relative_center);
+        crate::ui::transform_docker::apply(&mut app);
+        let g = app.page_guides();
+        assert_eq!(g.len(), 2);
+        assert_eq!(g[0].line, GuideLine::Vertical { x: 100.0 });
+        // The copy crosses the original at the centre, turned 45 degrees.
+        assert!(g[1].line.distance(centre).abs() < 1e-6, "{:?}", g[1].line);
+        assert!(
+            (g[1].line.angle() - 45.0).abs() < 1e-6 || (g[1].line.angle() - 135.0).abs() < 1e-6,
+            "{:?}",
+            g[1].line
+        );
+        // Applied again, the next one turns about the same point.
+        crate::ui::transform_docker::apply(&mut app);
+        let g = app.page_guides();
+        assert_eq!(g.len(), 3);
+        assert!(g[2].line.distance(centre).abs() < 1e-6, "{:?}", g[2].line);
+    }
+
+    /// A guideline whose centre of rotation was moved keeps it once it is
+    /// deselected: selected again, alone or back in rotate mode, the
+    /// Transformations docker turns it about that centre, not about the
+    /// page's middle or where it was clicked again (#2335, khad96's video).
+    #[test]
+    fn a_guideline_keeps_its_moved_centre_once_deselected() {
+        let mut app = app();
+        app.add_guide(Guide::vertical(100.0));
+        app.select(Vec::new());
+        let p = Point::new(100.0, 150.0);
+        assert!(app.click_guide(p, false));
+        assert!(app.click_guide(p, false));
+        assert_eq!(app.guide_rotate, Some(0));
+        assert!(app.press_guide(p, false));
+        app.drag_guide_to(Point::new(100.0, 40.0));
+        app.finish_guide_move(egui::pos2(100.0, 100.0));
+        let centre = app.guide_pivot;
+        assert!((centre.y - 40.0).abs() < 1.0, "{centre:?}");
+        // Deselected (a click on an empty spot), then selected again
+        // with one click: no rotation handles, the centre kept.
+        app.deselect_guides();
+        assert!(app.selected_guides.is_empty());
+        assert_eq!(app.guide_rotation_center(), None);
+        let q = Point::new(100.0, 180.0);
+        assert!(app.click_guide(q, false));
+        assert_eq!(app.selected_guides, vec![0]);
+        assert_eq!(app.guide_rotate, None);
+        assert_eq!(app.guide_rotation_center(), Some(centre));
+        app.transform = Default::default();
+        app.transform.tab = crate::app::TransformTab::Rotate;
+        app.transform.angle = 45.0;
+        app.transform.copies = 1;
+        crate::ui::transform_docker::apply(&mut app);
+        let g = app.page_guides();
+        assert_eq!(g.len(), 2);
+        assert!(g[1].line.distance(centre).abs() < 1e-6, "{:?}", g[1].line);
+        // Back in rotate mode with a click elsewhere on it: the handles
+        // come back about the same centre.
+        app.deselect_guides();
+        assert!(app.click_guide(q, false));
+        assert!(app.click_guide(q, false));
+        assert_eq!(app.guide_rotate, Some(0));
+        assert_eq!(app.guide_pivot, centre);
+        // A guideline never given a centre has none out of rotate mode.
+        app.add_guide(Guide::horizontal(70.0));
+        app.deselect_guides();
+        assert!(app.click_guide(Point::new(30.0, 70.0), false));
+        assert_eq!(app.guide_rotation_center(), None);
     }
 
     /// Several selected guidelines move together; a right click during

@@ -110,7 +110,6 @@ pub fn ai_generate(app: &mut App, ui: &mut Ui) {
     }
     let svg = mode == Mode::Vector && app.ai_image.vector_engine == VectorEngine::Svg;
     let need = if svg { Need::Drawing } else { Need::Images };
-    banner(app, ui, need);
     let ready = if svg {
         app.ai_drawing_ready()
     } else {
@@ -122,36 +121,81 @@ pub fn ai_generate(app: &mut App, ui: &mut Ui) {
         Mode::Vector => ("aigen.vector_title", "aigen.vector_about"),
         Mode::Draw => ("aigen.draw_title", "aigen.draw_about"),
     };
-    // The settings and results scroll; the footer stays at the bottom.
-    let footer_h = 118.0;
-    let scroll_h = (ui.available_height() - footer_h).max(120.0);
-    egui::ScrollArea::vertical()
+    // The settings and results scroll; the footer stays at the bottom, as
+    // high as it came out last time (its lines wrap in a narrow panel, so
+    // no fixed height fits: 118 points cut its last line off, #2040). In
+    // a panel too low for both, the footer scrolls with the rest.
+    let footer_key = egui::Id::new("aigen_footer_height");
+    let footer_h = ui
+        .data(|d| d.get_temp::<f32>(footer_key))
+        .unwrap_or(FOOTER_H);
+    let room = ui.available_height();
+    let together = scrolls_together(room, footer_h);
+    let mut measured = footer_h;
+    let scroll = egui::ScrollArea::vertical()
         .id_salt("aigen_scroll")
-        .max_height(scroll_h)
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width() - 10.0);
-            ui.label(RichText::new(tr(title)).strong());
-            ui.label(
-                RichText::new(tr(about))
-                    .color(Tokens::text_dim())
-                    .size(11.0),
-            );
-            ui.add_enabled_ui(ready && !app.ai_image.busy(), |ui| body(app, ui, mode, svg));
-            results(app, ui);
-            ui.add_space(6.0);
-            ui.label(
-                RichText::new(tr("aigen.privacy"))
-                    .color(Tokens::text_dim())
-                    .size(11.0),
-            );
-        });
-    footer(app, ui, mode, ready);
+        .auto_shrink([false, false]);
+    let scroll = if together {
+        scroll
+    } else {
+        scroll.max_height(room - footer_h)
+    };
+    scroll.show(ui, |ui| {
+        ui.set_width(ui.available_width() - 10.0);
+        banner(app, ui, need);
+        ui.label(RichText::new(tr(title)).strong());
+        ui.label(
+            RichText::new(tr(about))
+                .color(Tokens::text_dim())
+                .size(11.0),
+        );
+        ui.add_enabled_ui(ready && !app.ai_image.busy(), |ui| body(app, ui, mode, svg));
+        results(app, ui);
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new(tr("aigen.privacy"))
+                .color(Tokens::text_dim())
+                .size(11.0),
+        );
+        if together {
+            measured = footer(app, ui, mode, ready);
+        }
+    });
+    if !together {
+        measured = footer(app, ui, mode, ready);
+    }
+    if (measured - footer_h).abs() > 0.5 {
+        ui.data_mut(|d| d.insert_temp(footer_key, measured));
+        ui.ctx().request_repaint();
+    }
+}
+
+/// The footer's height before it was ever laid out.
+const FOOTER_H: f32 = 118.0;
+/// The least height the settings scroll in above a footer that stays.
+const MIN_SCROLL_H: f32 = 140.0;
+
+/// True when a panel `room` high cannot keep a footer `footer_h` high at
+/// its bottom with [`MIN_SCROLL_H`] of settings above it: the footer
+/// then scrolls with the settings.
+fn scrolls_together(room: f32, footer_h: f32) -> bool {
+    room - footer_h < MIN_SCROLL_H
+}
+
+/// How many tiles go in a row `available` wide, and how wide each is:
+/// as many of about 76 points as fit, two at least, each at most 84
+/// points and never so wide that the row passes the panel (#2040; three
+/// or four tiles of at least 56 points were cut off in a narrow panel).
+fn tile_columns(available: f32, most: usize) -> (usize, f32) {
+    const GAP: f32 = 4.0;
+    let cols = (((available + GAP) / (72.0 + GAP)).floor() as usize).clamp(2, most.max(2));
+    let width = ((available - GAP * (cols as f32 - 1.0)) / cols as f32).floor();
+    (cols, width.clamp(24.0, 84.0))
 }
 
 fn body(app: &mut App, ui: &mut Ui, mode: Mode, svg: bool) {
     if mode == Mode::Vector {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(tr("aigen.engine"));
             ui.selectable_value(
                 &mut app.ai_image.vector_engine,
@@ -170,48 +214,57 @@ fn body(app: &mut App, ui: &mut Ui, mode: Mode, svg: bool) {
     // The model in use, from the service's list, and its notes.
     ui.horizontal(|ui| {
         ui.label(tr("ai.model"));
+        // A name too long for a narrow panel is cut short with an
+        // ellipsis, here and in the list's button.
         if svg {
-            ui.label(RichText::new(app.settings.ai.model()).strong());
+            ui.add(egui::Label::new(RichText::new(app.settings.ai.model()).strong()).truncate());
             return;
         }
         let Some(prefs) = app.ai_image_prefs() else {
             // The service makes drawings only (or has no image model).
-            ui.label(RichText::new(tr("aiui.not_ready")).color(Tokens::text_dim()));
+            ui.add(
+                egui::Label::new(RichText::new(tr("aiui.not_ready")).color(Tokens::text_dim()))
+                    .truncate(),
+            );
             return;
         };
         let current = prefs.model();
         let list = app.ai_image_model_choices();
-        crate::ui::keynav::ComboBox::from_id_salt("aigen_model")
-            .width((ui.available_width() - 34.0).max(80.0))
-            .selected_text(current.clone())
-            .show_ui(ui, |ui| {
-                // Each model with a line on what it is good at.
-                ui.set_min_width(260.0);
-                ui.set_max_width(280.0);
-                for m in &list {
-                    let on = *m == current;
-                    let resp = ui
-                        .vertical(|ui| {
-                            let r = ui.radio(on, RichText::new(m.as_str()).strong());
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(model_note(m))
-                                        .color(Tokens::text_dim())
-                                        .size(11.0),
-                                )
-                                .wrap(),
-                            );
-                            r
-                        })
-                        .inner;
-                    if resp.clicked() {
-                        app.settings.ai.image_model = m.clone();
-                        ui.close();
+        // From the right: the ? button, then the list in the room left.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.small_button("?").rich_tip(model_note(&current));
+            crate::ui::keynav::ComboBox::from_id_salt("aigen_model")
+                .width(ui.available_width())
+                .truncate()
+                .selected_text(current.clone())
+                .show_ui(ui, |ui| {
+                    // Each model with a line on what it is good at.
+                    ui.set_min_width(260.0);
+                    ui.set_max_width(280.0);
+                    for m in &list {
+                        let on = *m == current;
+                        let resp = ui
+                            .vertical(|ui| {
+                                let r = ui.radio(on, RichText::new(m.as_str()).strong());
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(model_note(m))
+                                            .color(Tokens::text_dim())
+                                            .size(11.0),
+                                    )
+                                    .wrap(),
+                                );
+                                r
+                            })
+                            .inner;
+                        if resp.clicked() {
+                            app.settings.ai.image_model = m.clone();
+                            ui.close();
+                        }
+                        ui.add_space(3.0);
                     }
-                    ui.add_space(3.0);
-                }
-            });
-        ui.small_button("?").rich_tip(model_note(&current));
+                });
+        });
     });
     // The reference picture: needed to remix, optional otherwise.
     if !svg {
@@ -269,7 +322,8 @@ fn body(app: &mut App, ui: &mut Ui, mode: Mode, svg: bool) {
             ui.label(tr("aigen.aspect"));
             let current = app.ai_image.aspect;
             crate::ui::keynav::ComboBox::from_id_salt("aigen_aspect")
-                .width(ui.available_width() - 8.0)
+                .width((ui.available_width() - 8.0).max(60.0))
+                .truncate()
                 .selected_text(tr(current.key()))
                 .show_ui(ui, |ui| {
                     if app.ai_image.source.is_some() {
@@ -304,8 +358,9 @@ fn body(app: &mut App, ui: &mut Ui, mode: Mode, svg: bool) {
         app.ai_image.style = None;
         app.ai_image.vector_style = None;
     }
-    let cols = 3;
-    egui::Grid::new("aigen_styles")
+    // As many tiles in a row as the panel has room for.
+    let (cols, tile_w) = tile_columns(ui.available_width(), 3);
+    egui::Grid::new(("aigen_styles", cols))
         .num_columns(cols)
         .spacing([4.0, 4.0])
         .show(ui, |ui| {
@@ -318,7 +373,7 @@ fn body(app: &mut App, ui: &mut Ui, mode: Mode, svg: bool) {
                 };
                 let on = current == Some(i);
                 let swatch = if vector { 6 + i } else { i };
-                if tile(ui, &tr(key), on, |p, r| style_swatch(p, r, swatch)).clicked() {
+                if tile(ui, tile_w, &tr(key), on, |p, r| style_swatch(p, r, swatch)).clicked() {
                     let v = if on { None } else { Some(i) };
                     if vector {
                         app.ai_image.vector_style = v;
@@ -334,14 +389,14 @@ fn body(app: &mut App, ui: &mut Ui, mode: Mode, svg: bool) {
     if heading(ui, "aigen.palette", true) {
         app.ai_image.palette = None;
     }
-    let cols = 4;
-    egui::Grid::new("aigen_palettes")
+    let (cols, tile_w) = tile_columns(ui.available_width(), 4);
+    egui::Grid::new(("aigen_palettes", cols))
         .num_columns(cols)
         .spacing([4.0, 4.0])
         .show(ui, |ui| {
             for (i, (key, _, colours)) in PALETTES.iter().enumerate() {
                 let on = app.ai_image.palette == Some(i);
-                if tile(ui, &tr(key), on, |p, r| gradient(p, r, colours)).clicked() {
+                if tile(ui, tile_w, &tr(key), on, |p, r| gradient(p, r, colours)).clicked() {
                     app.ai_image.palette = if on { None } else { Some(i) };
                 }
                 if i % cols == cols - 1 {
@@ -463,12 +518,13 @@ fn results(app: &mut App, ui: &mut Ui) {
 }
 
 /// Images, what will be sent, Generate (or the spinner and Cancel) and
-/// the outcome.
-fn footer(app: &mut App, ui: &mut Ui, mode: Mode, ready: bool) {
+/// the outcome. Returns its height, with the gap after it.
+fn footer(app: &mut App, ui: &mut Ui, mode: Mode, ready: bool) -> f32 {
+    let top = ui.cursor().top();
     ui.separator();
     let svg = mode == Mode::Vector && app.ai_image.vector_engine == VectorEngine::Svg;
     ui.add_enabled_ui(ready && !app.ai_image.busy(), |ui| {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if !svg {
                 ui.label(tr("aigen.images"));
                 ui.add(
@@ -505,11 +561,15 @@ fn footer(app: &mut App, ui: &mut Ui, mode: Mode, ready: bool) {
             ),
             _ => tr("aigen.in_progress"),
         };
-        ui.horizontal(|ui| {
+        // The button's words wrap inside it, and Cancel goes under it
+        // in a panel too narrow for both.
+        ui.horizontal_wrapped(|ui| {
             let w = (ui.available_width() - 90.0).max(80.0);
             ui.add_enabled(
                 false,
-                egui::Button::new(format!("\u{2728} {label}")).min_size(Vec2::new(w, 30.0)),
+                egui::Button::new(format!("\u{2728} {label}"))
+                    .wrap()
+                    .min_size(Vec2::new(w, 30.0)),
             );
             ui.spinner();
             if ui
@@ -520,6 +580,10 @@ fn footer(app: &mut App, ui: &mut Ui, mode: Mode, ready: bool) {
                 app.ai_image_cancel();
             }
         });
+        // The service was busy: the request is about to go again.
+        if let Some(note) = app.ai_image.retry_note() {
+            ui.label(RichText::new(note).color(Tokens::text_dim()).size(11.0));
+        }
     } else {
         let has_source = app.ai_image.source.is_some() || app.ai_source_bitmap().is_some();
         let can = ready
@@ -529,6 +593,7 @@ fn footer(app: &mut App, ui: &mut Ui, mode: Mode, ready: bool) {
             };
         let button =
             egui::Button::new(RichText::new(format!("\u{2728} {}", tr("aigen.generate"))).strong())
+                .wrap()
                 .min_size(Vec2::new(ui.available_width(), 30.0));
         if ui.add_enabled(can, button).clicked() {
             app.ai_generate();
@@ -543,6 +608,7 @@ fn footer(app: &mut App, ui: &mut Ui, mode: Mode, ready: bool) {
         }
         _ => {}
     }
+    ui.cursor().top() - top
 }
 
 /// The information page: what AI Generate does, where each service
@@ -643,14 +709,14 @@ fn texture(ctx: &egui::Context, png: &[u8]) -> Option<egui::TextureHandle> {
     Some(t)
 }
 
-/// A square tile with a picture and a name under it.
+/// A tile `w` wide with a picture and a name under it.
 fn tile(
     ui: &mut Ui,
+    w: f32,
     name: &str,
     on: bool,
     paint: impl FnOnce(&egui::Painter, egui::Rect),
 ) -> egui::Response {
-    let w = ((ui.available_width() - 16.0) / 3.0).clamp(56.0, 84.0);
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, w * 0.62 + 16.0), Sense::click());
     let pic = egui::Rect::from_min_size(rect.min, Vec2::new(w, w * 0.62));
     let p = ui.painter();
@@ -853,6 +919,101 @@ mod tests {
         };
         let mut out = ctx.run_ui(input, |ui| ai_generate(app, ui));
         out.textures_delta.clear();
+    }
+
+    /// One frame of the docker in a panel `w` wide and `h` high: how far
+    /// its contents reach past the panel's right edge and its bottom
+    /// (the layout's own extent, and every widget's place as the
+    /// accessibility tree has it; what scrolls is not past the bottom),
+    /// and the widget that reaches farthest right, for the message.
+    fn overflow(ctx: &egui::Context, app: &mut App, w: f32, h: f32) -> (f32, f32, String) {
+        ctx.enable_accesskit();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(w, h),
+            )),
+            ..Default::default()
+        };
+        let mut over = (0.0f32, 0.0f32, String::from("the layout"));
+        let mut out = ctx.run_ui(input, |ui| {
+            let room = ui.max_rect();
+            ai_generate(app, ui);
+            let used = ui.min_rect();
+            over.0 = used.right() - room.right();
+            over.1 = used.bottom() - room.bottom();
+        });
+        out.textures_delta.clear();
+        if let Some(update) = out.platform_output.accesskit_update {
+            for (_, node) in &update.nodes {
+                if let Some(b) = node.bounds() {
+                    if b.x1 as f32 - w > over.0 {
+                        over.0 = b.x1 as f32 - w;
+                        over.2 =
+                            format!("{:?} {:?}", node.role(), node.label().unwrap_or_default());
+                    }
+                }
+            }
+        }
+        over
+    }
+
+    /// The panel adapts to its size (#2040): at any width from a narrow
+    /// docker to a wide one, in every mode, set up or not, and in the
+    /// languages with the longest words, no field, button, tile or text
+    /// reaches past its right edge; and in a low window nothing reaches
+    /// past its bottom (the settings scroll).
+    #[test]
+    fn the_panel_fits_its_width_and_height() {
+        let mut wrong: Vec<String> = Vec::new();
+        for lang in ["en", "de", "ru"] {
+            crate::i18n::with_thread_language(lang, || {
+                for ready in [false, true] {
+                    for mode in [Mode::Draw, Mode::Create, Mode::Remix, Mode::Vector] {
+                        for (w, h) in [
+                            (180.0, 900.0),
+                            (240.0, 900.0),
+                            (340.0, 900.0),
+                            (560.0, 900.0),
+                            (340.0, 260.0),
+                            (240.0, 180.0),
+                        ] {
+                            // A new context: the panel opens as it does
+                            // the first time (the connection unfolded
+                            // while no key is set).
+                            let ctx = crate::theme::ui_context();
+                            let mut app = App::headless();
+                            app.settings.ai_enabled = true;
+                            if ready {
+                                app.settings.ai.provider = crate::ai::Provider::OpenAiCompatible;
+                                app.settings.ai.endpoint = crate::ai::PRESETS[2].2.to_string();
+                                app.settings.ai.model = "gemini-2.5-flash".into();
+                                app.ai.key = "k".into();
+                            }
+                            app.ai_image.mode = mode;
+                            app.ai_image.status =
+                                ImageStatus::Failed("The service answered with a long message that has to wrap in a narrow panel.".into());
+                            app.ai.status = crate::ai::AiStatus::Failed(
+                                "The service answered with a long message that has to wrap in a narrow panel.".into(),
+                            );
+                            let mut over = (0.0, 0.0, String::new());
+                            for _ in 0..4 {
+                                over = overflow(&ctx, &mut app, w, h);
+                            }
+                            if over.0 > 0.5 || over.1 > 0.5 {
+                                wrong.push(format!(
+                                    "{lang} ready={ready} {mode:?} {w}x{h}: {:.0} too wide ({}), {:.0} too high",
+                                    over.0.max(0.0),
+                                    over.2,
+                                    over.1.max(0.0)
+                                ));
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
     #[test]

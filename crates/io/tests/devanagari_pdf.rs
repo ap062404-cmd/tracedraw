@@ -405,3 +405,163 @@ fn hard_hindi_and_sanskrit_words_come_back_from_a_pdf() {
         .collect();
     assert!(bad.is_empty(), "missing {bad:?} in {texts:?}");
 }
+
+/// The words the reporter of #1806 listed as still wrong, written as an
+/// office word processor's PDF with its scrambled ToUnicode map, in the
+/// order listed and each alone. Worked out from the map alone, seven came
+/// in wrong in that order (क्रिमी as िमिी, पूर्वी as पूवी, निर्वाचित as
+/// निवार्चित, लिंगानुपात as लर्लगानुपात) and three even alone. With the
+/// font of the file installed (here the test's Devanagari font, as the
+/// system's Hindi font is where such a file is opened), each glyph's
+/// letters are read from what the font draws with it, and every word
+/// comes in as typed.
+#[test]
+fn the_words_reported_as_wrong_import_as_typed_with_the_font_installed() {
+    let _ = fonts();
+    let words = [
+        "प्रमाण-पत्र",
+        "अधिकार",
+        "तिथि",
+        "प्रमाण",
+        "निर्गमन",
+        "राजस्व",
+        "संख्या",
+        "जिला",
+        "पिता",
+        "ग्राम",
+        "संभावित",
+        "दस्तावेज",
+        "स्वयं",
+        "शपथ-पत्र",
+        "वार्ड",
+        "अवधि",
+        "हस्ताक्षर",
+        "कृमि",
+        "क्रिमी",
+        "कार्यालय",
+        "पावती",
+        "फ्री",
+        "पूर्णिया",
+        "लिंगानुपात",
+        "पूर्वी",
+        "निश्चय",
+        "क्रिकेट",
+        "तृतीय",
+        "द्वितीय",
+        "फ्रांसीसी",
+        "इंडिका",
+        "सत्याग्रह",
+        "निर्वाचित",
+        "निर्वाचन",
+        "स्थिति",
+        "त्याग",
+        "सही",
+        "मक्का",
+        "उपयुक्त",
+        "संस्कृति",
+        "निर्देशक",
+        "स्कूल",
+        "मुश्किल",
+        "विश्वास",
+    ];
+    let texts = imported_texts(&scrambled_pdf(&words));
+    let bad: Vec<String> = words
+        .iter()
+        .zip(texts.iter().chain(std::iter::repeat(&String::new())))
+        .filter(|(w, t)| *w != t)
+        .map(|(w, t)| format!("{w} -> {t}"))
+        .collect();
+    assert!(bad.is_empty(), "{bad:#?}");
+    for w in words {
+        assert_eq!(imported_texts(&scrambled_pdf(&[w])), [w]);
+    }
+}
+
+/// Every word of the reporter's file of #1806, in its order. Twelve of
+/// them could not be worked out from the map: their glyphs' characters
+/// went to a glyph seen earlier, so the map holds them nowhere (the द्र
+/// conjunct of पुष्पेन्द्र and seven more names, क्त in प्रतिनियुक्ति,
+/// the half थ of स्वास्थ्य, the reph joined to the o sign in
+/// पूर्वोत्तर). The installed font knows what it draws with those
+/// glyphs.
+#[test]
+fn every_word_of_a_scrambled_file_imports_as_typed_with_the_font_installed() {
+    let _ = fonts();
+    let words = [
+        "उर्मिला",
+        "वार्ड",
+        "ग्राम",
+        "श्री",
+        "श्रीमती",
+        "संख्या",
+        "अधीक्षक",
+        "हस्ताक्षर",
+        "राजस्व",
+        "वार्षिक",
+        "अर्धवार्षिक",
+        "प्रमाणपत्र",
+        "ऋतु",
+        "ऋषि",
+        "निर्गत",
+        "वर्ष",
+        "सहिष्णुता",
+        "सम्प्रभुता",
+        "समस्थानिक",
+        "व्यवस्थित",
+        "प्रोड्यूसर",
+        "प्रोडक्शन",
+        "प्रॉडक्शन",
+        "डॉक्टर",
+        "कॉल",
+        "पश्चात",
+        "पश्चिम",
+        "पूर्वोत्तर",
+        "प्रश्न",
+        "उत्तर",
+        "उत्तराखंड",
+        "उत्तरोत्तर",
+        "सुसज्जित",
+        "सौजन्य",
+        "सौभाग्य",
+        "पुष्प",
+        "दैत्य",
+        "परमेश्वर",
+        "प्रहरी",
+        "प्राण",
+        "प्रकार",
+        "पुष्पेन्द्र",
+        "पुष्पेंद्र",
+        "देवेंद्र",
+        "रविन्द्र",
+        "शैलेन्द्र",
+        "जोगिन्द्र",
+        "योगेंद्र",
+        "राजेंद्र",
+        "विश्वनाथ",
+        "प्रस्तुति",
+        "पार्श्व",
+        "पार्थ",
+        "शिल्प",
+        "पाश्चात्य",
+        "प्रतिनियुक्ति",
+        "स्थानांतरण",
+        "स्वास्थ्य",
+        "श्वसन",
+        "श्वास",
+        "श्रुति",
+        "तृषा",
+        "त्रिशा",
+        "नृत्य",
+        "वाद्ययंत्र",
+        "व्याघ्र",
+        "व्याकुल",
+    ];
+    let texts = imported_texts(&scrambled_pdf(&words));
+    let bad: Vec<String> = words
+        .iter()
+        .zip(texts.iter().chain(std::iter::repeat(&String::new())))
+        .filter(|(w, t)| *w != t)
+        .map(|(w, t)| format!("{w} -> {t}"))
+        .collect();
+    assert!(bad.is_empty(), "{bad:#?}");
+}

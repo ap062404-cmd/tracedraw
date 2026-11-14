@@ -109,6 +109,11 @@ pub struct ImportOptions {
     /// own size (#1835). [`REDUCED_PICTURE_PIXELS`] for devices with
     /// less memory, or when the user asks for smaller pictures.
     pub max_picture_pixels: u64,
+    /// Lines of text one under the other in the same font become
+    /// paragraph text frames, linked where the text goes on in the next
+    /// column or page (#2323); off, every line is a text of its own.
+    /// Not with `text_as_curves`.
+    pub text_as_paragraphs: bool,
 }
 
 impl Default for ImportOptions {
@@ -116,6 +121,7 @@ impl Default for ImportOptions {
         ImportOptions {
             text_as_curves: false,
             max_picture_pixels: FULL_PICTURE_PIXELS,
+            text_as_paragraphs: false,
         }
     }
 }
@@ -169,6 +175,7 @@ pub fn parse_with_options(
         return Err(ImportError::Failed("PDF has no pages".into()));
     }
     let mut tounicode_fixes = HashMap::new();
+    let mut line_widths = HashMap::new();
     for (index, page_id) in pages.iter().enumerate() {
         let mut imp = Importer {
             doc: &doc,
@@ -185,8 +192,10 @@ pub fn parse_with_options(
             max_pixels: options.max_picture_pixels.max(1),
             shrunk: Vec::new(),
             in_mask: false,
+            line_widths: std::mem::take(&mut line_widths),
         };
         let page = imp.import_page(*page_id, index);
+        line_widths = std::mem::take(&mut imp.line_widths);
         out.inks = std::mem::take(&mut imp.inks);
         out.shrunk_pictures.extend(
             imp.shrunk
@@ -197,6 +206,9 @@ pub fn parse_with_options(
         out.pages.push(page);
     }
     out.warnings.dedup();
+    if options.text_as_paragraphs && !options.text_as_curves {
+        crate::pdf_paragraphs::make_paragraphs(&mut out.pages, &line_widths);
+    }
     Ok(out)
 }
 
@@ -840,6 +852,9 @@ struct Importer<'a> {
     /// A picture's soft mask is being read (its shrinking is the
     /// picture's own).
     in_mask: bool,
+    /// How long each text made of a run is along its baseline, mm, as
+    /// the file draws it: for [`crate::pdf_paragraphs`].
+    line_widths: HashMap<ShapeId, f64>,
 }
 
 /// The text marked content gives its glyphs, shown in place of their own
@@ -1043,9 +1058,53 @@ fn devanagari_typed_order(text: &str, reph_glyph: bool, drawn: bool) -> String {
     while i < chars.len() {
         let c = chars[i];
         if c == DEVA_SIGN_I && chars.get(i + 1).is_some_and(|n| deva_consonant(*n)) {
-            let end = cluster_end(i + 1);
-            out.extend_from_slice(&chars[i + 1..end]);
+            // One glyph for the short i sign with the reph or a nasal
+            // sign on it (drawn order, glyph by glyph: ि, then र्, then
+            // the nasal sign, all before the letter): the reph goes
+            // before the cluster, the i sign after it, the nasal sign
+            // last (र्किं).
+            let mut from = i + 1;
+            let reph = drawn
+                && chars.get(from) == Some(&DEVA_RA)
+                && chars.get(from + 1) == Some(&DEVA_VIRAMA)
+                && chars
+                    .get(from + 2)
+                    .is_some_and(|n| deva_consonant(*n) || matches!(n, '\u{0901}' | '\u{0902}'));
+            if reph {
+                from += 2;
+            }
+            let nasal = chars
+                .get(from)
+                .copied()
+                .filter(|n| drawn && matches!(n, '\u{0901}' | '\u{0902}'));
+            if nasal.is_some() {
+                from += 1;
+            }
+            if from == i + 1 || chars.get(from).is_some_and(|n| deva_consonant(*n)) {
+                let end = cluster_end(from);
+                if reph {
+                    out.extend([DEVA_RA, DEVA_VIRAMA]);
+                }
+                out.extend_from_slice(&chars[from..end]);
+                out.push(DEVA_SIGN_I);
+                out.extend(nasal);
+                i = end;
+                continue;
+            }
+        }
+        // The same with only a nasal sign between the i sign and its
+        // letter.
+        if drawn
+            && c == DEVA_SIGN_I
+            && chars
+                .get(i + 1)
+                .is_some_and(|n| matches!(n, '\u{0901}' | '\u{0902}'))
+            && chars.get(i + 2).is_some_and(|n| deva_consonant(*n))
+        {
+            let end = cluster_end(i + 2);
+            out.extend_from_slice(&chars[i + 2..end]);
             out.push(DEVA_SIGN_I);
+            out.push(chars[i + 1]);
             i = end;
             continue;
         }
@@ -1057,9 +1116,13 @@ fn devanagari_typed_order(text: &str, reph_glyph: bool, drawn: bool) -> String {
             && chars.get(i + 1) == Some(&DEVA_VIRAMA)
             && out.last() != Some(&DEVA_VIRAMA)
             && !chars.get(i + 2).is_some_and(|n| {
+                // (Glyph by glyph in drawn order, a reph also stands
+                // before the vowel sign drawn after its letter: र्वा is
+                // drawn व, the reph, ा. Typed text has no sign after a
+                // virama.)
                 *n == DEVA_VIRAMA
                     || is_joiner(*n)
-                    || (deva_mark(*n) && !matches!(n, '\u{0900}'..='\u{0902}'))
+                    || (!drawn && deva_mark(*n) && !matches!(n, '\u{0900}'..='\u{0902}'))
             })
         {
             let mut start = out.len();
@@ -2717,18 +2780,24 @@ impl<'a> Importer<'a> {
                             return None;
                         }
                     };
-                    let is_cmyk_jpeg =
-                        img.color() == image::ColorType::Rgba8 && cs == ColorSpace::Cmyk;
-                    let _ = is_cmyk_jpeg;
-                    let rgb = img.to_rgba8();
-                    rgba = rgb.into_raw();
-                    if cs == ColorSpace::Cmyk && inverted {
-                        for px in rgba.chunks_exact_mut(4) {
-                            px[0] = 255 - px[0];
-                            px[1] = 255 - px[1];
-                            px[2] = 255 - px[2];
+                    // A CMYK JPEG's samples are its inks as the Decode
+                    // array reads them, as for any other picture. The
+                    // image decoder makes RGB of them as if they were
+                    // stored inverted, and the result was turned over
+                    // again for a picture with an inverting Decode array,
+                    // the usual way such pictures are written: they came
+                    // in as negatives (#2322).
+                    rgba = match (cs == ColorSpace::Cmyk)
+                        .then(|| cmyk_jpeg_rgba(&data, &decode_arr))
+                        .flatten()
+                    {
+                        Some(px)
+                            if px.len() == img.width() as usize * img.height() as usize * 4 =>
+                        {
+                            px
                         }
-                    }
+                        _ => img.to_rgba8().into_raw(),
+                    };
                     if let ColorSpace::Separation(_) = cs {
                         // Grey samples are tints: 255 is full ink.
                         let tints: Vec<[u8; 3]> = (0..=255u8)
@@ -3615,7 +3684,18 @@ impl<'a> Importer<'a> {
             .any(|(code, c)| map.get(code).is_some_and(|t| *t != c.to_string()));
         let fixes = if scrambled {
             let units = self.text_units(key, map);
-            unscramble_tounicode(map, &nominal, marks, &units)
+            let mut fixes = unscramble_tounicode(map, &nominal, marks, &units);
+            // The same font installed here says outright what each of its
+            // glyphs stands for; the map is worked out only for the
+            // others.
+            for (code, text) in self.installed_glyph_texts(map, desc_font, descriptor, &units) {
+                if map.get(&code) == Some(&text) {
+                    fixes.remove(&code);
+                } else {
+                    fixes.insert(code, text);
+                }
+            }
+            fixes
         } else {
             HashMap::new()
         };
@@ -3623,6 +3703,87 @@ impl<'a> Importer<'a> {
         let fixed = !fixes.is_empty();
         self.tounicode_fixes.insert(key, fixes);
         fixed
+    }
+
+    /// The text of the codes `units` show in a two-byte TrueType font,
+    /// as the font of the same name installed on the system draws it
+    /// with those glyphs (see [`crate::pdf_indic`]); empty when that
+    /// font is not installed or is not the embedded one.
+    fn installed_glyph_texts(
+        &self,
+        map: &HashMap<u32, String>,
+        desc_font: &Dictionary,
+        descriptor: Option<&Dictionary>,
+        units: &[Vec<u32>],
+    ) -> HashMap<u32, String> {
+        let mut out = HashMap::new();
+        let Some(Object::Stream(s)) = descriptor.and_then(|d| self.get(d, b"FontFile2")) else {
+            return out;
+        };
+        let Some(data) = s.decompressed_content().ok() else {
+            return out;
+        };
+        let cid_to_gid: Option<Vec<u16>> = match self.get(desc_font, b"CIDToGIDMap") {
+            Some(Object::Stream(m)) => m.decompressed_content().ok().map(|b| {
+                b.chunks_exact(2)
+                    .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                    .collect()
+            }),
+            _ => None,
+        };
+        let gid_of = |code: u32| match &cid_to_gid {
+            Some(m) => m.get(code as usize).copied(),
+            None => u16::try_from(code).ok(),
+        };
+        // The codes that show Devanagari, or nothing the map knows.
+        let mut codes: Vec<u32> = units
+            .iter()
+            .flatten()
+            .copied()
+            .filter(|c| {
+                map.get(c).is_none_or(|t| {
+                    t.is_empty() || t.chars().any(|c| ('\u{0900}'..='\u{097F}').contains(&c))
+                })
+            })
+            .collect();
+        codes.sort_unstable();
+        codes.dedup();
+        let used: Vec<u16> = codes.iter().filter_map(|c| gid_of(*c)).collect();
+        // The family the embedded font names itself, then the PDF's name
+        // for it without the subset's tag and the style.
+        let mut families: Vec<String> = Vec::new();
+        if let Ok(face) = ttf_parser::Face::parse(&data, 0) {
+            for id in [
+                ttf_parser::name_id::TYPOGRAPHIC_FAMILY,
+                ttf_parser::name_id::FAMILY,
+            ] {
+                families.extend(
+                    face.names()
+                        .into_iter()
+                        .filter(|n| n.name_id == id)
+                        .filter_map(|n| n.to_string()),
+                );
+            }
+        }
+        let base = descriptor
+            .and_then(|d| self.get(d, b"FontName"))
+            .or_else(|| self.get(desc_font, b"BaseFont"))
+            .and_then(|o| o.as_name().ok())
+            .map(|n| String::from_utf8_lossy(n).into_owned());
+        if let Some(base) = base {
+            let name = base.split_once('+').map_or(base.as_str(), |(_, n)| n);
+            let name = name.split([',', '-']).next().unwrap_or(name);
+            families.push(name.to_string());
+        }
+        families.retain(|f| !f.trim().is_empty());
+        families.dedup();
+        let texts = crate::pdf_indic::glyph_texts(&data, &families, &used);
+        for code in codes {
+            if let Some(t) = gid_of(code).and_then(|g| texts.get(&g)) {
+                out.insert(code, t.clone());
+            }
+        }
+        out
     }
 
     /// The codes of a two-byte TrueType font whose glyph the font's own
@@ -4076,6 +4237,7 @@ impl<'a> Importer<'a> {
         shape.stroke = None;
         shape.opacity = r.alpha;
         let _ = r.font.type3_matrix;
+        self.line_widths.insert(shape.id, r.reach * scale);
         self.push(shape, &r.clip);
     }
 }
@@ -5238,6 +5400,52 @@ impl Shrink {
     }
 }
 
+/// The RGBA pixels of a JPEG with four components (CMYK, or CMYK stored
+/// as YCCK) whose samples are the inks as `decode` reads them: a pair
+/// starting at 1 turns that ink over, as for any picture of a PDF. `None`
+/// when the JPEG has no four components or cannot be decoded.
+fn cmyk_jpeg_rgba(data: &[u8], decode: &[f64]) -> Option<Vec<u8>> {
+    use zune_jpeg::zune_core::{
+        bytestream::ZCursor, colorspace::ColorSpace as Zcs, options::DecoderOptions,
+    };
+    use zune_jpeg::JpegDecoder;
+    let mut probe = JpegDecoder::new(ZCursor::new(data));
+    probe.decode_headers().ok()?;
+    let input = probe.input_colorspace()?;
+    if !matches!(input, Zcs::CMYK | Zcs::YCCK) {
+        return None;
+    }
+    let options = DecoderOptions::default()
+        .jpeg_set_out_colorspace(input)
+        .set_max_width(usize::MAX)
+        .set_max_height(usize::MAX);
+    let mut dec = JpegDecoder::new_with_options(ZCursor::new(data), options);
+    let raw = dec.decode().ok()?;
+    let turn: [bool; 4] = std::array::from_fn(|i| decode.get(2 * i).is_some_and(|v| *v == 1.0));
+    let mut out = Vec::with_capacity(raw.len());
+    for px in raw.chunks_exact(4) {
+        let mut ink = [px[0], px[1], px[2], px[3]];
+        if input == Zcs::YCCK {
+            // The first three are a YCbCr colour whose components, turned
+            // over, are the cyan, magenta and yellow samples.
+            let (y, cb, cr) = (px[0] as f32, px[1] as f32 - 128.0, px[2] as f32 - 128.0);
+            let to8 = |v: f32| v.round().clamp(0.0, 255.0) as u8;
+            ink[0] = 255 - to8(y + 1.402 * cr);
+            ink[1] = 255 - to8(y - 0.344_136 * cb - 0.714_136 * cr);
+            ink[2] = 255 - to8(y + 1.772 * cb);
+        }
+        for (v, t) in ink.iter_mut().zip(turn) {
+            if t {
+                *v = 255 - *v;
+            }
+        }
+        let k = 255 - ink[3] as u32;
+        let rgb = |c: u8| (((255 - c as u32) * k + 127) / 255) as u8;
+        out.extend_from_slice(&[rgb(ink[0]), rgb(ink[1]), rgb(ink[2]), 255]);
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6215,6 +6423,51 @@ mod tests {
         }
         .to_rgb8();
         assert_eq!([px[1].red(), px[1].green(), px[1].blue()], gold);
+    }
+
+    /// A one-page PDF drawing the CMYK JPEG `jpeg` (8 x 8 pixels) with
+    /// `decode` in its dictionary, and the first and last pixels of the
+    /// picture it imports as.
+    fn cmyk_jpeg_pixels(jpeg: &[u8], decode: &str) -> ([u8; 3], [u8; 3]) {
+        let mut image = format!(
+            "<< /Type /XObject /Subtype /Image /Width 8 /Height 8 /ColorSpace /DeviceCMYK /BitsPerComponent 8 /Filter /DCTDecode {decode} /Length {} >>\nstream\n",
+            jpeg.len()
+        )
+        .into_bytes();
+        image.extend_from_slice(jpeg);
+        image.extend_from_slice(b"\nendstream");
+        let bytes = pdf_bin(&[
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents 4 0 R /Resources << /XObject << /Im1 5 0 R >> >> >>".to_vec(),
+            stream("", "q 80 0 0 80 10 10 cm /Im1 Do Q").into_bytes(),
+            image,
+        ]);
+        let mut ids = IdSource::default();
+        let imp = parse(&bytes, &mut ids).expect("parse");
+        let ShapeKind::Bitmap { png, .. } = &imp.pages[0].shapes[0].kind else {
+            panic!("{:?}", imp.pages[0].shapes[0].kind);
+        };
+        let pm = tiny_skia::Pixmap::decode_png(png).expect("png");
+        let px = pm.pixels();
+        let rgb = |p: &tiny_skia::PremultipliedColorU8| [p.red(), p.green(), p.blue()];
+        (rgb(&px[8 + 1]), rgb(&px[8 * 7 - 2]))
+    }
+
+    /// A CMYK JPEG stored with its inks turned over and drawn with an
+    /// inverting Decode array, the usual way such pictures are written,
+    /// comes in as it looks, not as a negative (#2322). Its left half is
+    /// full cyan, its right half half black.
+    #[test]
+    fn cmyk_jpeg_with_inverting_decode_is_not_a_negative() {
+        let jpeg = include_bytes!("../testdata/cmyk-inverted.jpg");
+        let (cyan, grey) = cmyk_jpeg_pixels(jpeg, "/Decode [1 0 1 0 1 0 1 0]");
+        assert!(cyan[0] < 30 && cyan[1] > 225 && cyan[2] > 225, "{cyan:?}");
+        assert!(grey.iter().all(|v| (110..=145).contains(v)), "{grey:?}");
+        // Without the Decode array the same samples are the inks as
+        // stored: no cyan and full black on the left, so near black.
+        let (left, _) = cmyk_jpeg_pixels(jpeg, "");
+        assert!(left.iter().all(|v| *v < 40), "{left:?}");
     }
 
     /// A one-page PDF whose objects may hold binary streams: each object

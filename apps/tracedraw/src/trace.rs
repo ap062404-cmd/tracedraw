@@ -785,11 +785,14 @@ fn outline(img: &RgbaImage, s: &Settings, cancel: Option<&Cancel>) -> Option<Vec
     }
     // 2. Background: the most common colour touching the border.
     let mut border_counts = vec![0usize; palette.len()];
+    let mut border_clear = 0usize;
     for x in 0..w {
         for y in [0, h - 1] {
             let l = labels[y * w + x];
             if l != usize::MAX {
                 border_counts[l] += 1;
+            } else {
+                border_clear += 1;
             }
         }
     }
@@ -798,6 +801,8 @@ fn outline(img: &RgbaImage, s: &Settings, cancel: Option<&Cancel>) -> Option<Vec
             let l = labels[y * w + x];
             if l != usize::MAX {
                 border_counts[l] += 1;
+            } else {
+                border_clear += 1;
             }
         }
     }
@@ -822,10 +827,14 @@ fn outline(img: &RgbaImage, s: &Settings, cancel: Option<&Cancel>) -> Option<Vec
             // transparent background has its background removed already):
             // the commonest of none was the last colour of the palette,
             // and Remove entire color took it out of the art (#1250).
+            // The same when the edge is mostly transparent: the art
+            // that runs off the edge (the stems of a floral pattern) is
+            // the only colour there, and was removed as the background
+            // (#1930).
             None => border_counts
                 .iter()
                 .enumerate()
-                .filter(|(_, c)| **c > 0)
+                .filter(|(_, c)| **c > border_clear)
                 .max_by_key(|(_, c)| **c)
                 .map(|(i, _)| i),
         },
@@ -4572,6 +4581,44 @@ mod tests {
                 p[3] == 255 && p[0] > 200 && p[1] > 160,
                 "{remove:?}: head {p:?}"
             );
+        }
+    }
+
+    /// #1930: a floral pattern on a transparent background whose stems
+    /// run off the bottom of the picture. Their black was the only colour
+    /// on the edge, so Remove background (automatically) took it for the
+    /// background and erased every stem that touched the edge, leaving
+    /// the dots and leaves inside. The edge is mostly transparent, so
+    /// nothing is removed now.
+    #[test]
+    fn stems_running_off_a_transparent_edge_are_kept() {
+        let img: RgbaImage = ImageBuffer::from_fn(120, 160, |x, y| {
+            let (x, y) = (x as f32, y as f32);
+            // A stem from the bottom edge curving up, and a dot inside.
+            let stem_x = 50.0 + 25.0 * ((160.0 - y) / 70.0).sin();
+            let stem = y > 30.0 && (x - stem_x).abs() < 6.0;
+            let dot = (x - 95.0).powi(2) + (y - 40.0).powi(2) < 64.0;
+            if stem || dot {
+                Rgba([0, 0, 0, 255])
+            } else {
+                Rgba([0, 0, 0, 0])
+            }
+        });
+        let mut s = Preset::LineArt.settings();
+        s.detail = 100.0;
+        s.smoothing = 100.0;
+        s.corner_smoothness = 100.0;
+        s.remove = Remove::Background;
+        s.background = None;
+        let t = trace(&img, &s);
+        let out = render_traced(&t, 120, 160, 1.0);
+        // The stem near the bottom edge and halfway up, and the dot.
+        for (x, y) in [
+            (50u32, 157u32),
+            (50 + (25.0f32 * (80.0f32 / 70.0).sin()) as u32, 80),
+            (95, 40),
+        ] {
+            assert_eq!(out.get_pixel(x, y)[3], 255, "lost at {x},{y}");
         }
     }
 

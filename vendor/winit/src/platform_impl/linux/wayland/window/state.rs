@@ -35,6 +35,7 @@ use sctk::subcompositor::SubcompositorState;
 use wayland_protocols_plasma::blur::client::org_kde_kwin_blur::OrgKdeKwinBlur;
 
 use crate::cursor::CustomCursor as RootCustomCursor;
+use crate::cursor::CursorImage;
 use crate::dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize, Size};
 use crate::error::{ExternalError, NotSupportedError};
 use crate::platform_impl::wayland::logical_to_physical_rounded;
@@ -78,6 +79,10 @@ pub struct WindowState {
     pub tablet_cursors: Vec<TabletCursor>,
 
     selected_cursor: SelectedCursor,
+
+    /// TraceDraw: the image of the custom cursor shown, while
+    /// `selected_cursor` is that cursor (#2557).
+    custom_cursor_image: Option<Arc<CursorImage>>,
 
     /// Whether the cursor is visible.
     pub cursor_visible: bool,
@@ -199,6 +204,7 @@ impl WindowState {
             csd_fails: false,
             cursor_grab_mode: GrabState::new(),
             selected_cursor: Default::default(),
+            custom_cursor_image: None,
             cursor_visible: true,
             decorate: true,
             fractional_scale,
@@ -798,6 +804,16 @@ impl WindowState {
             },
         };
 
+        // TraceDraw: egui-winit sets a bitmap cursor again every frame
+        // the pointer moves. The same image is already on the pointer:
+        // making a new buffer and committing the cursor surface each frame
+        // costs the compositor work for nothing (#2557).
+        let same = self.custom_cursor_image.as_ref().is_some_and(|i| Arc::ptr_eq(i, &cursor));
+        if same && matches!(self.selected_cursor, SelectedCursor::Custom(_)) {
+            return;
+        }
+        self.custom_cursor_image = Some(cursor.clone());
+
         let cursor = {
             let mut pool = self.custom_cursor_pool.lock().unwrap();
             CustomCursor::new(&mut pool, &cursor)
@@ -1011,6 +1027,14 @@ impl WindowState {
 
     /// Set the visibility state of the cursor.
     pub fn set_cursor_visible(&mut self, cursor_visible: bool) {
+        // TraceDraw: shown already, with a custom cursor (egui-winit says
+        // so every frame it sets one): nothing changes (#2557).
+        if cursor_visible
+            && self.cursor_visible
+            && matches!(self.selected_cursor, SelectedCursor::Custom(_))
+        {
+            return;
+        }
         self.cursor_visible = cursor_visible;
 
         if self.cursor_visible {

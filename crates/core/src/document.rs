@@ -1670,6 +1670,16 @@ pub struct ParagraphStyle {
     /// Space before and after each paragraph, mm.
     pub space_before: f64,
     pub space_after: f64,
+    /// The space before and after each paragraph in percent of the
+    /// character height (the font's line height), as the reference
+    /// program gives them with "% of Char. height": before 100 % is no
+    /// room beyond the line spacing, after 0 % none. Set, they take the
+    /// place of `space_before` and `space_after` and follow the text's
+    /// size (#2613). Not in older files.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub space_before_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub space_after_pct: Option<f64>,
     pub first_line_indent: f64,
     pub left_indent: f64,
     pub right_indent: f64,
@@ -1883,6 +1893,32 @@ impl ParagraphStyle {
             LeadingUnit::PercentPointSize => size_mm * self.leading_pct / 100.0,
         }
     }
+
+    /// The room before a paragraph beyond the line spacing, mm, for a
+    /// first line whose font has `line_height_mm` (see `line_step`).
+    pub fn space_before_mm(&self, line_height_mm: f64) -> f64 {
+        space_mm(
+            self.space_before,
+            self.space_before_pct,
+            100.0,
+            line_height_mm,
+        )
+    }
+
+    /// The room after a paragraph, mm (see `space_before_mm`).
+    pub fn space_after_mm(&self, line_height_mm: f64) -> f64 {
+        space_mm(self.space_after, self.space_after_pct, 0.0, line_height_mm)
+    }
+}
+
+/// A paragraph's space in mm: `mm`, or, given in percent of the
+/// character height (`pct`, `none` percent meaning no room), that share
+/// of `line_height_mm` (#2613).
+pub fn space_mm(mm: f64, pct: Option<f64>, none: f64, line_height_mm: f64) -> f64 {
+    match pct.filter(|p| p.is_finite()) {
+        Some(p) => ((p - none) / 100.0 * line_height_mm).max(0.0),
+        None => mm,
+    }
 }
 
 /// Which way the columns of vertical text follow one another across the
@@ -1923,6 +1959,8 @@ impl Default for ParagraphStyle {
             word_spacing_pct: 100.0,
             space_before: 0.0,
             space_after: 0.0,
+            space_before_pct: None,
+            space_after_pct: None,
             first_line_indent: 0.0,
             left_indent: 0.0,
             right_indent: 0.0,
@@ -3245,7 +3283,7 @@ impl Shape {
                     right: n.right * scale,
                 })
                 .collect();
-            crate::shaping::variable_band_within(&page, st.width * scale, &nodes, 0.005)
+            crate::shaping::variable_band_within(&page, st.width * scale, &nodes, 0.005, st.cap)
         };
         let band = crate::fit::fit_path(&band, 0.01);
         // The contours come outer first, then its holes, which wind the
@@ -3569,14 +3607,20 @@ impl Shape {
         }
     }
 
-    /// Whether Convert to Curves changes this object: curves and groups
-    /// already are curves, and a bitmap has no outline to become one.
+    /// Whether Convert to Curves changes this object: curves already are
+    /// curves, a bitmap has no outline to become one, and a group changes
+    /// when something it holds does (as in CorelDRAW, a group converts
+    /// whole and stays a group, #1324).
     pub fn converts_to_curves(&self) -> bool {
         match &self.kind {
             // A B-spline becomes an ordinary curve: its nodes instead of
             // its control points.
             ShapeKind::Path { .. } => self.spline.is_some(),
-            ShapeKind::Group { .. } | ShapeKind::Bitmap { .. } => false,
+            ShapeKind::Bitmap { .. } => false,
+            ShapeKind::Group { children } => {
+                let warps = !self.outline_stays_live();
+                children.iter().any(|c| c.converts_to_curves_deep(1, warps))
+            }
             // A clip frame changes only when its frame or something it
             // holds (inside groups too) is not a curve yet, or something it
             // holds has a warp to bake. The frame's own warp stays: the
@@ -3601,6 +3645,7 @@ impl Shape {
                     .iter()
                     .any(|c| c.converts_to_curves_deep(depth + 1, inner))
             }
+            ShapeKind::Group { .. } => warp,
             _ => warp || self.converts_to_curves(),
         }
     }
@@ -3696,6 +3741,17 @@ impl Shape {
                     c.curves_in_place(symbols, next_id, depth + 1, inner);
                 }
                 let kind = ShapeKind::ClipFrame { frame, contents };
+                (kind != self.kind).then_some(kind)
+            }
+            // A group stays a group: what it holds becomes curves,
+            // keeping the ids (#1324).
+            ShapeKind::Group { children } => {
+                let mut children = children.clone();
+                let inner = bake && !self.outline_stays_live();
+                for c in &mut children {
+                    c.curves_in_place(symbols, next_id, depth + 1, inner);
+                }
+                let kind = ShapeKind::Group { children };
                 (kind != self.kind).then_some(kind)
             }
             // A B-spline keeps its outline; the control points go.
@@ -4058,6 +4114,12 @@ pub struct Layer {
     /// instead of behind them (#1132).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub in_front: bool,
+    /// For master layers: the master page's desktop layer, which every
+    /// new drawing has: objects on it, beside the pages or on them, show
+    /// and are picked from every page (#1161, #1775). Always behind the
+    /// pages, not counted among the numbered master layers.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub desktop: bool,
 }
 
 /// Which pages a master layer appears on.
@@ -4717,6 +4779,7 @@ impl Layer {
             shapes: Vec::new(),
             scope: MasterScope::All,
             in_front: false,
+            desktop: false,
         }
     }
 }
@@ -5045,6 +5108,13 @@ pub struct Document {
     /// once for all of them, beside each page's own guidelines.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub master_guides: Vec<Guide>,
+    /// The master page's guidelines are hidden by their own eye in the
+    /// Objects docker, the pages' own still shown (#1775).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub master_guides_hidden: bool,
+    /// The pages whose own guidelines are hidden by their eye (#1775).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub page_guides_hidden: Vec<PageId>,
     #[serde(default)]
     pub object_styles: Vec<ObjectStyle>,
     /// The fill and outline new objects get.
@@ -5348,6 +5418,8 @@ impl Document {
             ids,
             master: Vec::new(),
             master_guides: Vec::new(),
+            master_guides_hidden: false,
+            page_guides_hidden: Vec::new(),
             object_styles: Vec::new(),
             defaults: ObjectDefaults::default(),
             color_styles: Vec::new(),
@@ -5503,15 +5575,30 @@ impl Document {
     /// applicable master layers in front of the page (#1132); what clicks
     /// and selections take objects from.
     /// The guidelines shown on `page`: the master page's (every page
-    /// has them, #1928), then the page's own.
+    /// has them, #1928), then the page's own, each set only while its eye
+    /// shows it (#1775).
     pub fn guides_on_page(&self, page: PageId) -> Result<Vec<Guide>> {
         let p = self.page(page)?;
-        Ok(self
-            .master_guides
-            .iter()
-            .chain(p.guides.iter())
-            .copied()
-            .collect())
+        let master: &[Guide] = if self.guides_shown(None) {
+            &self.master_guides
+        } else {
+            &[]
+        };
+        let own: &[Guide] = if self.guides_shown(Some(page)) {
+            &p.guides
+        } else {
+            &[]
+        };
+        Ok(master.iter().chain(own.iter()).copied().collect())
+    }
+
+    /// Whether the guidelines of the master page (`page` `None`) or of
+    /// `page` are shown, as their eye in the Objects docker says (#1775).
+    pub fn guides_shown(&self, page: Option<PageId>) -> bool {
+        match page {
+            None => !self.master_guides_hidden,
+            Some(p) => !self.page_guides_hidden.contains(&p),
+        }
     }
 
     pub fn layers_for_page(&self, page: PageId) -> Result<Vec<&Layer>> {
@@ -5861,6 +5948,12 @@ impl Document {
     /// is written as 0, not as `null`, which no reader before 0.35 took
     /// for a number, so one such value made the whole file refuse to
     /// open in those versions and the drawing was lost.
+    ///
+    /// The JSON is compact, with no line breaks or indents (#2345): the
+    /// indented layout gave every coordinate its own line, indented
+    /// further at each group inside a group, so a curve node took 0.5 to
+    /// 1.3 KB and a drawing with many nodes in nested groups ran to
+    /// hundreds of megabytes. Every reader takes either layout.
     pub fn write_json_version<W: std::io::Write>(&self, w: W, version: u32) -> Result<()> {
         use crate::finite::{Finite, FiniteSerializer};
         if (version as usize) >= DOWN_STEPS.len() {
@@ -5870,7 +5963,7 @@ impl Document {
                 doc: &'a Document,
                 format_version: u32,
             }
-            let mut ser = serde_json::Serializer::pretty(w);
+            let mut ser = serde_json::Serializer::new(w);
             Versioned {
                 doc: self,
                 format_version: TDRAW_FORMAT_VERSION,
@@ -5888,7 +5981,7 @@ impl Document {
         for step in DOWN_STEPS.iter().skip(version as usize).rev() {
             step(&mut v);
         }
-        serde_json::to_writer_pretty(w, &v)?;
+        serde_json::to_writer(w, &v)?;
         Ok(())
     }
 
@@ -6390,9 +6483,73 @@ mod tests {
         }
         // A null that is not a lost number is still refused.
         let json = Document::default().to_json().expect("json");
-        let broken = json.replacen("\"pages\": [", "\"pages\": null, \"x\": [", 1);
-        assert!(broken.contains("\"pages\": null"));
+        let broken = json.replacen("\"pages\":[", "\"pages\":null,\"x\":[", 1);
+        assert!(broken.contains("\"pages\":null"));
         assert!(Document::from_json(&broken).is_err());
+    }
+
+    /// A `.tdraw` file is compact JSON (#2345): its size follows the
+    /// drawing's nodes, not how deep they sit in groups inside groups,
+    /// and it opens as the same drawing. The indented layout wrote 5.3 MB
+    /// for these 10,000 curve nodes, and 13 MB inside eight groups.
+    #[test]
+    fn tdraw_size_does_not_grow_with_group_depth() {
+        use crate::geometry::BezPath;
+        let save = |depth: u64| {
+            let mut doc = Document::default();
+            let mut shapes: Vec<Shape> = (0..50u64)
+                .map(|k| {
+                    let mut p = BezPath::new();
+                    p.move_to((k as f64, k as f64 / 3.0));
+                    for i in 1..=200 {
+                        let f = i as f64 * 1.37 + k as f64 * 3.1;
+                        p.curve_to(
+                            (f / 7.0, f / 11.0),
+                            (f / 13.0, f / 17.0),
+                            (f / 19.0, f / 23.0),
+                        );
+                    }
+                    Shape::new(
+                        ShapeId(100 + k),
+                        ShapeKind::Path {
+                            path: p,
+                            closed: true,
+                        },
+                    )
+                })
+                .collect();
+            for d in 0..depth {
+                shapes = vec![Shape::new(
+                    ShapeId(10 + d),
+                    ShapeKind::Group { children: shapes },
+                )];
+            }
+            doc.pages[0].layers[0].shapes = shapes;
+            let json = doc.to_json().expect("json");
+            let back = Document::from_json(&json).expect("opens");
+            let nodes = |d: &Document| {
+                (100..150u64)
+                    .filter_map(|k| match &d.find_shape(ShapeId(k))?.kind {
+                        ShapeKind::Path { path, .. } => Some(path.elements().len()),
+                        _ => None,
+                    })
+                    .sum::<usize>()
+            };
+            assert_eq!((nodes(&back), nodes(&doc)), (50 * 201, 50 * 201));
+            json
+        };
+        let flat = save(0);
+        let deep = save(8);
+        assert!(!flat.contains('\n'), "no line breaks");
+        // About 155 bytes for each curve node (its three points in full);
+        // each group adds its own fields, some 500 bytes.
+        assert!(flat.len() < 1_700_000, "{} bytes", flat.len());
+        assert!(
+            deep.len() < flat.len() + 8_000,
+            "{} against {}",
+            deep.len(),
+            flat.len()
+        );
     }
 
     /// Variable font axis values (#870) are set, replaced and taken off

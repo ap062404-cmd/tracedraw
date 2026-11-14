@@ -31,6 +31,20 @@ Ctrl+F7).
   the steps between the two objects follow the envelope; they used to be
   mixed toward the unbent end and stayed where they were (#2120,
   `tracedraw_core::live::tests::a_grouped_blend_bends_with_the_group`).
+- On an extruded object the envelope bends the body too, whichever of
+  the two was put on first: an outline warp (envelope, perspective,
+  distortion) after an extrusion in the object's effects is put on the
+  outline before the body is built, so the sides and the far face meet
+  the bent object all along it. The frame is around the object's
+  outline, not around the body (for a body turned in space or bevelled,
+  whose object is drawn among its faces: around the outline before the
+  turn; `tracedraw_core::live::warp_box`). The body used to be built
+  from the outline as it was before the envelope and stayed behind the
+  bent object, and on a turned or bevelled body the envelope did
+  nothing (#2214,
+  `tracedraw_core::live::warped_extrusion_tests::an_envelope_on_an_extruded_object_bends_its_body`).
+  A contour or a blend between the extrusion and the envelope is still
+  drawn from the outline as it is at its own place.
 - Curves are flattened before the mapping with a tolerance of 1/50 000
   of the object's size (at most 0.05 units), so letters stay smooth; a
   fixed 0.05 left chords about 2 mm long on large text
@@ -61,6 +75,20 @@ Ctrl+F7).
 - The Shape tool edits the frame of a selected enveloped object the same
   way. Other tools do not show it; the Envelope tool does not show the
   selection handles.
+- With the Shape tool an enveloped object shows its frame only. Its own
+  nodes lie where the object was before the envelope, not where it is
+  drawn, so the nodes, the curve's outline in the node colour, the
+  control handles, the corner widgets, a rectangle's, ellipse's or
+  polygon's own nodes, a text's character nodes and a picture's corners
+  are neither shown nor taken while the envelope is on: they stood as a
+  second, unbent curve beside the bent one (#2213). Nodes chosen before
+  the envelope are let go. The same holds for an object with a
+  perspective, which shows its four corners. The nodes are back, where
+  the object is drawn, once the envelope is cleared (Clear Envelope),
+  switched off in the Effects panel, or made part of the curve (Convert
+  to Curves, Ctrl+Q)
+  (`envelope_edit::tests::the_shape_tool_shows_only_the_frame_of_an_enveloped_curve`,
+  `shape_tool::frame_only`).
 - Over a node or a handle the pointer is the Shape tool's arrow with the
   node or handle mark; over a segment, with the segment mark.
 
@@ -124,16 +152,34 @@ nothing selected, how to start.
 - The mapping list and Keep Lines show the first selected envelope's;
   changing them changes the selected envelopes (one undo step) and what
   new envelopes take.
+- The mapping list's tip names the mapping in use and says what it does
+  with the object ("Mapping: Putty", then a sentence), and each row of
+  the open list has the sentence of its mapping (`envelope.mapping_*_hint`);
+  the same list in the Envelope panel. The tip said only "How the object
+  fills the envelope" whichever mapping was chosen, and the names alone
+  (Putty, Original) do not tell them apart (#2212,
+  `ui::envelope_ui::tests::the_mapping_list_says_what_the_mapping_in_use_does`).
+  The mode buttons' tips say what each mode does to the sides of a moved
+  node.
 - Copy Envelope Properties (also Object > Copy Effect > Envelope From):
   the next click picks the object to copy from; the selected objects take
   its last envelope, stretched from its box to theirs, with its mapping
   and Keep Lines. A right click cancels. An object with no envelope gives
   the shape of its outline instead (its largest closed part, as drawn on
   the page), so text or any object is fitted into a drawn shape: the
-  frame's nodes are the outline's, its corners the outline's points
-  nearest the corners of its box (a node goes in there), stretched from
-  that box to each object's, with the mapping and Keep Lines new
-  envelopes take (#993, `tracedraw_core::envelope::tests::frames_are_made_from_outlines`,
+  frame's nodes are the outline's, its corners the outline's own sharp
+  nodes nearest the corners of its box when there are four such (a band,
+  a trapezoid, a rectangle), else the outline's points nearest those
+  corners (a node goes in there). As in CorelDRAW, each object takes
+  that shape at the shape's size, upright as it lies on the page and
+  centred where the object is, with the mapping and Keep Lines new
+  envelopes take; it is not moved into the shape (#2178: text above an
+  arched band went down onto it, where CorelDRAW leaves it above the
+  band, arched like it; the video of #2344 shows the same, the object
+  moved into the shape by hand afterwards) (#993, #2344, #2178,
+  `tracedraw_core::envelope::tests::frames_are_made_from_outlines`,
+  `tracedraw_core::envelope::tests::a_band_keeps_its_own_corners_as_the_frame_corners`,
+  `envelope_edit::tests::an_object_taking_a_shapes_outline_keeps_its_place`,
   `text_effect_tests::text_takes_the_shape_of_an_object_as_its_envelope`).
   An open line, or an outline with more than 96 nodes, gives nothing and
   the status bar says so.
@@ -195,6 +241,12 @@ rectangle selects it, and the selection box reaches the top of the arch.
 - `pick_drag_tests::dragging_an_envelope_segment_bends_it`
 - `tracedraw_core::envelope::tests::the_mappings_fill_the_frame_differently`
 - `tracedraw_core::live::tests::visual_bounds_follow_the_live_effects`
+- `tracedraw_core::live::warped_extrusion_tests::an_envelope_on_an_extruded_object_bends_its_body`
+- `tracedraw_core::live::warped_extrusion_tests::every_warp_after_an_extrusion_reaches_its_body`
+- `tracedraw_core::live::warped_extrusion_tests::a_contour_before_the_envelope_keeps_its_outline`
+- `tracedraw_core::live::warped_extrusion_tests::a_turned_body_is_built_from_the_bent_outline`
+- `tracedraw_core::live::warped_extrusion_tests::the_warp_box_is_the_outline_before_the_body`
+- `envelope_edit::tests::an_envelope_bends_the_body_of_an_extruded_object`
 - `envelope_edit::tests::dragging_a_node_is_one_step_in_the_chosen_mode`
 - `envelope_edit::tests::handles_and_nodes_in_the_unconstrained_mode`
 - `envelope_edit::tests::enveloped_objects_are_hit_and_boxed_as_drawn`

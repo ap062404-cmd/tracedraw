@@ -348,10 +348,18 @@ class Outline {
   get EndArrow() { return null; }
   set EndArrow(v) { }
   SetNoOutline() { this._put(null); }
-  SetProperties(Width, Style, Color) {
+  SetProperties(Width, Style, Color, StartArrow, EndArrow, BehindFill, ScaleWithShape, LineCaps, LineJoin, NibAngle, NibStretch, DashDotLength, PenWidth, MiterLimit, Justification) {
     const s = this._s || __defaultStroke();
     if (Width !== undefined && Width !== null && Width >= 0) s.width = __mm(Width);
+    // A style from OutlineStyles (#1255).
+    if (Style && Array.isArray(Style._dash)) s.dash = Style._dash.slice();
     if (Color && Color.v) s.color = Color.v;
+    if (BehindFill !== undefined && BehindFill !== null) s.behind_fill = !!BehindFill;
+    if (ScaleWithShape !== undefined && ScaleWithShape !== null) s.scale_with_object = !!ScaleWithShape;
+    if (LineCaps !== undefined && LineCaps !== null) s.cap = ['butt', 'round', 'square'][LineCaps] || 'butt';
+    if (LineJoin !== undefined && LineJoin !== null) s.join = ['miter', 'round', 'bevel'][LineJoin] || 'miter';
+    if (NibAngle !== undefined && NibAngle !== null) s.nib_angle = Number(NibAngle);
+    if (NibStretch !== undefined && NibStretch !== null) s.stretch = Math.max(0.01, Math.min(1, Number(NibStretch) / 100));
     this._put(s);
   }
   CopyAssign(SourceOutline) { this._put(SourceOutline._s); }
@@ -393,7 +401,7 @@ class __Geo {
   GetPosition() { return [this.PositionX, this.PositionY]; }
   GetSize() { return [this.SizeWidth, this.SizeHeight]; }
   GetBoundingBox(x, y, Width, Height, UseOutline) {
-    const b = this._b();
+    const b = UseOutline ? __call('vg_bounds', { ids: this._ids(), outline: true }) : this._b();
     return [__un(b.x0), __un(b.y0), __un(b.x1 - b.x0), __un(b.y1 - b.y0)];
   }
   SetPosition(PositionX, PositionY) {
@@ -526,6 +534,8 @@ class Shape extends __Geo {
   set RotationCenterX(v) { __vg.rot.set(this.id, [__mm(v), this._rotCenter()[1]]); }
   set RotationCenterY(v) { __vg.rot.set(this.id, [this._rotCenter()[0], __mm(v)]); }
   Duplicate(OffsetX, OffsetY) { return new Shape(__call('vg_duplicate', { ids: [this.id], dx: __mm(OffsetX || 0), dy: __mm(OffsetY || 0) }).ids[0]); }
+  Copy() { __call('vg_copy', { ids: [this.id] }); }
+  Cut() { __call('vg_cut', { ids: [this.id] }); }
   Clone(OffsetX, OffsetY) { return this.Duplicate(OffsetX, OffsetY); }
   BreakApart() { __call('vg_break_apart', { id: this.id }); }
   BreakApartEx() { return new ShapeRange(__call('vg_break_apart', { id: this.id }).ids); }
@@ -903,6 +913,8 @@ class ShapeRange extends __Geo {
   UngroupEx() { const out = []; this._ids().forEach(id => out.push(...__call('vg_ungroup', { id: id, all: false }).ids)); return new ShapeRange(out); }
   BreakApart() { this._ids().forEach(id => __call('vg_break_apart', { id: id })); }
   Duplicate(OffsetX, OffsetY) { return new ShapeRange(__call('vg_duplicate', { ids: this._ids(), dx: __mm(OffsetX || 0), dy: __mm(OffsetY || 0) }).ids); }
+  Copy() { __call('vg_copy', { ids: this._ids() }); }
+  Cut() { __call('vg_cut', { ids: this._ids() }); }
   Clone(OffsetX, OffsetY) { return this.Duplicate(OffsetX, OffsetY); }
   FindShapes(Name, Type, Recursive, Query) { return new ShapeRange(__find(this._ids(), Name, Type, Recursive === undefined ? true : Recursive, Query)); }
   FindShape(Name, Type, StaticID, Recursive, Query) {
@@ -992,6 +1004,8 @@ class SelectionShape extends __Geo {
   get Shapes() { return new Shapes(() => __call('selection', {}).ids); }
   get Name() { return ''; }
   Duplicate(OffsetX, OffsetY) { return new ShapeRange(__call('vg_duplicate', { ids: this._ids(), dx: __mm(OffsetX || 0), dy: __mm(OffsetY || 0) }).ids); }
+  Copy() { __call('vg_copy', { ids: this._ids() }); }
+  Cut() { __call('vg_cut', { ids: this._ids() }); }
   Group() { return new Shape(__call('vg_group', { ids: this._ids() }).id); }
   Combine() { return new Shape(__call('vg_combine', { ids: this._ids() }).id); }
   UngroupAll() { this._ids().forEach(id => __call('vg_ungroup', { id: id, all: true })); }
@@ -1112,7 +1126,8 @@ class Layer {
   Import(FileName) { return new Shape(__call('import_bitmap', { layer: this.id, path: String(FileName) }).id); }
   ImportBitmap(FileName) { return this.Import(FileName); }
   CreateBitmap(FileName) { return this.Import(FileName); }
-  Paste() { throw new Error('Paste is not available to macros'); }
+  Paste() { return new ShapeRange(__call('vg_paste', { layer: this.id }).ids); }
+  PasteEx() { return this.Paste(); }
 }
 class Layers {
   constructor(page) { this.page = page; }
@@ -1151,6 +1166,16 @@ class Page {
   set SizeHeight(v) { __call('set_page_size', { page: this.id, w: this._p.w, h: __mm(v) }); }
   SetSize(Width, Height) { __call('set_page_size', { page: this.id, w: __mm(Width), h: __mm(Height) }); }
   GetSize() { return [this.SizeWidth, this.SizeHeight]; }
+  // The paper by name ("A4", "Letter"), "" for a size of its own; set,
+  // the page takes that paper's size in its orientation (#1255).
+  get Paper() { return this._p.paper || ''; }
+  set Paper(name) {
+    const s = __call('vg_paper_size', { name: String(name) });
+    if (s.w === undefined) throw new Error('No paper is called ' + name);
+    const p = this._p;
+    const land = p.w > p.h;
+    __call('set_page_size', { page: this.id, w: land ? s.h : s.w, h: land ? s.w : s.h });
+  }
   get Orientation() { const p = this._p; return p.w > p.h ? cdrLandscape : cdrPortrait; }
   set Orientation(v) {
     const p = this._p;
@@ -1185,6 +1210,9 @@ class ExportFilter {
   ShowDialog() { return true; }
   Reset() { }
 }
+// The page class under a second name, for methods whose argument is
+// named Page as the macros' named arguments need (#2165).
+const __PageClass = Page;
 class Document {
   get _d() { return __call('vg_doc', {}); }
   get Name() { const d = this._d; return d.file ? d.file.split(/[\\/]/).pop() : d.title; }
@@ -1222,8 +1250,19 @@ class Document {
   InsertPages(NumberOfPages, BeforePage, Page) {
     const at = (Page || 1) - (BeforePage ? 1 : 0);
     const ids = __call('vg_insert_pages', { count: NumberOfPages || 1, at: Math.max(0, at) }).ids;
-    return new Page(ids[0]);
+    return new __PageClass(ids[0]);
   }
+  // InsertPages with the new pages' size (#2165).
+  InsertPagesEx(NumberOfPages, BeforePage, Page, Width, Height) {
+    const at = (Page || 1) - (BeforePage ? 1 : 0);
+    const ids = __call('vg_insert_pages', { count: NumberOfPages || 1, at: Math.max(0, at) }).ids;
+    for (const id of ids) __call('set_page_size', { page: id, w: __mm(Width), h: __mm(Height) });
+    return new __PageClass(ids[0]);
+  }
+  // Undo logging of shapes a macro made itself: they are already part
+  // of the macro's one undo step (#2165).
+  LogCreateShapeRange(Range) { return Range; }
+  LogCreateShape(Shape) { return Shape; }
   CreateCurve() { return new Curve(); }
   CreateShapeRangeFromArray(...shapes) { return new ShapeRange(shapes.flatMap(__ids)); }
   Save() { const f = this._d.file; if (!f) throw new Error('The drawing has no file yet: use SaveAs'); __call('vg_save', { path: f }); }
@@ -1263,6 +1302,30 @@ class __Window {
   Refresh() { }
   Activate() { }
 }
+const __dashes = [[], [4, 2], [1, 1], [6, 2, 1, 2]];
+function __styleOf(i) {
+  const d = __dashes[Number(i) || 0];
+  if (d === undefined) throw new Error('The index is out of range: ' + i);
+  return { _dash: d, Index: Number(i) || 0, DashCount: d.length / 2, get Enhanced() { return false; } };
+}
+const __outlineStyles = Object.assign(function (Index) { return __styleOf(Index); },
+  { get Count() { return __dashes.length; }, Item: (Index) => __styleOf(Index) });
+const __arrowHeads = Object.assign(function (Index) { return null; },
+  { get Count() { return 1; }, Item: (Index) => null });
+// Application.FontList: a collection of family names, from 1, that
+// For Each walks.
+function __fontList() {
+  const names = __call('vg_fonts', {}).families;
+  const list = function (Index) { return list.Item(Index); };
+  list.Count = names.length;
+  list.Item = function (Index) {
+    const i = Number(Index);
+    if (!(i >= 1 && i <= names.length)) throw new Error('The index is out of range: ' + Index);
+    return names[i - 1];
+  };
+  list[Symbol.iterator] = function () { return names[Symbol.iterator](); };
+  return list;
+}
 const Application = {
   get ActiveDocument() { return new Document(); },
   get ActivePage() { return new Document().ActivePage; },
@@ -1270,7 +1333,11 @@ const Application = {
   get ActiveSelection() { return new SelectionShape(); },
   get ActiveSelectionRange() { return new ShapeRange(__call('selection', {}).ids); },
   get ActiveShape() { return new Document().ActiveShape; },
+  // The layer new objects go on; there is no virtual layer apart (#2165).
+  get ActiveVirtualLayer() { return new Document().ActiveLayer; },
   get ActiveWindow() { return new __Window(); },
+  // The installed font families, by name (#2165).
+  get FontList() { return __fontList(); },
   get Documents() { return new __Documents(); },
   get Version() { return '27.0'; },
   get VersionMajor() { return 27; },
@@ -1288,6 +1355,11 @@ const Application = {
   CreateGrayColor(GrayValue) { const c = new Color(); c.GrayAssign(GrayValue); return c; },
   CreateHSBColor(Hue, Saturation, Brightness) { const c = new Color(); c.HSBAssign(Hue, Saturation, Brightness); return c; },
   CreateShapeRange() { return new ShapeRange([]); },
+  // The outline styles by number, 0 the solid line, then the dashes the
+  // Outline Pen dialog offers, in outline widths (#1255).
+  get OutlineStyles() { return __outlineStyles; },
+  // Arrowheads by number; 0 (the only one kept) is none.
+  get ArrowHeads() { return __arrowHeads; },
   CreateCurve(Document) { return new Curve(); },
   CreateDocument() { throw new Error('A macro works on the active drawing only'); },
   OpenDocument(FileName) { throw new Error('A macro works on the active drawing only'); },
@@ -1406,7 +1478,6 @@ __def(Page, 'Guides', function () {
 __def(Layer, 'IsGuidesLayer', function () { return false; });
 __def(Layer, 'IsGridLayer', function () { return false; });
 __def(Layer, 'IsDesktopLayer', function () { return false; });
-Layer.prototype.Paste = function () { return __no('Layer.Paste', 'the clipboard is not open to macros'); };
 Layer.prototype.CreateGuide = function (x1, y1, x2, y2) {
   const ax = __mm(x1), ay = __mm(y1), bx = __mm(x2), by = __mm(y2);
   const angle = Math.atan2(by - ay, bx - ax) * 180 / Math.PI;

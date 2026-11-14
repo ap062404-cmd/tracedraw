@@ -23,10 +23,12 @@ comando ao lado dele, e você pode acrescentar os seus; veja
 | <kbd>Ctrl+Shift+E</kbd> | exportar mostrando as opções |
 | <kbd>Ctrl+F4</kbd>, <kbd>Alt+F4</kbd> | fechar o desenho, sair |
 | <kbd>Ctrl+Z</kbd>, <kbd>Ctrl+Shift+Z</kbd>, <kbd>Ctrl+R</kbd> | desfazer, refazer, repetir |
+| <kbd>Alt+Backspace</kbd> | desfazer, como <kbd>Ctrl+Z</kbd> |
 | <kbd>Ctrl+X</kbd>, <kbd>Ctrl+C</kbd>, <kbd>Ctrl+V</kbd>, <kbd>Ctrl+Shift+V</kbd> | recortar, copiar, colar, colar na vista |
 | <kbd>Ctrl+D</kbd>, <kbd>Ctrl+Shift+D</kbd> | duplicar, painel Passo e repetição |
 | <kbd>+</kbd> | duplicar a seleção no lugar |
 | <kbd>Ctrl+A</kbd>, <kbd>Delete</kbd> | selecionar tudo, excluir |
+| <kbd>Ctrl+Shift+I</kbd> | inverter a seleção |
 | <kbd>Ctrl+0</kbd> a <kbd>Ctrl+9</kbd>, <kbd>0</kbd> a <kbd>9</kbd>, <kbd>Alt+0</kbd> a <kbd>Alt+9</kbd> | guardar, selecionar (duas vezes: dar zoom) e acrescentar a grupos de seleção |
 | <kbd>Ctrl+F</kbd>, <kbd>Ctrl+J</kbd>, <kbd>Ctrl+W</kbd> | painel Localizar e substituir, opções, atualizar a janela |
 
@@ -39,6 +41,7 @@ comando ao lado dele, e você pode acrescentar os seus; veja
 | <kbd>Ctrl++</kbd>, <kbd>Ctrl+-</kbd> | aproximar e afastar um passo |
 | <kbd>N</kbd> (mantida) | o Navegador: mova o ponteiro sobre a miniatura da página para ir até lá ([[menu.view > menu.view.navigator]]) |
 | <kbd>Alt+Shift+R</kbd> | ligar e desligar as réguas |
+| <kbd>Ctrl+;</kbd>, <kbd>Ctrl+'</kbd> | mostrar e ocultar as linhas-guia e a grade do documento |
 | <kbd>Alt+Q</kbd>, <kbd>Alt+Z</kbd>, <kbd>Ctrl+Y</kbd> | desligar o encaixe, encaixar em objetos, encaixar na grade |
 | <kbd>Alt+Shift+A</kbd>, <kbd>Alt+Shift+D</kbd> | guias de alinhamento, guias dinâmicas |
 | <kbd>PgUp</kbd>, <kbd>PgDn</kbd> | página anterior e próxima |
@@ -53,6 +56,7 @@ comando ao lado dele, e você pode acrescentar os seus; veja
 | <kbd>Ctrl+Home</kbd>, <kbd>Ctrl+End</kbd> | para a frente e para trás da página |
 | <kbd>Shift+PgUp</kbd>, <kbd>Shift+PgDn</kbd> | para a frente e para trás da camada |
 | <kbd>Ctrl+PgUp</kbd>, <kbd>Ctrl+PgDn</kbd> | um para a frente, um para trás |
+| <kbd>Ctrl+]</kbd>, <kbd>Ctrl+[</kbd>, <kbd>Ctrl+Shift+]</kbd>, <kbd>Ctrl+Shift+[</kbd> | também um para a frente, um para trás, para a frente e para trás da camada |
 | <kbd>L</kbd>, <kbd>R</kbd>, <kbd>T</kbd>, <kbd>B</kbd>, <kbd>E</kbd>, <kbd>C</kbd>, <kbd>P</kbd> | com uma seleção: alinhar à esquerda, à direita, no topo, na base, centros na horizontal, centros na vertical, centrar na página |
 | Teclas de seta, com <kbd>Shift</kbd> ou <kbd>Ctrl</kbd> | deslocar, super deslocamento, micro deslocamento |
 | <kbd>Alt+S</kbd>, <kbd>Alt+E</kbd>, <kbd>Alt+Shift+E</kbd>, <kbd>Alt+Shift+S</kbd>, <kbd>Alt+X</kbd> | criar, editar, concluir, remover a simetria, quebrar o vínculo dela |

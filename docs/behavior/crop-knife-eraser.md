@@ -50,11 +50,14 @@
   Clear Crop Area.
 - Bitmaps > Crop to Frame (with a clip frame holding one picture alone
   selected, as the Crop tool and Crop Bitmap make): the picture's pixels
-  outside the frame's box are cut away. A frame that is a rectangle
-  along the picture's sides then lets the picture go: a free picture in
-  the clip frame's place, where it showed, with the transparency and
-  opacity the picture inside kept; any other frame stays, holding the
-  smaller picture. One undo step (#1913,
+  outside the frame's box are cut away and the frame lets the picture
+  go: a free picture in the clip frame's place, where it showed, with
+  the transparency and opacity the picture inside kept. A frame that is
+  not a rectangle along the picture's sides (a piece of a Knife cut, an
+  oval, a turned frame) makes the pixels outside its outline
+  see-through first, a pixel partly inside keeping that share of its
+  opacity (`tracedraw_io::picture_crop::mask_picture`). The frame's own
+  fill and outline go with the frame. One undo step (#1913,
   `crop_tool::tests::crop_to_frame_frees_the_picture`).
 - Not done: turning the crop area.
 

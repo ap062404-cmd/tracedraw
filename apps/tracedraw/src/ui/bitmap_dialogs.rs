@@ -401,7 +401,7 @@ pub fn paletted_dialog(app: &mut App, ctx: &Context, s: &mut PalettedSettings, c
         });
         if super::dialogs::ok_cancel(ui, close) {
             let settings = s.clone();
-            app.apply_to_bitmaps("Paletted", move |img, _| paletted(img, &settings));
+            app.paletted_bitmaps(&settings);
         }
     });
 }

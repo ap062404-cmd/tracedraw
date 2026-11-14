@@ -1,6 +1,7 @@
 # Contributors
 
-TraceDraw is written by its maintainers, with Claude Code as co-author (see the
+TraceDraw was created by Ighor Toth, its founder and lead maintainer, and
+is written by its maintainers with Claude Code as co-author (see the
 README). These people contributed code that is part of TraceDraw. Thank
 you!
 

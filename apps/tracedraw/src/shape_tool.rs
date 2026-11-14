@@ -42,6 +42,23 @@ pub(crate) fn bitmap_corners(s: &tracedraw_core::Shape) -> Option<[Point; 4]> {
     ])
 }
 
+/// Whether the Shape tool shows only the frame of `s`: an object drawn
+/// through an envelope or a perspective is not where its own nodes are,
+/// so the nodes, their outline in the node colour, the corner widgets
+/// and a picture's corners would stand as a second, unbent copy beside
+/// what is drawn (#2213). The frame is edited instead (`envelope_edit`,
+/// the perspective's corners); the nodes are back once the effect is
+/// cleared, switched off or made part of the curve (Convert to Curves).
+pub(crate) fn frame_only(s: &tracedraw_core::Shape) -> bool {
+    s.effects.iter().any(|e| {
+        matches!(
+            e,
+            tracedraw_core::live::Effect::Envelope { .. }
+                | tracedraw_core::live::Effect::Perspective { .. }
+        )
+    })
+}
+
 /// The objects a double click with the Shape tool turns into curves:
 /// rectangles, ellipses and polygons. A picture, text, group or clip frame
 /// would lose what it is (#60).
@@ -173,10 +190,12 @@ impl App {
     /// The selected objects as the Shape tool sees them: a clip frame
     /// gives way to its frame, on the page (an old file whose frame shares
     /// the clip frame's id shows the clip frame itself, which has no
-    /// nodes).
+    /// nodes). An object drawn through an envelope or a perspective is
+    /// left out: it shows its frame only (see [`frame_only`]).
     pub(crate) fn shape_tool_shapes(&self) -> Vec<tracedraw_core::Shape> {
         self.selected_shapes()
             .into_iter()
+            .filter(|s| !frame_only(s))
             .map(|s| match &s.kind {
                 ShapeKind::ClipFrame { frame, .. } if frame.id != s.id => {
                     self.doc().shape_on_page(frame.id).unwrap_or(s)
@@ -191,6 +210,9 @@ impl App {
     fn bitmap_corner_at(&self, p: Point) -> Option<(ShapeId, usize)> {
         let tol = self.settings.nodes.pick_px() / self.view.zoom as f64;
         self.selected_shapes().iter().find_map(|s| {
+            if frame_only(s) {
+                return None;
+            }
             bitmap_corners(s)?
                 .iter()
                 .position(|c| (*c - p).hypot() <= tol)
@@ -234,12 +256,39 @@ impl App {
         Some(frame_id)
     }
 
-    /// The node targets of the selection (see [`Self::node_target`]).
-    fn node_targets(&self) -> Vec<ShapeId> {
+    /// The node targets of the selection (see [`Self::node_target`]),
+    /// without the objects that show their frame only ([`frame_only`]).
+    pub(crate) fn node_targets(&self) -> Vec<ShapeId> {
         self.selection
             .iter()
+            .filter(|id| !self.doc().find_shape(**id).is_some_and(frame_only))
             .map(|id| self.node_target(*id))
             .collect()
+    }
+
+    /// Nodes chosen on an object that has since taken an envelope or a
+    /// perspective are let go: they no longer show, and a key (Delete,
+    /// an arrow) must not change what cannot be seen.
+    pub(crate) fn drop_hidden_node_choices(&mut self) {
+        if self.node_selection.is_empty() && self.segment_spot.is_none() {
+            return;
+        }
+        let hidden: Vec<ShapeId> = self
+            .selection
+            .iter()
+            .filter(|id| self.doc().find_shape(**id).is_some_and(frame_only))
+            .map(|id| self.node_target(*id))
+            .collect();
+        if hidden.is_empty() {
+            return;
+        }
+        self.node_selection.retain(|(id, _)| !hidden.contains(id));
+        if self
+            .segment_spot
+            .is_some_and(|(id, _, _)| hidden.contains(&id))
+        {
+            self.segment_spot = None;
+        }
     }
 
     fn set_path(&mut self, id: ShapeId, path: BezPath, closed: bool, label: &'static str) {
@@ -385,6 +434,7 @@ impl App {
     }
 
     pub fn shape_tool_input(&mut self, response: &Response, p: Point, mods: Modifiers) {
+        self.drop_hidden_node_choices();
         if response.double_clicked_by(PointerButton::Primary) {
             // A character's node: a second click there within the double
             // click time and distance chooses it as a click does.
@@ -425,6 +475,9 @@ impl App {
                 }
                 return;
             }
+            // A polygon or star turns into a curve at the edge clicked, so
+            // the node goes in there (#2451).
+            self.polygon_edge_to_curve(p);
             // Double-click a segment of a selected curve adds a node; on a
             // non-curve object, convert it to curves.
             if let Some((id, index, t)) = self.segment_at(p) {
@@ -624,6 +677,12 @@ impl App {
                     return;
                 }
             }
+            // An edge of a selected polygon or star bends once dragged: it
+            // becomes a curve then (#2451).
+            if let Some(shape) = self.polygon_edge_at(p) {
+                self.drag = Drag::PolygonEdge { shape, from: p };
+                return;
+            }
             // A marquee over the selected objects' nodes. It keeps the
             // selection, also when it starts over another object (the one
             // behind the curve, or the group holding it), so the curve
@@ -635,7 +694,11 @@ impl App {
                     self.select(vec![id]);
                 }
             }
-            self.node_lasso_keeps = false;
+            // Shift keeps the nodes and characters chosen already and adds
+            // the ones inside, as Shift+click does; the marquee used to
+            // replace them, so the first line's characters let go when a
+            // Shift+marquee took the second line's (#2331).
+            self.node_lasso_keeps = mods.shift;
             self.drag = if self.node_lasso {
                 Drag::NodeLasso { points: vec![p] }
             } else {
@@ -687,6 +750,27 @@ impl App {
                     };
                 }
                 Drag::NodeMove { .. } => self.node_move_to(p, mods),
+                Drag::PolygonEdge { from, .. } => {
+                    // The first move: curve first, then the edge bends.
+                    if (p - from).hypot() * self.view.zoom as f64 >= 2.0 {
+                        self.drag = Drag::None;
+                        if self.polygon_edge_to_curve(from) {
+                            if let Some((shape, index, t)) = self.segment_at(from) {
+                                if let Some((path, closed, _)) = self.path_of(shape) {
+                                    self.drag = Drag::SegmentBend {
+                                        shape,
+                                        path,
+                                        closed,
+                                        index,
+                                        t,
+                                        from,
+                                        begun: false,
+                                    };
+                                }
+                            }
+                        }
+                    }
+                }
                 Drag::CornerWidget(d) => self.corner_drag_to(*d, p),
                 Drag::NodeTransform {
                     handle,
@@ -956,10 +1040,24 @@ impl App {
 
     /// Finish a node marquee: select the nodes inside the rectangle.
     pub fn finish_node_marquee(&mut self, start: Point, current: Point) {
+        let keeps = std::mem::take(&mut self.node_lasso_keeps);
         let r = Rect::from_points(start, current);
         if r.width() < 0.05 && r.height() < 0.05 {
             return;
         }
+        // The Mesh Fill tool's box chooses mesh nodes (discussion #2387);
+        // the Shape tool's chooses those of a selected mesh too (#2506).
+        if self.tool == crate::tools::Tool::MeshFill {
+            self.choose_mesh_nodes_in(r, keeps);
+            return;
+        }
+        if self.selected_mesh().is_some() {
+            self.choose_mesh_nodes_in(r, keeps);
+        }
+        let before = (
+            self.node_selection.clone(),
+            self.rect_corners_selected.clone(),
+        );
         let mut sel = Vec::new();
         for id in &self.node_targets() {
             let Some((path, _, t)) = self.path_of(*id) else {
@@ -980,6 +1078,31 @@ impl App {
         self.segment_spot = None;
         // Character nodes of selected texts too.
         self.choose_chars_in(|q| r.contains(q));
+        if keeps {
+            self.keep_earlier_choice(before);
+        }
+    }
+
+    /// Shift+marquee (rectangular or freehand): the nodes, corners and
+    /// characters chosen before the marquee (`before`) stay chosen, the
+    /// ones the marquee chose join them (#1341, #2331).
+    pub(crate) fn keep_earlier_choice(
+        &mut self,
+        before: (Vec<(ShapeId, usize)>, Vec<(ShapeId, usize)>),
+    ) {
+        let (mut nodes, mut corners) = before;
+        for k in std::mem::take(&mut self.node_selection) {
+            if !nodes.contains(&k) {
+                nodes.push(k);
+            }
+        }
+        for k in std::mem::take(&mut self.rect_corners_selected) {
+            if !corners.contains(&k) {
+                corners.push(k);
+            }
+        }
+        self.node_selection = nodes;
+        self.rect_corners_selected = corners;
     }
 
     /// The control points of the selected B-splines (page space) for which
@@ -1027,6 +1150,54 @@ impl App {
             }
         }
         best.map(|(id, i, t, _)| (id, i, t))
+    }
+
+    /// The selected polygon or star whose outline lies within the pick
+    /// distance of `p` (an edge, as a curve's segment is found). Nodes
+    /// are looked for first by the callers.
+    fn polygon_edge_at(&self, p: Point) -> Option<ShapeId> {
+        let tol = (self.settings.nodes.pick_px() + 1.0) / self.view.zoom as f64;
+        let mut ids = self.selection.clone();
+        ids.dedup();
+        let mut symbols_free_id = || ShapeId(0);
+        for id in ids {
+            let Some(s) = self.doc().find_shape(id) else {
+                continue;
+            };
+            if frame_only(s) || !matches!(s.kind, ShapeKind::Polygon { .. }) {
+                continue;
+            }
+            let Some(parent) = self.doc().parent_transform(id) else {
+                continue;
+            };
+            let Some(ShapeKind::Path { path, .. }) = s.curves_kind(&[], &mut symbols_free_id)
+            else {
+                continue;
+            };
+            let reach = crate::interaction::outline_reach(s, parent * s.transform);
+            if let Some((_, _, d)) = nodes::nearest_segment(&((parent * s.transform) * path), p) {
+                if d <= tol + reach {
+                    return Some(id);
+                }
+            }
+        }
+        None
+    }
+
+    /// Turns the polygon or star whose edge lies at `p` into a curve (one
+    /// undo step, outline warps staying live), so its edge can take a
+    /// node or bend like a curve's segment (#2451). `true` when it did.
+    fn polygon_edge_to_curve(&mut self, p: Point) -> bool {
+        let Some(id) = self.polygon_edge_at(p) else {
+            return false;
+        };
+        let Some(s) = self.doc().find_shape(id).cloned() else {
+            return false;
+        };
+        self.convert_shapes_to_curves(vec![s], false);
+        self.doc()
+            .find_shape(id)
+            .is_some_and(|s| matches!(s.kind, ShapeKind::Path { .. }))
     }
 
     // ----- property bar actions ---------------------------------------------
@@ -1388,8 +1559,25 @@ impl App {
                 .shape(id)
                 .map(|(_, s)| s.node_types.clone())
                 .unwrap_or_default();
+            // Highest index first: a closing line made a curve puts an
+            // element in before its close (#1618), which moves only the
+            // elements after it, so the nodes still to do keep their
+            // indices; the types and chosen nodes past it move up by one.
+            let mut idxs = idxs;
+            idxs.sort_unstable_by(|a, b| b.cmp(a));
+            idxs.dedup();
             for i in idxs {
+                let before = path.clone();
                 path = nodes::set_node_type(&path, i, ty);
+                if let Some(at) = nodes::curve_put_in_before_close(&before, &path) {
+                    let up = |k: usize| if k >= at { k + 1 } else { k };
+                    types = types.into_iter().map(|(k, t)| (up(k), t)).collect();
+                    for (sid, k) in self.node_selection.iter_mut() {
+                        if *sid == id {
+                            *k = up(*k);
+                        }
+                    }
+                }
                 types.insert(i, ty);
             }
             cmds.push(Command::SetShapeKind {
@@ -1486,7 +1674,28 @@ impl App {
     }
 
     pub fn break_selected_nodes(&mut self) {
-        self.for_each_selected_node("Break Curve", nodes::break_at);
+        // All of a curve's chosen nodes at once: opening a closed subpath
+        // turns it to start at the break, which moves the other nodes.
+        let mut by_shape: std::collections::BTreeMap<ShapeId, Vec<usize>> = Default::default();
+        for (id, i) in self.node_selection.clone() {
+            by_shape.entry(id).or_default().push(i);
+        }
+        let cmds: Vec<Command> = by_shape
+            .into_iter()
+            .filter_map(|(id, idxs)| {
+                let (path, closed, _) = self.path_of(id)?;
+                Some(Command::SetShapeKind {
+                    shape: id,
+                    kind: ShapeKind::Path {
+                        path: nodes::break_nodes(&path, &idxs),
+                        closed,
+                    },
+                })
+            })
+            .collect();
+        if !cmds.is_empty() {
+            let _ = self.engine.run_batch("Break Curve", &cmds);
+        }
         self.node_selection.clear();
     }
 
@@ -2302,6 +2511,58 @@ mod bitmap_node_tests {
         app.node_selection = vec![(id, z)];
         app.selected_segments_to_curve();
         assert_eq!(curves(&path_of(&app)), 1);
+    }
+
+    /// Smooth on every node of two rectangles converted to curves and
+    /// combined rounds every corner on both sides, the start nodes and the
+    /// nodes before them too, where the closing lines meet them; the types
+    /// kept and the chosen nodes stay on the nodes although the closing
+    /// lines made curves move the second rectangle's elements (#1618).
+    #[test]
+    fn smooth_rounds_both_sides_where_the_closing_lines_meet() {
+        let mut app = App::headless();
+        let mut ids = Vec::new();
+        for x in [0.0, 60.0] {
+            ids.push(
+                app.new_shape(ShapeKind::Rect {
+                    rect: Rect::new(x, 0.0, x + 40.0, 40.0),
+                    radius: 0.0,
+                    corners: None,
+                })
+                .expect("rect"),
+            );
+        }
+        app.select(ids);
+        app.convert_to_curves();
+        app.combine();
+        let id = app.selection[0];
+        let path_of = |app: &App| match &app.doc().find_shape(id).expect("curve").kind {
+            ShapeKind::Path { path, .. } => path.clone(),
+            other => panic!("not a curve: {other:?}"),
+        };
+        let before = nodes::nodes(&path_of(&app));
+        assert_eq!(before.len(), 8);
+        app.node_selection = before.iter().map(|n| (id, n.index)).collect();
+        app.set_selected_node_type(NodeType::Smooth);
+        let path = path_of(&app);
+        let after = nodes::nodes(&path);
+        assert_eq!(after.len(), 8, "{path:?}");
+        for (a, b) in before.iter().zip(&after) {
+            assert!((a.pos - b.pos).hypot() < 1e-9, "{path:?}");
+            assert!(
+                b.ctrl_in.is_some() && b.ctrl_out.is_some(),
+                "node {} kept a straight side: {path:?}",
+                b.index
+            );
+            assert_ne!(nodes::node_type(&path, b.index), NodeType::Cusp);
+        }
+        let indices: Vec<usize> = after.iter().map(|n| n.index).collect();
+        let s = app.doc().find_shape(id).expect("curve");
+        assert_eq!(s.node_types.keys().copied().collect::<Vec<_>>(), indices);
+        assert!(s.node_types.values().all(|t| *t == NodeType::Smooth));
+        let mut chosen: Vec<usize> = app.node_selection.iter().map(|(_, i)| *i).collect();
+        chosen.sort_unstable();
+        assert_eq!(chosen, indices);
     }
 
     /// #1491: a picture with a gradient transparency, cut down by moving

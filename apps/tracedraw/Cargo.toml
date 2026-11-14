@@ -43,10 +43,15 @@ rqrr = "0.11"
 csv = "1"
 eframe.workspace = true
 egui.workspace = true
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "gif", "webp", "tiff"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "gif", "ico", "webp", "tiff"] }
 # Reading CMYK TIFF files with their inks (Edit Bitmap, #1834); the same
 # version the image crate reads TIFF with.
 tiff = "0.11"
+# Reading the four channels of a CMYK JPEG as they are stored, to show
+# them through the colour management and keep them as inks (#2163); the
+# same versions the image crate reads JPEG with.
+zune-jpeg = "0.5"
+zune-core = { version = "0.5", default-features = false }
 log.workspace = true
 env_logger.workspace = true
 flate2 = "1"
@@ -84,6 +89,10 @@ arboard = { version = "3", default-features = false, features = ["wayland-data-c
 # clipboard library already uses.
 [target.'cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))'.dependencies]
 x11rb = "0.13"
+# A copy offered on a Wayland clipboard as SVG, picture and text (#2288,
+# wayland_copy.rs): the Wayland clipboard library the clipboard library
+# already uses.
+wl-clipboard-rs = "0.9"
 
 # The Android app (docs/behavior/android.md): the system loads the library
 # into the app's activity, eframe drives egui through winit's Android
@@ -103,7 +112,7 @@ winit = { version = "0.30", default-features = false }
 # system drag sends no pointer moves (#1142).
 [target.'cfg(windows)'.dependencies]
 # The spell checker of Windows (COM, #1405).
-windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Com"] }
+windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Com", "Win32_UI_Input_KeyboardAndMouse"] }
 # The window's message hook: characters input methods send that the
 # windowing layer drops (#1151). The same winit eframe uses.
 winit = { version = "0.30", default-features = false }

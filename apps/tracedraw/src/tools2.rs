@@ -1463,7 +1463,7 @@ pub fn outline_object_path(s: &Shape) -> Option<BezPath> {
         tracedraw_core::shaping::outline_band(&pp, st, 1.0)
     } else {
         Some(tracedraw_core::shaping::variable_band_within(
-            &pp, st.width, &st.widths, 0.005,
+            &pp, st.width, &st.widths, 0.005, st.cap,
         ))
     };
     if let Some(band) = band {

@@ -2820,67 +2820,109 @@ pub fn width_around(base: f64, nodes: &[WidthNode], t: f64, closed: bool) -> (f6
     }
     let half = (base / 2.0).max(0.0);
     let t = t.clamp(0.0, 1.0);
-    let mut prev = WidthNode {
-        at: 0.0,
-        left: half,
-        right: half,
-    };
-    let mut next = WidthNode {
-        at: 1.0,
-        left: half,
-        right: half,
-    };
-    let mut found_prev = false;
-    let mut found_next = false;
-    let mut first = None;
-    let mut last = None;
-    for n in nodes {
-        let n = WidthNode {
+    // The knots the reach runs through, in path order: the nodes, and on
+    // an open path its ends at half the base width unless a node sits
+    // there; round a loop the nodes either side of the seam stand in
+    // for the ones across it.
+    let mut knots: Vec<WidthNode> = nodes
+        .iter()
+        .map(|n| WidthNode {
             at: n.at.clamp(0.0, 1.0),
             left: n.left.max(0.0),
             right: n.right.max(0.0),
-        };
-        if first.is_none_or(|f: WidthNode| n.at < f.at) {
-            first = Some(n);
-        }
-        if last.is_none_or(|l: WidthNode| n.at >= l.at) {
-            last = Some(n);
-        }
-        if n.at <= t {
-            prev = n;
-            found_prev = true;
-        } else if !found_next {
-            next = n;
-            found_next = true;
-        }
-    }
+        })
+        .collect();
+    knots.sort_by(|a, b| a.at.total_cmp(&b.at));
+    let end = |at: f64| WidthNode {
+        at,
+        left: half,
+        right: half,
+    };
     if closed {
-        // Across the seam: before the first node the last one is the
-        // neighbour behind (a turn back), after the last node the first
-        // one is the neighbour ahead (a turn on).
-        if let (false, Some(l)) = (found_prev, last) {
-            prev = WidthNode {
-                at: l.at - 1.0,
-                ..l
-            };
+        let count = knots.len();
+        if count == 0 {
+            return (half, half);
         }
-        if let (false, Some(f)) = (found_next, first) {
-            next = WidthNode {
-                at: f.at + 1.0,
-                ..f
-            };
+        let behind: Vec<WidthNode> = knots
+            .iter()
+            .rev()
+            .take(2)
+            .rev()
+            .map(|k| WidthNode {
+                at: k.at - 1.0,
+                ..*k
+            })
+            .collect();
+        let ahead: Vec<WidthNode> = knots
+            .iter()
+            .take(2)
+            .map(|k| WidthNode {
+                at: k.at + 1.0,
+                ..*k
+            })
+            .collect();
+        knots.splice(0..0, behind);
+        knots.extend(ahead);
+    } else {
+        if knots.first().is_none_or(|k| k.at > 0.0) {
+            knots.insert(0, end(0.0));
+        }
+        if knots.last().is_none_or(|k| k.at < 1.0) {
+            knots.push(end(1.0));
         }
     }
-    let span = next.at - prev.at;
-    if span <= 1e-12 {
-        return (prev.left, prev.right);
+    // The span `t` falls in: from the last knot at or before it.
+    let i = knots
+        .iter()
+        .rposition(|k| k.at <= t)
+        .unwrap_or(0)
+        .min(knots.len().saturating_sub(2));
+    let (Some(&a), Some(&b)) = (knots.get(i), knots.get(i + 1)) else {
+        return knots.first().map_or((half, half), |k| (k.left, k.right));
+    };
+    let span = b.at - a.at;
+    if span <= 1e-12 || t <= a.at {
+        return (a.left, a.right);
     }
-    let u = ((t - prev.at) / span).clamp(0.0, 1.0);
-    let s = u * u * (3.0 - 2.0 * u);
-    (
-        prev.left + (next.left - prev.left) * s,
-        prev.right + (next.right - prev.right) * s,
-    )
+    // A monotone cubic through the knots (Fritsch and Carlson): the
+    // reach climbs or falls through a run of nodes in one smooth sweep
+    // and never overshoots them. Each span eased on its own (flat at
+    // both its nodes) made a run of nodes, each a little wider than the
+    // last, into a staircase: the more nodes were added to even an
+    // edge, the more bumps it had (#2547). A node wider or narrower
+    // than both its neighbours, and the ends of an open path, stay flat
+    // there, so with one or two nodes the reach eases as before.
+    let slope = |k: usize, side: fn(&WidthNode) -> f64| -> f64 {
+        let (Some(p), Some(c), Some(n)) = (
+            k.checked_sub(1).and_then(|j| knots.get(j)),
+            knots.get(k),
+            knots.get(k + 1),
+        ) else {
+            return 0.0;
+        };
+        let (h0, h1) = (c.at - p.at, n.at - c.at);
+        if h0 <= 1e-12 || h1 <= 1e-12 {
+            return 0.0;
+        }
+        let (d0, d1) = ((side(c) - side(p)) / h0, (side(n) - side(c)) / h1);
+        if d0 * d1 <= 0.0 {
+            return 0.0;
+        }
+        let (w0, w1) = (2.0 * h1 + h0, h1 + 2.0 * h0);
+        (w0 + w1) / (w0 / d0 + w1 / d1)
+    };
+    let u = ((t - a.at) / span).clamp(0.0, 1.0);
+    let (h00, h10, h01, h11) = (
+        (1.0 + 2.0 * u) * (1.0 - u) * (1.0 - u),
+        u * (1.0 - u) * (1.0 - u),
+        u * u * (3.0 - 2.0 * u),
+        u * u * (u - 1.0),
+    );
+    let side = |f: fn(&WidthNode) -> f64| {
+        let v = f(&a) * h00 + slope(i, f) * span * h10 + f(&b) * h01 + slope(i + 1, f) * span * h11;
+        v.max(0.0)
+    };
+    (side(|k| k.left), side(|k| k.right))
 }
 
 fn one() -> f64 {
@@ -2997,6 +3039,54 @@ impl Stroke {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A run of width nodes, each wider than the last, widens in one
+    /// smooth sweep: the reach keeps climbing through every node instead
+    /// of levelling off at each, which made a staircase of bumps along
+    /// the edge the more nodes were added (#2547). A lone node still
+    /// eases in and out as before, and the reach never overshoots.
+    #[test]
+    fn a_run_of_width_nodes_widens_in_one_sweep() {
+        let nodes: Vec<WidthNode> = [(0.2, 2.0), (0.4, 3.0), (0.6, 4.0), (0.8, 5.0)]
+            .into_iter()
+            .map(|(at, r)| WidthNode {
+                at,
+                left: r,
+                right: r,
+            })
+            .collect();
+        let left = |t: f64| width_at(2.0, &nodes, t).0;
+        // At every node in the run the reach still climbs (5 mm over
+        // the whole path, 0.6 of it): it levelled off there before.
+        for at in [0.4, 0.6] {
+            let slope = (left(at + 0.005) - left(at - 0.005)) / 0.01;
+            assert!(slope > 3.0, "flat at {at}: {slope}");
+        }
+        // Through the nodes, rising all the way, and never past them.
+        let mut last = left(0.2);
+        for k in 1..=60 {
+            let t = 0.2 + 0.6 * k as f64 / 60.0;
+            let w = left(t);
+            assert!(
+                w > last - 1e-12 && w <= 5.0 + 1e-12,
+                "{t}: {w} after {last}"
+            );
+            last = w;
+        }
+        for n in &nodes {
+            assert!((left(n.at) - n.left).abs() < 1e-12);
+        }
+        // The widest node: flat there, its reach held within a
+        // thousandth of a millimetre a thousandth of the path either side.
+        for t in [0.799, 0.801] {
+            assert!((left(t) - 5.0).abs() < 1e-3, "{t}: {}", left(t));
+        }
+        // A lone node: the same ease as before, half way to it at the
+        // quarter.
+        let one = [WidthNode::symmetric(0.5, 6.0)];
+        assert!((width_at(2.0, &one, 0.25).0 - 2.0).abs() < 1e-12);
+        assert!((width_at(2.0, &one, 0.125).0 - (1.0 + 2.0 * 0.15625)).abs() < 1e-12);
+    }
 
     /// #1322: on a closed loop the reach eases across the seam from the
     /// last node to the first, the same at `t` 0 and 1, and one node

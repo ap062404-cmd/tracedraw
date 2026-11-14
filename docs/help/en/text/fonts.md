@@ -17,6 +17,9 @@ The [[docker.fonts]] panel lists the font families.
   drawing is marked [[docker.embedded]].
 - Click a family to give it to the selected text, or to make it the font of
   new text.
+- Bold, italic and alignment given to a selected text change that text
+  only. To make them the default of new text, set them with nothing
+  selected.
 
 ## Font lists and the filter {#font-list}
 

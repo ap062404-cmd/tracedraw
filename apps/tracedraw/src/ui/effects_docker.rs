@@ -22,6 +22,7 @@ pub fn effect_key(e: &Effect) -> &'static str {
         Effect::Extrude { .. } => "effect.extrude",
         Effect::Bevel { .. } => "effect.bevel",
         Effect::BlockShadow { .. } => "effect.block_shadow",
+        Effect::InnerShadow { .. } => "effect.inner_shadow",
         Effect::Symmetry { .. } => "effect.symmetry",
         Effect::Lens(_) => "effect.lens",
         Effect::Transparency { .. } => "effect.transparency",

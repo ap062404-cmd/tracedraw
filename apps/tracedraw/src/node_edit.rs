@@ -524,6 +524,11 @@ impl App {
 
     /// Select the nodes of the selected curves inside a freehand marquee.
     pub fn finish_node_lasso(&mut self, poly: &[Point]) {
+        let keeps = std::mem::take(&mut self.node_lasso_keeps);
+        let before = (
+            self.node_selection.clone(),
+            self.rect_corners_selected.clone(),
+        );
         let mut sel = Vec::new();
         for id in self.selection.clone() {
             let Some((path, _, t)) = self.curve_of(id) else {
@@ -536,17 +541,15 @@ impl App {
             }
         }
         sel.extend(self.spline_points_where(|q| in_polygon(poly, q)));
-        // Alt+Shift: added to the nodes chosen already (#1341).
-        if std::mem::take(&mut self.node_lasso_keeps) {
-            let mut kept = std::mem::take(&mut self.node_selection);
-            kept.retain(|k| !sel.contains(k));
-            kept.extend(sel);
-            sel = kept;
-        }
         self.node_selection = sel;
         self.rect_corners_selected =
             crate::kind_nodes::corners_where(&self.shape_tool_shapes(), |q| in_polygon(poly, q));
         self.choose_chars_in(|q| in_polygon(poly, q));
+        // Shift: added to the nodes, corners and characters chosen
+        // already (#1341); the characters used to be replaced (#2331).
+        if keeps {
+            self.keep_earlier_choice(before);
+        }
     }
 
     /// The segments between selected nodes as new curves, styled like

@@ -292,6 +292,10 @@ pub struct Settings {
     /// The graphics card chosen by name; empty, the fastest one.
     #[serde(default)]
     pub gpu_adapter: String,
+    /// Options > General: blur large drop shadows shown on screen on the
+    /// graphics card (gpu_fx.rs); exports and printing stay on the CPU.
+    #[serde(default)]
+    pub gpu_effects: bool,
     /// The renderer that opened the window when the first choice could
     /// not ("software" or "gl"); cleared when the choice changes.
     #[serde(default)]
@@ -520,6 +524,10 @@ pub struct Settings {
     /// The font lists' fonts used last, newest first.
     #[serde(default)]
     pub recent_fonts: Vec<String>,
+    /// The font lists' filter choices show beside the list: left open,
+    /// they show again the next time a font list opens (#867).
+    #[serde(default)]
+    pub font_filter_open: bool,
     /// Options > Text > Fonts: the fonts used last shown at the top of
     /// the font lists, and how many (1 to 20).
     #[serde(default = "default_true")]
@@ -639,6 +647,10 @@ pub struct Settings {
     /// lines (else only the selected ones).
     #[serde(default = "default_true")]
     pub show_text_frames: bool,
+    /// The eyedroppers go back to sampling after each object they are
+    /// applied to ("Sample again after applying" on their bars, #2380).
+    #[serde(default)]
+    pub eyedropper_sample_after_apply: bool,
     /// Text fitted to a path: a drag off the path moves the text away
     /// from it in steps of `path_tick_mm` (tick snapping).
     #[serde(default)]
@@ -1029,7 +1041,10 @@ pub struct NodePrefs {
     pub secondary_rgb: [u8; 3],
     /// Unselected nodes are filled white (Ctrl+Shift+G).
     pub unselected_filled: bool,
-    /// An arrow at the start node shows the curve's direction.
+    /// Arrows at the first node of every subpath and the last node of
+    /// every open one show the curve's direction. On by default, as the
+    /// reference program shows it, so the parts of a broken curve show
+    /// which way a cutting plotter follows them (#2578).
     pub show_direction: bool,
     /// How near, in screen pixels, a press must land on a node or a
     /// control handle to take it (Shape tool, and the curve tools'
@@ -1064,7 +1079,7 @@ impl Default for NodePrefs {
             main_rgb: [0x00, 0x8C, 0xFF],
             secondary_rgb: [0xFF, 0x00, 0x00],
             unselected_filled: true,
-            show_direction: false,
+            show_direction: true,
             pick_distance: 6.0,
             object_pick_distance: 3.0,
             corner_widgets: true,
@@ -1982,6 +1997,7 @@ impl Default for Settings {
             show_splash: true,
             hardware_acceleration: true,
             gpu_adapter: String::new(),
+            gpu_effects: false,
             working_renderer: String::new(),
             system_title_bar: false,
             center_dialogs: true,
@@ -1999,6 +2015,7 @@ impl Default for Settings {
             shown_bars: None,
             dockers: None,
             recent_fonts: Vec::new(),
+            font_filter_open: false,
             show_recent_fonts: true,
             recent_font_count: default_recent_font_count(),
             properties_closed: Vec::new(),
@@ -2032,6 +2049,7 @@ impl Default for Settings {
             warnings: Default::default(),
             curves: Default::default(),
             show_text_frames: true,
+            eyedropper_sample_after_apply: false,
             path_tick_snap: false,
             path_tick_mm: default_path_tick(),
             screen_margins: crate::ui::screen_margins::ScreenMargins::default(),

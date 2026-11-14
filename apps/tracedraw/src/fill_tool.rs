@@ -16,7 +16,8 @@
 //! double click on the line adds one, on a node removes it, and a drag
 //! moves it between its neighbours. A bar across the line between two
 //! nodes is the midpoint slider of their blend. A click picks a node; the
-//! node bar under it edits its colour and transparency (see `node_bar`).
+//! node bar under it edits its colour and the object's transparency (see
+//! `node_bar`).
 
 use crate::app::App;
 use tracedraw_core::{
@@ -82,7 +83,10 @@ pub fn fountain_handles(f: &Fountain, b: Rect) -> Vec<(FountainHandle, Point)> {
 
 /// The nodes `h` (page points `s`, `e`, `k`) after `handle` is dragged to
 /// `p`: the start carries the skew handle (and, with a centre, the end
-/// too); the end turns the skew handle by as much as the axis turned.
+/// too); the end turns the skew handle by as much as the axis turned,
+/// and with a centre (radial, conical, square) also sizes it as the axis
+/// grew, so a circle stays a circle and an ellipse keeps its ratio; the
+/// skew handle alone sets the ratio (#2373).
 pub fn moved_nodes(
     kind: FountainKind,
     (s, e, k): (Point, Point, Point),
@@ -105,7 +109,12 @@ pub fn moved_nodes(
             } else {
                 0.0
             };
-            let kv = k - s;
+            let grow = if kind != FountainKind::Linear && old.hypot() > 1e-9 {
+                new.hypot() / old.hypot()
+            } else {
+                1.0
+            };
+            let kv = (k - s) * grow;
             let (c, sn) = (turn.cos(), turn.sin());
             let kv = Vec2::new(kv.x * c - kv.y * sn, kv.x * sn + kv.y * c);
             (s, p, s + kv)
@@ -500,15 +509,37 @@ impl App {
 
     /// The pointer of a drag [`App::begin_fountain_drag`] took is at `p`:
     /// the node it holds follows, or the whole fill moves by its line
-    /// (kept straight with `ctrl`). False when the drag holds neither.
+    /// (kept straight with `ctrl`). With `ctrl` the end node, and a linear
+    /// fill's start node, turn the line in steps of the constrain angle
+    /// about its other end (#2373). False when the drag holds neither.
     pub fn fountain_drag_to(&mut self, p: Point, ctrl: bool) -> bool {
         use crate::app::Drag;
         match self.drag {
             Drag::FountainHandle { handle, begun } => {
                 // A node snaps as the pointer does: onto the object's own
                 // corners and centre, other objects, guidelines and the
-                // grid (#2004).
-                let p = self.snap_point(p);
+                // grid (#2004); kept to the constrain angle, it does not.
+                let about = if ctrl {
+                    self.selected_fountain().and_then(|(_, f, b)| {
+                        let hs = fountain_handles(&f, b);
+                        let [(_, s), (_, e), _] = hs.as_slice() else {
+                            return None;
+                        };
+                        match handle {
+                            FountainHandle::End => Some(*s),
+                            FountainHandle::Start if f.kind == FountainKind::Linear => Some(*e),
+                            _ => None,
+                        }
+                    })
+                } else {
+                    None
+                };
+                let p = match about {
+                    Some(o) => {
+                        crate::interaction::constrain_from(o, p, self.settings.constrain_angle)
+                    }
+                    None => self.snap_point(p),
+                };
                 self.drag_fountain_handle(handle, p, begun);
                 self.drag = Drag::FountainHandle {
                     handle,
@@ -582,7 +613,8 @@ impl App {
     /// A drag across the object with the Interactive Fill tool: the fill
     /// runs from where the drag began to where it ended (its kind and
     /// colours kept when it is a fountain already; else a linear one from
-    /// the default colour to white), the skew handle square to the axis.
+    /// the object's colour, or the default one when it has none, to
+    /// white, #2498), the skew handle square to the axis.
     pub fn fill_from_drag(&mut self, id: ShapeId, from: Point, to: Point) {
         use tracedraw_core::geometry::Shape as _;
         let Some(s) = self.doc().shape_on_page(id) else {
@@ -591,9 +623,9 @@ impl App {
         let b = s.page_path().bounding_box();
         let mut f = match &s.fill {
             Fill::Fountain(f) if f.kind != FountainKind::Shaped => f.clone(),
-            _ => {
-                let first = match &self.default_fill() {
-                    Fill::Solid(c) => *c,
+            other => {
+                let first = match (other, &self.default_fill()) {
+                    (Fill::Solid(c), _) | (_, Fill::Solid(c)) => *c,
                     _ => tracedraw_core::Color::cmyk_pct(0.0, 0.0, 0.0, 100.0),
                 };
                 Fountain::two(
@@ -618,6 +650,41 @@ impl App {
         self.run(Command::SetFill {
             shapes: vec![id],
             fill: Fill::Fountain(f),
+        });
+    }
+
+    /// The node bar's transparency: uniform transparency of `amount` %
+    /// on the selection, as the Properties docker's Transparency amount
+    /// sets it (a run of changes is one undo step, #2507).
+    pub fn set_object_transparency(&mut self, amount: f64) {
+        let settings = crate::effects_ui::TransparencySettings {
+            amount: amount.clamp(0.0, 100.0),
+            ..Default::default()
+        };
+        self.patch_transparency(&settings, &[crate::mixed::TransparencyField::Amount]);
+    }
+
+    /// A click on object `id` with the Interactive Fill tool: it is
+    /// picked. An object with a fill keeps it, its nodes shown for a
+    /// gradient, a solid colour kept for the gradient a drag makes
+    /// (#2498); only an object without a fill takes the default one (a
+    /// light grey when that is none too).
+    pub fn fill_tool_click(&mut self, id: ShapeId) {
+        let filled = self
+            .doc()
+            .find_shape(id)
+            .is_some_and(|s| !matches!(s.fill, Fill::None));
+        self.select(vec![id]);
+        if filled {
+            return;
+        }
+        let fill = match self.default_fill() {
+            Fill::None => Fill::Solid(tracedraw_core::Color::cmyk_pct(0.0, 0.0, 0.0, 20.0)),
+            f => f,
+        };
+        self.run(Command::SetFill {
+            shapes: vec![id],
+            fill,
         });
     }
 
@@ -669,9 +736,14 @@ impl App {
     }
 }
 
+/// The groove of the node bar's transparency slider, points.
+const NODE_BAR_RAIL: f32 = 70.0;
+
 /// The node bar: under the picked colour node of the selected fill, as
 /// the reference program shows it, the node's colour (a swatch that opens
-/// the colour picker) and its transparency (0 % opaque, 100 % clear).
+/// the colour picker) and the object's uniform transparency (0 % opaque,
+/// 100 % clear; the same value as the Properties docker's, #2507), in a
+/// compact bar. A node's own transparency is on the property bar.
 /// Hidden while a node is dragged. An edit made while the pointer stays
 /// down (a picker or slider drag) is one undo step. The dotted grip at its
 /// left drags it off the object; it keeps that offset from its node.
@@ -680,7 +752,7 @@ pub fn node_bar(app: &mut App, ui: &mut egui::Ui) {
     if app.tool != Tool::InteractiveFill || !matches!(app.drag, crate::app::Drag::None) {
         return;
     }
-    let Some((_, f, b)) = app.selected_fountain() else {
+    let Some((shape, f, b)) = app.selected_fountain() else {
         return;
     };
     let Some(i) = app.fill_node.filter(|i| *i < f.stops.len()) else {
@@ -695,7 +767,15 @@ pub fn node_bar(app: &mut App, ui: &mut egui::Ui) {
     let down = ui.input(|inp| inp.pointer.any_down());
     let begun = down && ui.data(|d| d.get_temp::<bool>(id).unwrap_or(false));
     let mut color = f.stops[i].color;
-    let mut transparency = ((1.0 - f.stops[i].opacity) * 100.0).round();
+    // The object's uniform transparency, as the Properties docker shows
+    // it (#2507); a mask transparency reads 0 here.
+    let mut transparency = app
+        .doc()
+        .find_shape(shape)
+        .map(crate::mixed::ShapeTransparency::of)
+        .filter(|t| t.kind <= 1)
+        .map(|t| t.amount.round())
+        .unwrap_or(0.0);
     let mut changed_color = false;
     let mut changed_opacity = false;
     let offset_id = id.with("offset");
@@ -718,21 +798,22 @@ pub fn node_bar(app: &mut App, ui: &mut egui::Ui) {
                             .add(
                                 crate::ui::Slider::new(&mut transparency, 0.0..=100.0)
                                     .suffix(" %")
-                                    .fixed_decimals(0),
+                                    .fixed_decimals(0)
+                                    // Compact, as the other handles on
+                                    // the drawing: in a floating area it
+                                    // took the whole 600 points (#2507).
+                                    .width(NODE_BAR_RAIL),
                             )
                             .changed();
                     });
                 });
         });
     ui.data_mut(|d| d.insert_temp(offset_id, offset));
-    if changed_color || changed_opacity {
-        app.set_fountain_node(
-            i,
-            changed_color.then_some(color),
-            changed_opacity.then_some(1.0 - transparency / 100.0),
-            None,
-            begun,
-        );
+    if changed_color {
+        app.set_fountain_node(i, Some(color), None, None, begun);
+        ui.data_mut(|d| d.insert_temp(id, down));
+    } else if changed_opacity {
+        app.set_object_transparency(transparency);
         ui.data_mut(|d| d.insert_temp(id, down));
     } else if !down {
         ui.data_mut(|d| d.insert_temp(id, false));
@@ -831,6 +912,82 @@ mod tests {
         assert_eq!(app.doc().find_shape(id).expect("square").fill, fill);
     }
 
+    /// A transparency made radial on the bar is clear at its centre and
+    /// opaque at its edge, its centre node black (#2377); dragging its end
+    /// node sizes it as a circle still (the skew node keeps the ratio);
+    /// Ctrl or Shift on the end node turns the line in steps of the
+    /// constrain angle (#2373).
+    #[test]
+    fn a_radial_transparency_is_clear_at_the_centre_and_its_end_node_constrains() {
+        use crate::mixed::TransparencyField as F;
+        let mut app = App::headless();
+        let id = square(&mut app);
+        app.tool = crate::tools::Tool::Transparency;
+        app.transparency_from_drag_on(&[id], Point::new(10.0, 20.0), Point::new(30.0, 20.0));
+        let kind_to = |app: &mut App, k: FountainKind| {
+            let (mut set, ..) = crate::ui::toolbar::transparency_state(app);
+            let Fill::Fountain(f) = &mut set.mask else {
+                panic!("a gradient mask");
+            };
+            crate::mixed::set_mask_kind(f, k);
+            app.transparency_default = set.clone();
+            app.patch_transparency(&set, &[F::MaskKind]);
+            app.selected_fountain().expect("mask").1
+        };
+        let f = kind_to(&mut app, FountainKind::Radial);
+        assert_eq!(f.kind, FountainKind::Radial);
+        // The first stop is the centre: black, all clear; the edge white.
+        assert_eq!(
+            (f.stops[0].color, f.stops[1].color),
+            (Color::BLACK, Color::WHITE)
+        );
+        assert_eq!(
+            crate::ui::transparency_docker::gray_transparency(f.stops[0].color),
+            100.0
+        );
+        assert!(crate::ui::transparency_docker::gray_transparency(f.stops[1].color) < 1e-9);
+        // Back to linear: opaque at the start again; stops set by hand
+        // are kept.
+        let f = kind_to(&mut app, FountainKind::Linear);
+        assert_eq!(
+            (f.stops[0].color, f.stops[1].color),
+            (Color::WHITE, Color::BLACK)
+        );
+        let f = kind_to(&mut app, FountainKind::Radial);
+        assert_eq!(f.stops[0].color, Color::BLACK);
+
+        // The end node dragged out: a circle stays a circle.
+        let ratio = |app: &App| {
+            let (_, f, b) = app.selected_fountain().expect("mask");
+            let hs = fountain_handles(&f, b);
+            (hs[2].1 - hs[0].1).hypot() / (hs[1].1 - hs[0].1).hypot()
+        };
+        let before = ratio(&app);
+        let (_, f, b) = app.selected_fountain().expect("mask");
+        let hs = fountain_handles(&f, b);
+        let (centre, end) = (hs[0].1, hs[1].1);
+        app.drag_fountain_handle(FountainHandle::End, centre + (end - centre) * 1.5, false);
+        assert!(
+            (ratio(&app) - before).abs() < 1e-6,
+            "{} {before}",
+            ratio(&app)
+        );
+
+        // Held with the constrain key, 5 degrees off comes back level.
+        let (_, f, b) = app.selected_fountain().expect("mask");
+        let hs = fountain_handles(&f, b);
+        let (centre, end) = (hs[0].1, hs[1].1);
+        assert!(app.begin_fountain_drag(end, end));
+        let r = (end - centre).hypot();
+        let a = 5f64.to_radians();
+        assert!(app.fountain_drag_to(centre + Vec2::new(a.cos(), a.sin()) * r, true));
+        let (_, f, b) = app.selected_fountain().expect("mask");
+        let hs = fountain_handles(&f, b);
+        assert!((hs[1].1.y - centre.y).abs() < 1e-6, "{hs:?}");
+        assert!(hs[1].1.x > centre.x);
+        app.end_drag();
+    }
+
     #[test]
     fn shaped_fountains_have_no_handles() {
         let f = Fountain::two(FountainKind::Shaped, Color::BLACK, Color::WHITE, 0.0);
@@ -870,6 +1027,27 @@ mod tests {
         let hs = fountain_handles(&f, b);
         assert!(near(hs[0].1, Point::new(5.0, 5.0)) && near(hs[1].1, Point::new(15.0, 5.0)));
         assert!(near(hs[2].1, Point::new(5.0, 15.0)), "{hs:?}");
+    }
+
+    /// #2498: Interactive Fill on an object filled red keeps the red: a
+    /// click leaves the fill as it is (it turned to the default black),
+    /// and a drag starts the gradient at red, not at the default colour.
+    #[test]
+    fn interactive_fill_starts_from_the_objects_colour() {
+        let red = Color::rgb8(255, 0, 0);
+        let mut app = App::headless();
+        let id = square(&mut app);
+        app.apply_fill(Fill::Solid(red));
+        app.fill_tool_click(id);
+        let fill = |app: &App| app.doc().find_shape(id).map(|s| s.fill.clone());
+        assert_eq!(fill(&app), Some(Fill::Solid(red)));
+        app.fill_from_drag(id, Point::new(5.0, 5.0), Point::new(35.0, 5.0));
+        let (_, f, _) = app.selected_fountain().expect("fountain");
+        assert_eq!(f.first_color(), red);
+        // An object without a fill takes the default one on a click.
+        app.apply_fill(Fill::None);
+        app.fill_tool_click(id);
+        assert!(!matches!(fill(&app), Some(Fill::None)));
     }
 
     #[test]

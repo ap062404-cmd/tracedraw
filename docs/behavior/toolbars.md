@@ -261,15 +261,20 @@ for sliders stepped with the wheel (`step_merge::tests`).
 - Pick tool, nothing selected (page bar): page size list; page width and
   height; fit page to drawing (Layout's command, pale on an empty page);
   portrait, landscape; all pages or current page (which pages a size
-  change applies to, one undo step); Units; nudge distance; duplicate
-  distances; treat all objects as filled.
+  change applies to, one undo step); Units; the nudge distances (Nudge,
+  then Super nudge over Micro nudge, as Document Options > Rulers sets
+  them); duplicate distances; treat all objects as filled.
 - A selection (object bar): the object origin selector (a 3 x 3 grid,
   the centre by default: X and Y show and move that point of the
   selection's box, counted from the ruler origin), X and Y; width and
   height (scaled about the origin point); scale percentages and the lock
   that keeps proportions; the rotation angle of a single object (read
-  from its transform, changed about the origin point); mirror
-  horizontally and vertically.
+  from its transform, changed about the centre of rotation when it was
+  moved, else about the origin point, #2478); mirror
+  horizontally and vertically; the nudge distances (Nudge, then Super
+  nudge over Micro nudge), so the arrow keys' steps change without
+  opening Document Options (#2608,
+  `ui::toolbar::tests::the_pick_bar_shows_and_sets_the_nudge_distances`).
 - Then, by the kind of the selected objects: rectangle corners (Round,
   Scalloped and Chamfered Corner buttons; the four corner sizes in two
   stacked columns, top left over bottom left, then top right over bottom

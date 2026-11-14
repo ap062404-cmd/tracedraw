@@ -22,10 +22,12 @@ shortcut beside it, and you can add your own; see
 | <kbd>Ctrl+Shift+E</kbd> | export with the options shown |
 | <kbd>Ctrl+F4</kbd>, <kbd>Alt+F4</kbd> | close the drawing, exit |
 | <kbd>Ctrl+Z</kbd>, <kbd>Ctrl+Shift+Z</kbd>, <kbd>Ctrl+R</kbd> | undo, redo, repeat |
+| <kbd>Alt+Backspace</kbd> | undo, as <kbd>Ctrl+Z</kbd> |
 | <kbd>Ctrl+X</kbd>, <kbd>Ctrl+C</kbd>, <kbd>Ctrl+V</kbd>, <kbd>Ctrl+Shift+V</kbd> | cut, copy, paste, paste in view |
 | <kbd>Ctrl+D</kbd>, <kbd>Ctrl+Shift+D</kbd> | duplicate, Repeat Copies panel |
 | <kbd>+</kbd> | duplicate the selection in place |
 | <kbd>Ctrl+A</kbd>, <kbd>Delete</kbd> | select all, delete |
+| <kbd>Ctrl+Shift+I</kbd> | invert the selection |
 | <kbd>Ctrl+0</kbd> to <kbd>Ctrl+9</kbd>, <kbd>0</kbd> to <kbd>9</kbd>, <kbd>Alt+0</kbd> to <kbd>Alt+9</kbd> | store, select (twice: zoom to) and add to selection groups |
 | <kbd>Ctrl+F</kbd>, <kbd>Ctrl+J</kbd>, <kbd>Ctrl+W</kbd> | Find and Replace panel, options, refresh the window |
 
@@ -38,6 +40,7 @@ shortcut beside it, and you can add your own; see
 | <kbd>Ctrl++</kbd>, <kbd>Ctrl+-</kbd> | zoom in and out one step |
 | <kbd>N</kbd> (held) | the Navigator: move the pointer over the page's picture to go there ([[menu.view > menu.view.navigator]]) |
 | <kbd>Alt+Shift+R</kbd> | rulers on and off |
+| <kbd>Ctrl+;</kbd>, <kbd>Ctrl+'</kbd> | guidelines, document grid: shown and hidden |
 | <kbd>Alt+Q</kbd>, <kbd>Alt+Z</kbd>, <kbd>Ctrl+Y</kbd> | snapping off, snap to objects, snap to the grid |
 | <kbd>Alt+Shift+A</kbd>, <kbd>Alt+Shift+D</kbd> | alignment guides, dynamic guides |
 | <kbd>PgUp</kbd>, <kbd>PgDn</kbd> | previous and next page |
@@ -52,6 +55,7 @@ shortcut beside it, and you can add your own; see
 | <kbd>Ctrl+Home</kbd>, <kbd>Ctrl+End</kbd> | to front and back of the page |
 | <kbd>Shift+PgUp</kbd>, <kbd>Shift+PgDn</kbd> | to front and back of the layer |
 | <kbd>Ctrl+PgUp</kbd>, <kbd>Ctrl+PgDn</kbd> | forward one, back one |
+| <kbd>Ctrl+]</kbd>, <kbd>Ctrl+[</kbd>, <kbd>Ctrl+Shift+]</kbd>, <kbd>Ctrl+Shift+[</kbd> | also forward one, back one, to front and to back of the layer |
 | <kbd>L</kbd>, <kbd>R</kbd>, <kbd>T</kbd>, <kbd>B</kbd>, <kbd>E</kbd>, <kbd>C</kbd>, <kbd>P</kbd> | with a selection: align left, right, top, bottom, centers horizontally, centers vertically, center to page |
 | Arrow keys, with <kbd>Shift</kbd> or <kbd>Ctrl</kbd> | nudge, super nudge, micro nudge |
 | <kbd>Alt+S</kbd>, <kbd>Alt+E</kbd>, <kbd>Alt+Shift+E</kbd>, <kbd>Alt+Shift+S</kbd>, <kbd>Alt+X</kbd> | create, edit, finish, remove symmetry, break its link |

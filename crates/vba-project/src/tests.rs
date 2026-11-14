@@ -200,6 +200,14 @@ fn files_that_are_not_projects_or_are_damaged() {
         read_gms(b"not a compound file"),
         Err(Error::NotAProject(_))
     ));
+    // A suite's header with no compound file after it: a protected file
+    // (#2165), said so.
+    let mut protected = b"GMS\x01\x01\x0a\x00\x00\x02\x03\x80".to_vec();
+    protected.extend([0xffu8; 200]);
+    match read_gms(&protected) {
+        Err(Error::NotAProject(why)) => assert!(why.contains("protected"), "{why}"),
+        other => panic!("{other:?}"),
+    }
     let mut no_vba: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     no_vba.insert("Something".into(), vec![1, 2, 3]);
     assert!(matches!(

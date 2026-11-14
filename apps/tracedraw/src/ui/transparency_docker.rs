@@ -784,7 +784,7 @@ fn fountain(ui: &mut Ui, set: &mut TransparencySettings, mixed: &[F], field: &mu
                 .clicked()
                 && !(kind_shown && f.kind == k)
             {
-                f.kind = k;
+                crate::mixed::set_mask_kind(f, k);
                 *field = Some(F::MaskKind);
             }
         }

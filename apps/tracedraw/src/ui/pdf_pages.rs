@@ -145,7 +145,10 @@ impl App {
             }
             self.engine.end_group(mark, "Import");
         } else {
+            // The paragraph frames linked after they came in undo with them.
+            let mark = self.engine.begin_group();
             self.import_pdf_pages_as_read(path, pdf, chosen, new_pages);
+            self.engine.end_group(mark, "Import");
         }
     }
 
@@ -241,6 +244,7 @@ impl App {
                 self.status = e.to_string();
                 return;
             }
+            self.renumber_default_pages();
             let ids: Vec<ShapeId> = self
                 .doc()
                 .pages
@@ -251,6 +255,7 @@ impl App {
                 .flat_map(|l| &l.shapes)
                 .map(|s| s.id)
                 .collect();
+            self.link_imported_flows(&ids);
             self.hyphenate_imported(&ids);
             // The objects stay where the file has them on their pages: a
             // place given with the import cursor is not for them.
@@ -300,6 +305,7 @@ impl App {
                 self.status = e.to_string();
                 return;
             }
+            self.link_imported_flows(&ids);
             self.hyphenate_imported(&ids);
             self.select(ids);
         }
@@ -680,6 +686,90 @@ mod tests {
         let b = shapes[0].bounds();
         assert!((b.width() - 40.0).abs() < 1.0, "{b:?}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A PDF opened as pictures (#2570): only the pages chosen, each put
+    /// on the paper asked for (turned the way the page is), scaled to fit
+    /// and centred, as one picture covering the page at the resolution
+    /// given; the drawing opens with nothing to undo and unchanged.
+    #[test]
+    fn a_pdf_opens_as_pictures_on_the_paper_chosen() {
+        use crate::ui::pdf_import_dialog::PdfOpenPicture;
+        let dir = std::env::temp_dir().join(format!("tracedraw-pdfopenpic-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = three_page_pdf(&dir);
+        let mut app = App::headless();
+        app.settings.formats.pdf_ask_text = false;
+        app.pdf_open_picture = Some(PdfOpenPicture {
+            all_pages: false,
+            range: "2-3".into(),
+            page_size: Some(tracedraw_core::document::paper::A4),
+            dpi: 72.0,
+        });
+        app.open_path(path.clone());
+        assert!(app.pdf_open_picture.is_none());
+        let d = app.doc();
+        assert_eq!(d.pages.len(), 2);
+        // Page 2 is landscape, page 3 (100 x 50) too: A4 on its side.
+        for p in &d.pages {
+            assert!(near(p.size, Size::new(297.0, 210.0)), "{:?}", p.size);
+            let shapes: Vec<&Shape> = p.layers.iter().flat_map(|l| &l.shapes).collect();
+            assert_eq!(shapes.len(), 1);
+            let ShapeKind::Bitmap { rect, width_px, .. } = &shapes[0].kind else {
+                panic!("a picture: {:?}", shapes[0].kind);
+            };
+            let b = shapes[0].transform.transform_rect_bbox(*rect);
+            assert!(
+                (b.width() - 297.0).abs() < 0.5 && (b.height() - 210.0).abs() < 0.5,
+                "{b:?}"
+            );
+            // 297 mm at 72 dpi.
+            assert!(
+                (*width_px as f64 - 297.0 / 25.4 * 72.0).abs() < 3.0,
+                "{width_px}"
+            );
+        }
+        assert_eq!(undo_steps(&app), 0);
+        assert!(!app.engine.is_dirty());
+
+        // Each page's own size, every page.
+        app.pdf_open_picture = Some(PdfOpenPicture {
+            all_pages: true,
+            range: String::new(),
+            page_size: None,
+            dpi: 72.0,
+        });
+        // Another file: the one open already would only be shown.
+        let again = dir.join("again.pdf");
+        std::fs::copy(&path, &again).expect("copy");
+        app.open_path(again);
+        let d = app.doc();
+        assert_eq!(d.pages.len(), 3);
+        assert!(near(d.pages[2].size, Size::new(100.0, 50.0)));
+        assert!(d.pages.iter().all(|p| p
+            .layers
+            .iter()
+            .flat_map(|l| &l.shapes)
+            .all(|s| matches!(s.kind, ShapeKind::Bitmap { .. }))));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The paper turns the way the page is, and the page is scaled to fit
+    /// it and centred.
+    #[test]
+    fn a_page_fits_on_the_paper_turned_its_way() {
+        use crate::ui::pdf_import_dialog::{fit_on_page, oriented};
+        use tracedraw_core::geometry::Point;
+        let a4 = tracedraw_core::document::paper::A4;
+        assert_eq!(
+            oriented(a4, Size::new(100.0, 50.0)),
+            Size::new(297.0, 210.0)
+        );
+        assert_eq!(oriented(a4, Size::new(50.0, 100.0)), a4);
+        let t = fit_on_page(Size::new(100.0, 100.0), a4);
+        let (a, b) = (t * Point::new(0.0, 0.0), t * Point::new(100.0, 100.0));
+        assert!((a.x - 0.0).abs() < 1e-9 && (b.x - 210.0).abs() < 1e-9);
+        assert!((a.y - 43.5).abs() < 1e-9 && (b.y - 253.5).abs() < 1e-9);
     }
 
     /// A PDF of one page comes in on the current page without asking.

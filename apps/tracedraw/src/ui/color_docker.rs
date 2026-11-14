@@ -44,6 +44,9 @@ pub struct ColorDockerState {
     /// a new ink gets.
     pub tint: f32,
     pub new_ink: String,
+    /// The ink whose name is being typed over, and the name as typed
+    /// (#2187); it is given on Enter or when the field is left.
+    pub ink_rename: Option<(u32, String)>,
     /// Fill and outline locked together: Fill and Outline each give the
     /// selection the new colour as both, in one step.
     pub lock: bool,
@@ -58,6 +61,7 @@ impl Default for ColorDockerState {
             synced: None,
             tint: 100.0,
             new_ink: String::new(),
+            ink_rename: None,
             lock: false,
         }
     }
@@ -772,12 +776,14 @@ pub(crate) fn sliders(ui: &mut Ui, c: &mut Color) -> bool {
 }
 
 /// A swatch of `c` in `r`; a white square crossed by a red diagonal for
-/// no colour.
-fn swatch(p: &Painter, r: Rect, c: Option<Color>) {
+/// no colour. A spot colour carries its dot, and the ring when it
+/// `overprint`s (#2455).
+fn swatch(p: &Painter, r: Rect, c: Option<Color>, overprint: bool) {
     match c {
         Some(c) => {
             let [cr, cg, cb] = c.to_rgb8();
             p.rect_filled(r, 0.0, Color32::from_rgb(cr, cg, cb));
+            crate::ui::palette::swatch_marks(p, r, c, overprint);
         }
         None => {
             p.rect_filled(r, 0.0, Color32::WHITE);
@@ -796,8 +802,14 @@ fn swatch(p: &Painter, r: Rect, c: Option<Color>) {
 }
 
 /// The fill-over-outline swatch: the new colour as the fill in front of
-/// the selection's outline colour behind it.
-fn fill_outline_swatch(ui: &mut Ui, fill: Color, outline: Option<Color>) -> Response {
+/// the selection's outline colour behind it; `overprint` says whether the
+/// selection's fill and its outline overprint.
+fn fill_outline_swatch(
+    ui: &mut Ui,
+    fill: Color,
+    outline: Option<Color>,
+    overprint: (bool, bool),
+) -> Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(38.0, 34.0), Sense::hover());
     let side = 24.0;
     let p = ui.painter();
@@ -805,11 +817,13 @@ fn fill_outline_swatch(ui: &mut Ui, fill: Color, outline: Option<Color>) -> Resp
         p,
         Rect::from_min_size(rect.min + Vec2::new(12.0, 8.0), Vec2::splat(side)),
         outline,
+        overprint.1,
     );
     swatch(
         p,
         Rect::from_min_size(rect.min + Vec2::new(1.0, 1.0), Vec2::splat(side)),
         Some(fill),
+        overprint.0,
     );
     resp
 }
@@ -1029,6 +1043,10 @@ fn actions(app: &mut App, ui: &mut Ui, c: Color) {
     let has = !app.selection.is_empty();
     let lock = app.color_docker.lock;
     let outline = selected_outline(app);
+    let overprint = (
+        app.selection_overprint(true) == Some(true),
+        app.selection_overprint(false) == Some(true),
+    );
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         if crate::ui::propbar::pic_button(
@@ -1042,7 +1060,7 @@ fn actions(app: &mut App, ui: &mut Ui, c: Color) {
         {
             app.color_docker.lock = !lock;
         }
-        fill_outline_swatch(ui, c, outline).rich_tip_with(|| {
+        fill_outline_swatch(ui, c, outline, overprint).rich_tip_with(|| {
             format!(
                 "{}\n{}",
                 trf("docker.swatch_fill", &[("c", &c.to_hex())]),
@@ -1209,6 +1227,7 @@ fn spot_inks(app: &mut App, ui: &mut Ui, current: Color, with_tint: bool) {
     let tint = app.color_docker.tint.clamp(0.0, 100.0) / 100.0;
     let inks = app.doc().inks.clone();
     let mut remove = None;
+    let mut rename = None;
     for ink in &inks {
         ui.horizontal(|ui| {
             let (r, _) = ui.allocate_exact_size(Vec2::new(16.0, 16.0), Sense::hover());
@@ -1221,7 +1240,23 @@ fn spot_inks(app: &mut App, ui: &mut Ui, current: Color, with_tint: bool) {
                 Stroke::new(0.5, Tokens::icon()),
                 egui::StrokeKind::Inside,
             );
-            ui.label(&ink.name);
+            // The name, typed over in place and given on Enter or when
+            // the field is left (#2187).
+            let mut name = match &app.color_docker.ink_rename {
+                Some((id, typed)) if *id == ink.id => typed.clone(),
+                _ => ink.name.clone(),
+            };
+            let field = ui
+                .add(egui::TextEdit::singleline(&mut name).desired_width(110.0))
+                .rich_tip(tr("docker.ink_name"));
+            if field.changed() {
+                app.color_docker.ink_rename = Some((ink.id, name));
+            }
+            if field.lost_focus() {
+                if let Some((id, typed)) = app.color_docker.ink_rename.take() {
+                    rename = Some((id, typed));
+                }
+            }
             if ui
                 .add_enabled(has, egui::Button::new(tr("docker.fill")).small())
                 .rich_tip(crate::ui::tips::pair("docker.fill", "docker.ink_fill_desc"))
@@ -1275,10 +1310,46 @@ fn spot_inks(app: &mut App, ui: &mut Ui, current: Color, with_tint: bool) {
             app.color_docker.new_ink.clear();
         }
     });
+    if let Some((id, name)) = rename {
+        rename_ink(app, id, &name);
+    }
     if let Some(id) = remove {
-        let inks: Vec<_> = inks.into_iter().filter(|i| i.id != id).collect();
+        let inks: Vec<_> = app
+            .doc()
+            .inks
+            .iter()
+            .filter(|i| i.id != id)
+            .cloned()
+            .collect();
         app.run(Command::SetInks { inks });
     }
+}
+
+/// Give spot ink `id` the name `name` (#2187), as one undo step.
+/// Objects and swatches refer to an ink by its number, so all of them
+/// take the new name, as does the separation it prints on. Nothing
+/// changes for an empty name, one another ink of the drawing has, or
+/// the name it has already. Says whether it was renamed.
+pub fn rename_ink(app: &mut App, id: u32, name: &str) -> bool {
+    let name = name.trim();
+    let inks = &app.doc().inks;
+    let taken = inks.iter().any(|i| i.id != id && i.name == name);
+    let same = inks.iter().any(|i| i.id == id && i.name == name);
+    if name.is_empty() || taken || same || app.doc().ink(id).is_none() {
+        return false;
+    }
+    let inks = inks
+        .iter()
+        .map(|i| {
+            let mut i = i.clone();
+            if i.id == id {
+                i.name = name.to_string();
+            }
+            i
+        })
+        .collect();
+    app.run(Command::SetInks { inks });
+    true
 }
 
 /// Add a spot ink named `name` standing for `c` in process inks.
@@ -1626,6 +1697,59 @@ pub(crate) mod tests {
                 b: 0.0
             }
         );
+    }
+
+    /// #2187: a spot ink of the drawing is renamed in place, as one undo
+    /// step; its swatch and its PDF separation take the new name. An
+    /// empty name or one another ink has changes nothing.
+    #[test]
+    fn a_spot_ink_is_renamed() {
+        let mut app = App::headless();
+        let id = app
+            .new_shape(ShapeKind::Rect {
+                rect: tracedraw_core::Rect::new(0.0, 0.0, 10.0, 10.0),
+                radius: 0.0,
+                corners: None,
+            })
+            .expect("shape");
+        let spot = add_ink(
+            &mut app,
+            "Spot 1".into(),
+            Color::cmyk_pct(0.0, 100.0, 0.0, 0.0),
+        );
+        let other = add_ink(
+            &mut app,
+            "Gold".into(),
+            Color::cmyk_pct(0.0, 20.0, 80.0, 10.0),
+        );
+        app.select(vec![id]);
+        let c = app.doc().ink(spot).expect("ink").color(1.0);
+        app.apply_outline_color(Some(c));
+        let before = app.engine.history_labels().0.len();
+        assert!(rename_ink(&mut app, spot, "  CutContour "));
+        assert_eq!(app.engine.history_labels().0.len(), before + 1);
+        assert_eq!(
+            app.doc().ink(spot).map(|i| i.name.as_str()),
+            Some("CutContour")
+        );
+        assert_eq!(app.doc().ink(other).map(|i| i.name.as_str()), Some("Gold"));
+        assert_eq!(crate::ui::palette::name_of(&app, c), "CutContour");
+        let pdf = tracedraw_io::pdf::document_to_pdf(app.doc());
+        assert!(String::from_utf8_lossy(&pdf).contains("/Separation /CutContour"));
+        // Refused: empty, taken, unchanged, no such ink.
+        assert!(!rename_ink(&mut app, spot, " "));
+        assert!(!rename_ink(&mut app, spot, "Gold"));
+        assert!(!rename_ink(&mut app, spot, "CutContour"));
+        assert!(!rename_ink(&mut app, 9999, "Other"));
+        assert_eq!(app.engine.history_labels().0.len(), before + 1);
+        app.undo();
+        assert_eq!(app.doc().ink(spot).map(|i| i.name.as_str()), Some("Spot 1"));
+        // The docker draws the names as fields.
+        let ctx = crate::theme::ui_context();
+        let mut out = ctx.run_ui(Default::default(), |ui| {
+            spot_inks(&mut app, ui, Color::BLACK, true)
+        });
+        out.textures_delta.clear();
     }
 
     #[test]

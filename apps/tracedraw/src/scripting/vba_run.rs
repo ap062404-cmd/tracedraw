@@ -61,6 +61,8 @@ pub enum Request {
         title: String,
         default: String,
     },
+    /// Open a web or mail address with the system (ShellExecute, #2165).
+    Open(String),
 }
 
 /// A control's (or the form's) event, from the app to the macro.
@@ -433,6 +435,146 @@ fn native_setting(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsRes
     Ok(JsValue::null())
 }
 
+/// `__open(url)`: a web or mail address the macro opens (ShellExecute,
+/// #2165); the app opens it. True when it was handed over.
+fn native_open(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let url = arg_str(args, 0, ctx)?;
+    let lower = url.to_ascii_lowercase();
+    if !(lower.starts_with("http://")
+        || lower.starts_with("https://")
+        || lower.starts_with("mailto:"))
+    {
+        return Ok(JsValue::from(false));
+    }
+    let sent = ctx
+        .get_data::<RunState>()
+        .is_some_and(|st| st.requests.send(Request::Open(url)).is_ok());
+    Ok(JsValue::from(sent))
+}
+
+/// `__download(url, path)`: fetch a web (or `file:`) address for a macro
+/// (URLDownloadToFile and URLDownloadToCacheFile, #2165) into `path`, or
+/// with an empty `path` into a file of the app's own; the file's path,
+/// or "" when nothing was written.
+fn native_download(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let url = arg_str(args, 0, ctx)?;
+    let path = arg_str(args, 1, ctx)?;
+    Ok(text(
+        download(url.trim(), &path)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default(),
+    ))
+}
+
+/// The most a macro's download may hold.
+const DOWNLOAD_LIMIT: u64 = 64 * 1024 * 1024;
+
+#[cfg(not(target_arch = "wasm32"))]
+fn download(url: &str, path: &str) -> Option<std::path::PathBuf> {
+    let lower = url.to_ascii_lowercase();
+    let (bytes, kind) = if lower.starts_with("http://") || lower.starts_with("https://") {
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(std::time::Duration::from_secs(60)))
+            .tls_config(crate::net::tls_config())
+            .build()
+            .into();
+        let mut resp = agent.get(url).call().ok()?;
+        let kind = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let bytes = resp
+            .body_mut()
+            .with_config()
+            .limit(DOWNLOAD_LIMIT)
+            .read_to_vec()
+            .ok()?;
+        (bytes, kind)
+    } else if lower.starts_with("file:") {
+        let bytes = std::fs::read(file_url_path(url)).ok()?;
+        if bytes.len() as u64 > DOWNLOAD_LIMIT {
+            return None;
+        }
+        (bytes, String::new())
+    } else {
+        return None;
+    };
+    let target = if path.trim().is_empty() {
+        let dir = std::env::temp_dir().join("tracedraw-downloads");
+        std::fs::create_dir_all(&dir).ok()?;
+        let hash = url.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
+            (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3)
+        });
+        dir.join(format!("{hash:016x}.{}", download_extension(url, &kind)))
+    } else {
+        std::path::PathBuf::from(path.trim())
+    };
+    std::fs::write(&target, bytes).ok()?;
+    Some(target)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn download(_url: &str, _path: &str) -> Option<std::path::PathBuf> {
+    None
+}
+
+/// The file a `file:` address names, its `%XX` escapes decoded.
+fn file_url_path(url: &str) -> String {
+    let rest = &url[5..];
+    let rest = rest.strip_prefix("//").unwrap_or(rest);
+    // `file:///C:/x` on Windows: no slash before the drive.
+    let rest = match rest.as_bytes() {
+        [b'/', d, b':', ..] if d.is_ascii_alphabetic() => &rest[1..],
+        _ => rest,
+    };
+    let b = rest.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Ok(v) = u8::from_str_radix(&rest[i + 1..i + 3], 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).to_string()
+}
+
+/// The extension of a downloaded file, from the type the server gave or
+/// else from the address, so that importing it knows what it is.
+fn download_extension(url: &str, kind: &str) -> String {
+    let by_kind = [
+        ("image/png", "png"),
+        ("image/jpeg", "jpg"),
+        ("image/gif", "gif"),
+        ("image/bmp", "bmp"),
+        ("image/webp", "webp"),
+        ("image/tiff", "tif"),
+        ("image/svg+xml", "svg"),
+        ("application/postscript", "eps"),
+        ("application/pdf", "pdf"),
+    ];
+    if let Some((_, e)) = by_kind.iter().find(|(k, _)| kind.starts_with(k)) {
+        return (*e).to_string();
+    }
+    let path = url.split(['?', '#']).next().unwrap_or("");
+    let name = path.rsplit('/').next().unwrap_or("");
+    match name.rsplit_once('.') {
+        Some((_, e))
+            if !e.is_empty() && e.len() <= 5 && e.chars().all(|c| c.is_ascii_alphanumeric()) =>
+        {
+            e.to_ascii_lowercase()
+        }
+        _ => "bin".to_string(),
+    }
+}
+
 /// `__folder()`: the macros folder (with a separator at the end), for
 /// the paths macros ask the host for.
 fn native_folder(_this: &JsValue, _args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
@@ -728,7 +870,9 @@ fn run_thread(
             &str,
             usize,
             boa_engine::native_function::NativeFunctionPointer,
-        ); 15] = [
+        ); 17] = [
+            ("__open", 1, native_open),
+            ("__download", 2, native_download),
             ("__setting", 5, native_setting),
             ("__dir", 1, native_dir),
             ("__folder", 0, native_folder),

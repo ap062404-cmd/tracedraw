@@ -415,9 +415,10 @@ pub enum AiStatus {
     Failed(String),
 }
 
-/// A request on its way.
+/// A request on its way, with its further tries while the service is
+/// busy (`ai_retry.rs`).
 struct Pending {
-    rx: std::sync::mpsc::Receiver<HttpResult>,
+    call: crate::ai_retry::Call,
     job: Job,
 }
 
@@ -451,17 +452,32 @@ pub struct AiSession {
     pub history: Vec<Turn>,
     /// The models the service listed (empty until asked).
     pub models: Vec<String>,
+    /// The model lists show every model the service listed, also those
+    /// whose names say they cannot draw (#2039).
+    pub show_all_models: bool,
     pending: Option<Pending>,
     /// Tests: answers requests at once instead of the network.
     pub fake: Option<fn(&HttpRequest) -> HttpResult>,
     /// Tests: the requests sent, newest last.
     pub sent: Vec<HttpRequest>,
+    /// Tests: the wait before a request is sent again, in place of the
+    /// real waits (none: every try at once).
+    pub fake_wait: std::time::Duration,
 }
 
 impl AiSession {
     /// A request is on its way.
     pub fn busy(&self) -> bool {
         self.pending.is_some()
+    }
+
+    /// What to show while waiting: the reply is awaited, or the service
+    /// was busy and the request is about to be sent again (#2037).
+    pub fn waiting_text(&self) -> String {
+        match self.pending.as_ref().and_then(|p| p.call.retrying()) {
+            Some(retrying) => crate::ai_retry::note(retrying),
+            None => tr("ai.waiting"),
+        }
     }
 }
 
@@ -604,7 +620,7 @@ pub fn build_models_request(prefs: &AiPrefs, key: &str) -> HttpRequest {
 /// The service's own words in an error reply: `error.message` (also in
 /// a list, as some services send it, or `error` as plain text), else the
 /// start of the body.
-fn service_words(r: &HttpResponse, v: Option<&Value>) -> String {
+pub(crate) fn service_words(r: &HttpResponse, v: Option<&Value>) -> String {
     let said = v.and_then(|v| {
         ["/error/message", "/0/error/message", "/error", "/message"]
             .iter()
@@ -713,6 +729,82 @@ pub fn model_choices(configured: &[String], listed: &[String], usual: &[&str]) -
     }
     own.extend(list);
     own
+}
+
+/// Words in a model's name that say it does not write text: models for
+/// embeddings, speech and sound, live sessions, robots, question
+/// answering over sources, music, video, pictures, moderation, ranking,
+/// and the text completion models of old that take no conversation.
+const NOT_FOR_DRAWING: [&str; 26] = [
+    "embedding",
+    "embeddings",
+    "embed",
+    "audio",
+    "tts",
+    "speech",
+    "whisper",
+    "transcribe",
+    "live",
+    "realtime",
+    "robotics",
+    "aqa",
+    "lyria",
+    "music",
+    "veo",
+    "sora",
+    "video",
+    "imagen",
+    "image",
+    "images",
+    "dall",
+    "banana",
+    "moderation",
+    "rerank",
+    "babbage",
+    "davinci",
+];
+
+/// Words in a model's name that mark it as still on trial.
+const ON_TRIAL: [&str; 5] = ["preview", "exp", "experimental", "beta", "alpha"];
+
+/// The words of a model's name: its letters and digits between dashes,
+/// dots, slashes and the like, in lower case.
+fn name_words(id: &str) -> Vec<String> {
+    id.to_ascii_lowercase()
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Whether a model can be asked for a drawing, told by its name (#2039):
+/// a service's list holds every model it has, and its embedding, audio,
+/// live, robotics, research, music, video and image models only fail
+/// when picked for Draw with words. The services' lists say no more than
+/// the name, so whole words of it decide (`live` in `gemini-live-2.5`,
+/// not in `olive-7b`); a name that says nothing counts as one that draws.
+pub fn writes_drawings(id: &str) -> bool {
+    let name = id.trim().to_ascii_lowercase();
+    if name.contains("deep-research") || name.contains("computer-use") {
+        return false;
+    }
+    !name_words(&name)
+        .iter()
+        .any(|w| NOT_FOR_DRAWING.contains(&w.as_str()))
+}
+
+/// The models of a service's list to offer for drawings (#2039): those
+/// that can draw ([`writes_drawings`]), the finished ones before the
+/// ones on trial (preview, experimental), each group in the service's
+/// order. A list whose names tell none apart (a server of the user's
+/// with names of its own) is offered whole rather than empty.
+pub fn drawing_models(listed: &[String]) -> Vec<String> {
+    let mut fit: Vec<&String> = listed.iter().filter(|m| writes_drawings(m)).collect();
+    if fit.is_empty() {
+        return listed.to_vec();
+    }
+    fit.sort_by_key(|m| name_words(m).iter().any(|w| ON_TRIAL.contains(&w.as_str())));
+    fit.into_iter().cloned().collect()
 }
 
 /// The models a service listed (`data[].id` in both kinds of service,
@@ -826,9 +918,15 @@ pub fn extract_script(reply: &str) -> Option<String> {
     (!code.is_empty()).then_some(code)
 }
 
-/// Send `req` and deliver the answer on `tx` (up to 8 MB of answer).
-fn spawn(req: HttpRequest, tx: std::sync::mpsc::Sender<HttpResult>) {
-    crate::net::spawn(req, 8 * 1024 * 1024, tx);
+/// The most bytes of an answer read.
+const MAX_REPLY: u64 = 8 * 1024 * 1024;
+
+/// Keep `sent` (the requests sent, for tests) to its newest eight.
+fn remember_sent(sent: &mut Vec<HttpRequest>, http: HttpRequest) {
+    sent.push(http);
+    if sent.len() > 8 {
+        sent.remove(0);
+    }
 }
 
 impl App {
@@ -899,20 +997,12 @@ impl App {
         self.ai_start(http, Job::Models);
     }
 
-    /// Send `http` for `job`.
+    /// Send `http` for `job`. A service that is busy for the moment is
+    /// asked again by itself, a few times (`ai_retry.rs`, #2037).
     fn ai_start(&mut self, http: HttpRequest, job: Job) {
-        let (tx, rx) = std::sync::mpsc::channel();
-        match self.ai.fake {
-            Some(fake) => {
-                let _ = tx.send(fake(&http));
-            }
-            None => spawn(http.clone(), tx),
-        }
-        self.ai.sent.push(http);
-        if self.ai.sent.len() > 8 {
-            self.ai.sent.remove(0);
-        }
-        self.ai.pending = Some(Pending { rx, job });
+        remember_sent(&mut self.ai.sent, http.clone());
+        let call = crate::ai_retry::Call::start(http, MAX_REPLY, self.ai.fake);
+        self.ai.pending = Some(Pending { call, job });
         if self.ai.fake.is_some() {
             self.poll_ai();
         }
@@ -933,15 +1023,27 @@ impl App {
         }
     }
 
-    /// The models to choose from: the service's list once fetched, else
-    /// the usual ones, with the model in use first when it is in neither
-    /// (see [`model_choices`]).
+    /// The models to choose from: those of the service's list that can
+    /// draw once it is fetched (all of it with "show every model" on,
+    /// see [`drawing_models`]), else the usual ones, with the model in
+    /// use first when it is in neither (see [`model_choices`]).
     pub fn ai_model_choices(&self) -> Vec<String> {
+        let listed = if self.ai.show_all_models {
+            self.ai.models.clone()
+        } else {
+            drawing_models(&self.ai.models)
+        };
         model_choices(
             &[self.settings.ai.model()],
-            &self.ai.models,
+            &listed,
             self.settings.ai.provider.preset_models(),
         )
+    }
+
+    /// The service listed models the model lists leave out (the "show
+    /// every model" box is offered then).
+    pub fn ai_models_hidden(&self) -> bool {
+        drawing_models(&self.ai.models).len() != self.ai.models.len()
     }
 
     /// Stop waiting for the reply (it is dropped when it comes).
@@ -964,13 +1066,25 @@ impl App {
     /// Take in a reply that arrived. True while a request is still on its
     /// way (the frame loop then looks again shortly).
     pub fn poll_ai(&mut self) -> bool {
-        let Some(p) = &self.ai.pending else {
+        use crate::ai_retry::Polled;
+        let (fake, fake_wait) = (self.ai.fake, self.ai.fake_wait);
+        let Some(p) = self.ai.pending.as_mut() else {
             return false;
         };
-        let result = match p.rx.try_recv() {
-            Ok(r) => r.map_err(network_error),
-            Err(std::sync::mpsc::TryRecvError::Empty) => return true,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => Err(tr("ai.connection_lost")),
+        let mut again = Vec::new();
+        let polled = p.call.poll(fake, fake_wait, &mut again);
+        for http in again {
+            remember_sent(&mut self.ai.sent, http);
+        }
+        let result = match polled {
+            Polled::Pending => return true,
+            Polled::Lost => Err(tr("ai.connection_lost")),
+            Polled::Done(Err(e), _) => Err(network_error(e)),
+            // Still busy after every try: said as such.
+            Polled::Done(Ok(r), tries) => match crate::ai_retry::gave_up(&r, tries) {
+                Some(e) => Err(e),
+                None => Ok(r),
+            },
         };
         let Some(p) = self.ai.pending.take() else {
             return false;
@@ -1443,6 +1557,121 @@ mod tests {
         assert!(app.ai.sent.is_empty());
     }
 
+    thread_local! {
+        /// How many more requests the test service answers "busy".
+        static BUSY: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    }
+
+    /// The overloaded reply of an OpenAI-compatible service, as the
+    /// Gemini preset sends it: a list holding the error.
+    fn overloaded() -> HttpResult {
+        Ok(HttpResponse {
+            retry_after: None,
+            status: 503,
+            body: r#"[{"error":{"code":503,"message":"The model is overloaded. Please try again later.","status":"UNAVAILABLE"}}]"#.into(),
+        })
+    }
+
+    fn busy_then_draws(_: &HttpRequest) -> HttpResult {
+        let left = BUSY.with(|b| b.get());
+        if left > 0 {
+            BUSY.with(|b| b.set(left - 1));
+            return overloaded();
+        }
+        anthropic_reply("```javascript\nActiveLayer.CreateRectangle(10, 10, 60, 40);\n```")
+    }
+
+    /// A service that is busy for a moment (503, #2037) is asked again
+    /// by itself: the drawing comes without the user seeing an error or
+    /// pressing Draw again.
+    #[test]
+    fn a_busy_service_is_asked_again_until_it_draws() {
+        let mut app = app();
+        let before = shapes(&app);
+        BUSY.with(|b| b.set(2));
+        app.ai.fake = Some(busy_then_draws);
+        app.ai.request = "a rectangle".into();
+        app.ai_draw();
+        assert_eq!(app.ai.sent.len(), 3, "the request, and twice more");
+        assert_eq!(app.ai.sent[0], app.ai.sent[2], "the same request again");
+        assert_eq!(app.ai.status, AiStatus::Done(1), "{:?}", app.ai.status);
+        assert_eq!(shapes(&app), before + 1);
+        assert!(!app.ai.busy());
+    }
+
+    /// A service that stays busy gets four tries, then the message says
+    /// so plainly: the status, how often it was tried, what to do, and
+    /// the service's own words (#2037: a bare 503 before).
+    #[test]
+    fn a_service_that_stays_busy_ends_in_a_clear_message() {
+        let mut app = app();
+        BUSY.with(|b| b.set(100));
+        app.ai.fake = Some(busy_then_draws);
+        app.ai.request = "a rectangle".into();
+        app.ai_draw();
+        assert_eq!(app.ai.sent.len(), 4);
+        let AiStatus::Failed(e) = &app.ai.status else {
+            panic!("{:?}", app.ai.status);
+        };
+        assert!(
+            e.starts_with(&trf(
+                "ai.error_busy_retried",
+                &[("status", "503"), ("n", "4")]
+            )),
+            "{e}"
+        );
+        assert!(e.contains("another model"), "{e}");
+        assert!(e.contains("The model is overloaded"), "{e}");
+        assert!(!app.ai.busy());
+        // The model list is fetched the same way.
+        BUSY.with(|b| b.set(1));
+        app.ai.sent.clear();
+        app.ai.fake = Some(|_| {
+            let left = BUSY.with(|b| b.get());
+            if left > 0 {
+                BUSY.with(|b| b.set(left - 1));
+                return overloaded();
+            }
+            Ok(HttpResponse {
+                retry_after: None,
+                status: 200,
+                body: r#"{"data":[{"id":"model-a"}]}"#.into(),
+            })
+        });
+        app.ai_fetch_models();
+        assert_eq!(app.ai.sent.len(), 2);
+        assert_eq!(app.ai.status, AiStatus::Listed(1));
+    }
+
+    /// While the service is busy the request waits its turn: nothing is
+    /// sent meanwhile, the panel says which try comes next, and Cancel
+    /// ends it.
+    #[test]
+    fn a_request_waits_between_its_tries_and_can_be_cancelled() {
+        let mut app = app();
+        BUSY.with(|b| b.set(100));
+        app.ai.fake = Some(busy_then_draws);
+        app.ai.fake_wait = std::time::Duration::from_secs(600);
+        app.ai.request = "a rectangle".into();
+        app.ai_draw();
+        assert_eq!(app.ai.sent.len(), 1);
+        assert!(app.ai.busy());
+        assert_eq!(app.ai.status, AiStatus::Waiting);
+        assert_eq!(
+            app.ai.waiting_text(),
+            trf(
+                "ai.busy_retrying",
+                &[("status", "503"), ("n", "2"), ("max", "4")]
+            )
+        );
+        assert!(app.poll_ai(), "still waiting");
+        assert_eq!(app.ai.sent.len(), 1);
+        app.ai_cancel();
+        assert!(!app.ai.busy() && !app.poll_ai());
+        assert_eq!(app.ai.sent.len(), 1, "nothing more goes after Cancel");
+        assert_eq!(app.ai.waiting_text(), tr("ai.waiting"));
+    }
+
     #[test]
     fn errors_of_the_service_and_the_network_are_shown() {
         let mut app = app();
@@ -1684,6 +1913,144 @@ mod tests {
         assert!(build_models_request(&anthropic, "k")
             .url
             .ends_with("/models?limit=1000"));
+    }
+
+    /// The model list offers the models that can draw (#2039): what the
+    /// Gemini service lists holds embedding, audio, live, robotics,
+    /// research, question answering, music, video and image models, which
+    /// only fail when picked. They stay out of the list (finished models
+    /// before previews), the model set up stays first, and "show every
+    /// model" brings them all back.
+    #[test]
+    fn the_model_list_offers_the_models_that_can_draw() {
+        let s = |v: &[&str]| v.iter().map(|m| m.to_string()).collect::<Vec<String>>();
+        let mut app = app();
+        let (_, kind, endpoint) = PRESETS[2];
+        app.settings.ai.provider = kind;
+        app.settings.ai.endpoint = endpoint.to_string();
+        app.ai.fake = Some(|_| {
+            Ok(HttpResponse {
+                retry_after: None,
+                status: 200,
+                body: json!({"object": "list", "data": [
+                    {"id": "models/gemini-embedding-001"},
+                    {"id": "models/gemini-3-pro-preview"},
+                    {"id": "models/gemini-2.5-flash"},
+                    {"id": "models/gemini-2.5-pro"},
+                    {"id": "models/gemini-2.5-flash-image"},
+                    {"id": "models/gemini-3-pro-image-preview"},
+                    {"id": "models/gemini-2.5-flash-preview-tts"},
+                    {"id": "models/gemini-2.5-flash-native-audio-latest"},
+                    {"id": "models/gemini-live-2.5-flash-preview"},
+                    {"id": "models/gemini-robotics-er-1.5-preview"},
+                    {"id": "models/deep-research-pro-preview-12-2025"},
+                    {"id": "models/gemini-2.5-computer-use-preview-10-2025"},
+                    {"id": "models/aqa"},
+                    {"id": "models/lyria-realtime-exp"},
+                    {"id": "models/veo-3.0-generate-001"},
+                    {"id": "models/imagen-4.0-generate-001"},
+                    {"id": "models/gemma-3-27b-it"},
+                    {"id": "models/gemini-3.8-flash"},
+                ]})
+                .to_string(),
+            })
+        });
+        app.ai_fetch_models();
+        assert_eq!(
+            app.ai.status,
+            AiStatus::Listed(18),
+            "every model is counted"
+        );
+        assert_eq!(
+            app.ai_model_choices(),
+            s(&[
+                "gemini-2.5-flash",
+                "gemini-2.5-pro",
+                "gemma-3-27b-it",
+                "gemini-3.8-flash",
+                "gemini-3-pro-preview",
+            ])
+        );
+        // The model set up stays, first, even one the list leaves out.
+        app.settings.ai.model = "gemini-2.5-flash-image".into();
+        let choices = app.ai_model_choices();
+        assert_eq!(choices[0], "gemini-2.5-flash-image");
+        assert_eq!(choices.len(), 6);
+        // A server whose models tell nothing by their names offers all.
+        app.settings.ai.model.clear();
+        app.ai.models = s(&["nomic-embed-text", "whisper-large"]);
+        assert_eq!(
+            app.ai_model_choices(),
+            s(&["nomic-embed-text", "whisper-large"])
+        );
+        // The image list holds what makes pictures through the call
+        // TraceDraw uses: a model the service says cannot answer
+        // `generateContent` stays out.
+        let listed = HttpResponse {
+            retry_after: None,
+            status: 200,
+            body: json!({"models": [
+                {"name": "models/gemini-2.5-flash", "supportedGenerationMethods": ["generateContent"]},
+                {"name": "models/gemini-2.5-flash-image", "supportedGenerationMethods": ["generateContent", "countTokens"]},
+                {"name": "models/imagen-4.0-generate-001", "supportedGenerationMethods": ["predict"]},
+                {"name": "models/gemini-3-pro-image-preview", "supportedGenerationMethods": ["generateContent"]},
+            ]})
+            .to_string(),
+        };
+        assert_eq!(
+            crate::ai_image::parse_models(crate::ai_image::ImageProvider::Gemini, &listed)
+                .expect("models"),
+            s(&["gemini-2.5-flash-image", "gemini-3-pro-image-preview"])
+        );
+    }
+
+    /// "Show every model the service lists" brings back the models the
+    /// list leaves out (#2039), and names alone decide which those are,
+    /// by whole words: other services and local servers keep their chat
+    /// models.
+    #[test]
+    fn every_model_can_be_shown_and_names_decide_which_draw() {
+        let s = |v: &[&str]| v.iter().map(|m| m.to_string()).collect::<Vec<String>>();
+        let mut app = app();
+        app.settings.ai.provider = Provider::OpenAiCompatible;
+        app.ai.models = s(&["text-embedding-3-small", "gpt-5.1", "gpt-image-1"]);
+        assert!(app.ai_models_hidden());
+        assert_eq!(app.ai_model_choices(), s(&["gpt-5.1"]));
+        app.ai.show_all_models = true;
+        assert_eq!(
+            app.ai_model_choices(),
+            s(&["text-embedding-3-small", "gpt-5.1", "gpt-image-1"])
+        );
+        app.ai.models = s(&["gpt-5.1"]);
+        assert!(!app.ai_models_hidden(), "nothing to bring back");
+        assert_eq!(
+            drawing_models(&s(&["b-preview", "a", "c-exp", "d"])),
+            s(&["a", "d", "b-preview", "c-exp"])
+        );
+        for (id, draws) in [
+            ("gpt-5.1", true),
+            ("gpt-4o-mini", true),
+            ("o4-mini", true),
+            ("claude-sonnet-5-5", true),
+            ("llama3.2", true),
+            ("olive-7b", true),
+            ("mistral-7b-instruct", true),
+            ("text-embedding-3-small", false),
+            ("gpt-4o-audio-preview", false),
+            ("gpt-4o-realtime-preview", false),
+            ("gpt-4o-transcribe", false),
+            ("gpt-image-1", false),
+            ("dall-e-3", false),
+            ("tts-1", false),
+            ("whisper-1", false),
+            ("omni-moderation-latest", false),
+            ("sora-2", false),
+            ("computer-use-preview", false),
+            ("nomic-embed-text", false),
+            ("babbage-002", false),
+        ] {
+            assert_eq!(writes_drawings(id), draws, "{id}");
+        }
     }
 
     /// The desktop transport against a server on this computer: the

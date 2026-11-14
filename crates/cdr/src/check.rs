@@ -22,6 +22,10 @@
 //!   text paragraph names exists in the tables, and a clip container's
 //!   argument 8005 names a group of the document's `LIST clpt` (whose
 //!   objects carry no `usdn`, as files have them);
+//! - bitmaps: an object's pixel size is its `bmp ` image's, and from
+//!   version 14 its box (from the origin) the image's size at the
+//!   image's resolution, as every bitmap of the files seen holds it
+//!   (#1222);
 //! - blends: a blend's linked group (`LIST lnkg` of object type 7 with a
 //!   step argument) stands between two objects of its list, its ends,
 //!   has a `usdn` of its own and a step count of 1 to 999 (#1192).
@@ -73,7 +77,7 @@ pub fn check_bytes(bytes: &[u8]) -> Result<Vec<Finding>> {
         fills: HashSet::new(),
         outlines: HashSet::new(),
         styles: HashSet::new(),
-        images: HashSet::new(),
+        images: HashMap::new(),
         usdn: HashMap::new(),
         spnd: HashMap::new(),
         objects: 0,
@@ -86,6 +90,28 @@ pub fn check_bytes(bytes: &[u8]) -> Result<Vec<Finding>> {
     Ok(c.findings)
 }
 
+/// What a `bmp ` record says of its image: the size in pixels and the
+/// resolution in pixels a kilometre (x, y; 0 when not given).
+#[derive(Debug, Clone, Copy)]
+struct Image {
+    width: u32,
+    height: u32,
+    res: (u32, u32),
+}
+
+impl Image {
+    /// The record's image (id, 50 bytes of header, colour model, 1, the
+    /// width and the height, 1, the bits, the row size, the pixel bytes,
+    /// 0, the x and y resolutions), when it holds that much.
+    fn of(d: &[u8]) -> Option<Self> {
+        Some(Self {
+            width: u32_at(d, 62)?,
+            height: u32_at(d, 66)?,
+            res: (u32_at(d, 90).unwrap_or(0), u32_at(d, 94).unwrap_or(0)),
+        })
+    }
+}
+
 struct Checker<'a> {
     v: u16,
     tree: &'a Tree,
@@ -94,8 +120,9 @@ struct Checker<'a> {
     fills: HashSet<u32>,
     outlines: HashSet<u32>,
     styles: HashSet<u32>,
-    /// The ids of the `bmp ` records.
-    images: HashSet<u32>,
+    /// The `bmp ` records by id: the image's size in pixels and its
+    /// resolution (pixels a kilometre, x and y), when the record holds them.
+    images: HashMap<u32, Option<Image>>,
     /// `usdn` number to the place that holds it.
     usdn: HashMap<u32, String>,
     spnd: HashMap<u32, String>,
@@ -305,10 +332,12 @@ impl<'a> Checker<'a> {
         });
         for d in images {
             match u32_at(d, 0) {
-                Some(id) if !self.images.insert(id) => {
+                Some(id) if self.images.contains_key(&id) => {
                     self.note("bmp ", format!("image id {id} used by two records"));
                 }
-                Some(_) => {}
+                Some(id) => {
+                    self.images.insert(id, Image::of(d));
+                }
                 None => self.note("bmp ", "record shorter than its id"),
             }
         }
@@ -633,13 +662,18 @@ impl<'a> Checker<'a> {
             self.note(place, "bitmap image number is 0");
         }
         match u32_at(d, 48) {
-            Some(id) if !self.images.contains(&id) => {
-                self.note(
+            Some(id) => match self.images.get(&id).copied() {
+                None => self.note(
                     place,
                     format!("bitmap names image {id}, which has no record"),
-                );
-            }
-            Some(_) => {}
+                ),
+                // The object's pixel size is its image's (#1222), and from
+                // 14 its box the image's size at the image's resolution,
+                // which the object's `trfd` places and scales, as every
+                // bitmap of the files seen holds it.
+                Some(Some(image)) => self.bitmap_image(d, place, &corners, image, seen),
+                Some(None) => {}
+            },
             None => self.note(place, "bitmap record shorter than its image id"),
         }
         let tail_at = if self.v == 8 { 64 } else { 72 };
@@ -701,6 +735,45 @@ impl<'a> Checker<'a> {
         let outer = Box::of((0..n).filter_map(point))?;
         let inner = Box::of((0..n).filter(|k| !control(*k)).filter_map(point));
         Some((inner, outer))
+    }
+
+    /// A bitmap object's pixel size and box against its image's record.
+    fn bitmap_image(&mut self, d: &[u8], place: &str, corners: &[i32], image: Image, seen: bool) {
+        let size = (u32_at(d, 36), u32_at(d, 40));
+        if size != (Some(image.width), Some(image.height)) {
+            self.note(
+                place,
+                format!(
+                    "bitmap pixel size {:?} x {:?} is not its image's, {} x {}",
+                    size.0, size.1, image.width, image.height
+                ),
+            );
+        }
+        if !seen {
+            return;
+        }
+        let &[x0, y1, x1, y0] = corners else {
+            return;
+        };
+        let boxed = (f64::from(x1) - f64::from(x0), f64::from(y1) - f64::from(y0));
+        for (axis, (units, px, per_km)) in [
+            ("width", (boxed.0, image.width, image.res.0)),
+            ("height", (boxed.1, image.height, image.res.1)),
+        ] {
+            if per_km == 0 {
+                continue;
+            }
+            let mm = units * MM_PER_UNIT;
+            let at_resolution = f64::from(px) / f64::from(per_km) * 1_000_000.0;
+            if (mm - at_resolution).abs() > BOX_TOLERANCE_MM.max(at_resolution * 1e-4) {
+                self.note(
+                    place,
+                    format!(
+                        "bitmap box {axis} is {mm:.3} mm, its image's {at_resolution:.3} mm at its resolution"
+                    ),
+                );
+            }
+        }
     }
 
     /// The width of an outline of the table, in millimetres (0 when it is
@@ -1504,6 +1577,48 @@ mod tests {
         assert!(lacks([0x0c, 0x40, 0x40, 0x40, 0x48]));
         assert!(lacks([0x0c, 0x44, 0x44, 0x40, 0x48]));
         assert!(lacks([0x04, 0x44, 0x44, 0x44, 0x48]));
+    }
+
+    /// A bitmap object whose pixel size is not its image's is reported
+    /// (#1222): the object of `bitmap` says 4 x 4 pixels, so a 4 x 4
+    /// image passes and a 5 x 4 one does not; and a missing image is
+    /// named.
+    #[test]
+    fn a_bitmaps_pixel_size_is_its_images() {
+        let findings = |image: Option<(u32, u32)>| {
+            let mut page = obj(&bitmap([0x0c, 0x44, 0x44, 0x44, 0x48]));
+            let mut images = Vec::new();
+            if let Some((w, h)) = image {
+                let mut pm = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+                pm.fill(tiny_skia::Color::from_rgba8(1, 2, 3, 255));
+                let png = pm.encode_png().expect("png");
+                let (rec, ..) = crate::write::bmp_record(1, &png, (10.0, 10.0)).expect("record");
+                images = list(b"bmpt", &chunk(b"bmp ", &rec));
+            }
+            images.append(&mut page);
+            let body = [
+                chunk(b"vrsn", &u16s(&[1300])),
+                chunk(b"mcfg", &mcfg(V, 2_540_000, 2_540_000)),
+                images,
+            ]
+            .concat();
+            let bytes = riff(b"CDRD", &body);
+            check_bytes(&bytes)
+                .expect("checks")
+                .into_iter()
+                .map(|f| f.what)
+                .filter(|w| w.contains("pixel size") || w.contains("no record"))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(findings(Some((4, 4))), Vec::<String>::new());
+        let wrong = findings(Some((5, 4)));
+        assert_eq!(wrong.len(), 1, "{wrong:?}");
+        assert!(wrong[0].contains("pixel size"), "{wrong:?}");
+        let none = findings(None);
+        assert!(
+            none.iter().any(|w| w.contains("which has no record")),
+            "{none:?}"
+        );
     }
 
     /// A picture whose style string gives its outline `type` 1 with width

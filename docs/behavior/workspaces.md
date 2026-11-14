@@ -95,9 +95,12 @@ Checks: `app::tests::tools_view_snapping_and_dockers_survive_a_restart`,
 
 ## Dockers
 
-The tab column holds the open dockers, as tabs; a click on a tab brings
-its docker to the front, a click on the tab in front collapses the
-docker area to the column. The docker's close button (x) and its tab's
+The tab column holds the open dockers, as tabs; the tab of the docker
+in front takes the colour of the document tab in front (light blue on
+the light themes; #2316,
+`ui::dockers::tests::the_tab_of_the_docker_in_front_is_marked`). A
+click on a tab brings its docker to the front, a click on the tab in
+front collapses the docker area to the column. The docker's close button (x) and its tab's
 "Close Docker" take the docker out of the column and bring the next one
 forward; with none left the docker area closes. Collapse (the two
 triangles) only folds the area. A docker opened from a menu or its

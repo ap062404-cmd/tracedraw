@@ -34,6 +34,9 @@ pub(super) struct AppView {
     pub palettes: Vec<(String, Vec<(String, Color)>)>,
     /// View > Simulate Overprints is on.
     pub simulate_overprints: bool,
+    /// The page sizes the user saved, which name a page's paper before
+    /// the built-in ones (`Page.Paper`).
+    pub page_sizes: Vec<crate::settings::PageSizePreset>,
 }
 
 impl AppView {
@@ -60,6 +63,7 @@ impl AppView {
                 .map(|p| (p.display_name(), p.colors.clone()))
                 .collect(),
             simulate_overprints: app.simulate_overprints,
+            page_sizes: app.settings.page_sizes.clone(),
         }
     }
 }
@@ -301,10 +305,34 @@ impl HostInner {
         }))
     }
 
-    fn bounds_of(&self, list: &[ShapeId]) -> Option<tracedraw_core::geometry::Rect> {
+    /// The box of the objects; with `outline`, widened by half of each
+    /// object's outline, as CorelDRAW's `GetBoundingBox(..., True)`
+    /// gives it (#2165: crop marks are placed from it).
+    fn bounds_with(
+        &self,
+        list: &[ShapeId],
+        outline: bool,
+    ) -> Option<tracedraw_core::geometry::Rect> {
+        fn half_outline(s: &Shape) -> f64 {
+            let own = s.stroke.as_ref().map_or(0.0, |k| k.width.max(0.0) / 2.0);
+            match &s.kind {
+                ShapeKind::Group { children } => {
+                    children.iter().map(half_outline).fold(own, f64::max)
+                }
+                _ => own,
+            }
+        }
         list.iter()
             .filter_map(|id| self.doc.shape_on_page(*id))
-            .map(|s| s.bounds())
+            .map(|s| {
+                let b = s.bounds();
+                if outline {
+                    let h = half_outline(&s);
+                    b.inflate(h, h)
+                } else {
+                    b
+                }
+            })
             .reduce(|a, b| a.union(b))
     }
 
@@ -333,7 +361,8 @@ impl HostInner {
             "vg_exists" => json!({"yes": self.doc.find_shape(ShapeId(id_arg(a, "id")?)).is_some()}),
             "vg_bounds" => {
                 let list = ids(a, "ids");
-                match self.bounds_of(&list) {
+                let outline = a.get("outline").and_then(|v| v.as_bool()).unwrap_or(false);
+                match self.bounds_with(&list, outline) {
                     Some(b) => json!({"x0": b.x0, "y0": b.y0, "x1": b.x1, "y1": b.y1}),
                     None => json!({"x0": 0.0, "y0": 0.0, "x1": 0.0, "y1": 0.0}),
                 }
@@ -643,6 +672,43 @@ impl HostInner {
                 }
                 json!({"ids": out})
             }
+            // Copy, Cut and Paste (#2165: a tiling macro copies its crop
+            // marks and pastes them for the other side).
+            "vg_copy" | "vg_cut" => {
+                let list: Vec<ShapeId> = ids(a, "ids")
+                    .into_iter()
+                    .filter(|id| self.doc.shape_on_page(*id).is_some())
+                    .collect();
+                if list.is_empty() {
+                    return Err("nothing to copy".into());
+                }
+                self.clip = list
+                    .iter()
+                    .filter_map(|id| self.doc.shape_on_page(*id))
+                    .collect();
+                if method == "vg_cut" {
+                    self.run(Command::DeleteShapes {
+                        shapes: list.clone(),
+                    })?;
+                    self.selection.retain(|s| !list.contains(s));
+                }
+                json!({})
+            }
+            "vg_paste" => {
+                if self.clip.is_empty() {
+                    return Err("the clipboard is empty".into());
+                }
+                let layer = self.layer_for(a)?;
+                let mut out = Vec::new();
+                for s in self.clip.clone() {
+                    let copy = self.fresh_ids(s);
+                    out.push(copy.id);
+                    self.run(Command::AddShape { layer, shape: copy })?;
+                }
+                // What is pasted is selected, as in CorelDRAW.
+                self.selection = out.clone();
+                json!({"ids": out.iter().map(|i| i.raw()).collect::<Vec<_>>()})
+            }
             "vg_delete" => {
                 let list: Vec<ShapeId> = ids(a, "ids")
                     .into_iter()
@@ -691,11 +757,37 @@ impl HostInner {
                     .enumerate()
                     .find(|(_, p)| p.id == pid)
                     .ok_or("no page")?;
+                // The paper the size is, by name ("A4"), or "" for a
+                // size of its own (#1255).
+                let paper = crate::ui::dialogs::paper_name(p.size, &self.view.page_sizes)
+                    .unwrap_or_default();
                 json!({
                     "name": p.name, "w": p.size.width, "h": p.size.height, "index": i + 1,
+                    "paper": paper,
                     "layers": p.layers.iter().map(|l| l.id.raw()).collect::<Vec<_>>(),
                     "master": self.doc.master.iter().map(|l| l.id.raw()).collect::<Vec<_>>(),
                 })
+            }
+            "vg_paper_size" => {
+                // The size of a paper by name, the user's saved sizes
+                // first, portrait.
+                let name = a.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                let size = self
+                    .view
+                    .page_sizes
+                    .iter()
+                    .find(|p| p.name.eq_ignore_ascii_case(name))
+                    .map(|p| (p.width_mm, p.height_mm))
+                    .or_else(|| {
+                        crate::ui::dialogs::paper_presets()
+                            .into_iter()
+                            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+                            .map(|(_, s)| (s.width, s.height))
+                    });
+                match size {
+                    Some((w, h)) => json!({"w": w.min(h), "h": w.max(h)}),
+                    None => json!({}),
+                }
             }
             "vg_rename_page" => {
                 let page = PageId(id_arg(a, "page")?);
@@ -788,6 +880,8 @@ impl HostInner {
                 let len: f64 = path.segments().map(|seg| seg.arclen(1e-4)).sum();
                 json!({"length": len})
             }
+            // Application.FontList: the families the font lists offer.
+            "vg_fonts" => json!({"families": tracedraw_text::fonts().families()}),
             "vg_palettes" => json!({
                 "palettes": self
                     .view

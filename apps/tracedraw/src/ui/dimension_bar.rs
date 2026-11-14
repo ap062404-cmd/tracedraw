@@ -357,8 +357,23 @@ pub fn draw_preview(app: &App, painter: &Painter) {
     let ctrl = painter
         .ctx()
         .input(|i| i.modifiers.command || i.modifiers.ctrl);
+    // Where a click would put the point: snapped, then constrained. Only
+    // while a dimension is being placed: snapping shows its own marks.
+    let placing = !app.dimension_points.is_empty()
+        && matches!(
+            app.tool,
+            Tool::ParallelDimension
+                | Tool::HorizontalVerticalDimension
+                | Tool::SegmentDimension
+                | Tool::AngularDimension
+        );
+    let at = if placing { app.snap_point(at) } else { at };
     let at = app.dimension_point(at, ctrl);
     let blue = Color32::from_rgb(40, 110, 220);
+    // The length (or angle) so far, beside the pointer (#2624).
+    if let Some(text) = app.dimension_live_text(at) {
+        draw_live_label(painter, app.view.to_screen(at), &text, blue);
+    }
     // The first leg follows the pointer while the second point is wanted.
     if let (
         [first],
@@ -407,10 +422,79 @@ pub fn draw_preview(app: &App, painter: &Painter) {
     }
 }
 
+/// The live measure `text` in a small box below and to the right of the
+/// pointer at `at`, kept inside the drawing area (#2624).
+fn draw_live_label(painter: &Painter, at: egui::Pos2, text: &str, blue: Color32) {
+    let font = egui::FontId::proportional(12.0);
+    let galley = painter.layout_no_wrap(text.to_string(), font, Color32::from_rgb(20, 40, 90));
+    let pad = egui::vec2(5.0, 2.0);
+    let size = galley.size() + pad * 2.0;
+    let clip = painter.clip_rect();
+    let mut min = at + egui::vec2(16.0, 18.0);
+    if min.x + size.x > clip.max.x {
+        min.x = at.x - 16.0 - size.x;
+    }
+    if min.y + size.y > clip.max.y {
+        min.y = at.y - 18.0 - size.y;
+    }
+    let rect = egui::Rect::from_min_size(min, size);
+    painter.rect_filled(
+        rect,
+        3.0,
+        Color32::from_rgba_unmultiplied(255, 255, 255, 235),
+    );
+    painter.rect_stroke(
+        rect,
+        3.0,
+        Stroke::new(1.0, blue),
+        egui::epaint::StrokeKind::Inside,
+    );
+    painter.galley(rect.min + pad, galley, Color32::BLACK);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tracedraw_core::geometry::Point;
+
+    /// While a dimension is placed, the length (or angle) so far reads in
+    /// the property bar's units and decimals, from the first point on
+    /// (#2624).
+    #[test]
+    fn the_measure_reads_live_while_the_dimension_is_placed() {
+        let mut app = App::headless();
+        app.tool = Tool::ParallelDimension;
+        assert_eq!(app.dimension_live_text(Point::new(5.0, 5.0)), None);
+        app.dimension_style.units = "cm".into();
+        app.dimension_style.precision = 1;
+        app.dimension_style.show_units = true;
+        app.dimension_points = vec![Point::new(0.0, 0.0)];
+        assert_eq!(
+            app.dimension_live_text(Point::new(215.0, 0.0)).as_deref(),
+            Some("21.5 cm")
+        );
+        // Horizontal/Vertical measures the leg along its axis only.
+        app.tool = Tool::HorizontalVerticalDimension;
+        assert_eq!(
+            app.dimension_live_text(Point::new(30.0, 4.0)).as_deref(),
+            Some("3.0 cm")
+        );
+        // The line being placed keeps the measure of its two points.
+        app.dimension_points = vec![Point::new(0.0, 0.0), Point::new(0.0, 40.0)];
+        assert_eq!(
+            app.dimension_live_text(Point::new(25.0, 20.0)).as_deref(),
+            Some("4.0 cm")
+        );
+        app.tool = Tool::AngularDimension;
+        app.dimension_points = vec![Point::new(0.0, 0.0)];
+        assert_eq!(app.dimension_live_text(Point::new(5.0, 5.0)), None);
+        app.dimension_points = vec![Point::new(0.0, 0.0), Point::new(10.0, 0.0)];
+        app.dimension_style.precision = 0;
+        let t = app
+            .dimension_live_text(Point::new(10.0, 10.0))
+            .expect("angle");
+        assert_eq!(t, "45\u{b0}");
+    }
 
     #[test]
     fn the_bar_and_the_preview_draw() {

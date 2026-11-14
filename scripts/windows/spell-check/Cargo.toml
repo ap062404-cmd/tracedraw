@@ -1,6 +1,8 @@
 # Runs the tests of the spell checker of Windows (apps/tracedraw/src/
-# spell_windows.rs, #1405) on a Windows runner, without building the whole
-# app for tests: `cargo test -- --nocapture` here (the build workflow does).
+# spell_windows.rs, #1405) and of the hold on the open drawings' files
+# (apps/tracedraw/src/file_hold.rs, #2130) on a Windows runner, without
+# building the whole app for tests: `cargo test -- --nocapture` here (the
+# build workflow does).
 [package]
 name = "spell-windows-check"
 version = "0.0.0"

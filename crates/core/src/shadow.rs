@@ -5,9 +5,36 @@
 //! `docs/behavior/drop-shadow.md`).
 
 use crate::document::Shadow;
-use crate::geometry::{Affine, Point, Rect, Vec2};
+use crate::geometry::{Affine, BezPath, Point, Rect, Vec2};
 use crate::live::MergeMode;
 use serde::{Deserialize, Serialize};
+
+impl crate::document::Shape {
+    /// The outline the object's drop shadow is cast from and measured
+    /// on, in its parent's space: the outline as it is drawn, an
+    /// envelope, a perspective or a distortion taken in (#2217). An
+    /// object whose effects draw it among their own objects (a body
+    /// turned in space) leaves no outline of its own; its shadow is then
+    /// measured on the outline it has without them.
+    pub fn shadow_outline(&self) -> BezPath {
+        if self.effects.is_empty() {
+            return self.page_path();
+        }
+        let drawn = crate::live::evaluate(self).main.page_path();
+        if drawn.elements().is_empty() {
+            self.page_path()
+        } else {
+            drawn
+        }
+    }
+
+    /// The box of [`Self::shadow_outline`]: where a perspective shadow
+    /// stands, what its length is a share of and where the shadow's
+    /// handles sit.
+    pub fn shadow_box(&self) -> Rect {
+        kurbo::Shape::bounding_box(&self.shadow_outline())
+    }
+}
 
 /// The edge of the object a perspective shadow stands on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

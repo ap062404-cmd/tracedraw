@@ -104,12 +104,24 @@ fn convert_value<T: Serialize + DeserializeOwned>(x: &mut T, f: &dyn Fn(Color) -
 /// converted one by one, and a bitmap's pixels are left out of the
 /// serialised form.
 pub fn convert_shape(s: &mut Shape, f: &dyn Fn(Color) -> Color, to: ColorTarget) -> usize {
+    map_shape(s, f, Some(to))
+}
+
+/// Every colour of `s` and of the objects inside it changed by `f`, a
+/// bitmap's colour mode and pixels left as they are: the number changed.
+pub fn map_shape_colors(s: &mut Shape, f: &dyn Fn(Color) -> Color) -> usize {
+    map_shape(s, f, None)
+}
+
+/// [`convert_shape`], with the bitmaps' colour mode set to `to` when
+/// there is one.
+fn map_shape(s: &mut Shape, f: &dyn Fn(Color) -> Color, to: Option<ColorTarget>) -> usize {
     let heavy = matches!(
         s.kind,
         ShapeKind::Group { .. } | ShapeKind::ClipFrame { .. } | ShapeKind::Bitmap { .. }
     );
     let mut n = 0;
-    if matches!(s.kind, ShapeKind::Bitmap { .. }) {
+    if let (ShapeKind::Bitmap { .. }, Some(to)) = (&s.kind, to) {
         let cmyk = to == ColorTarget::Cmyk;
         if s.cmyk_bitmap != cmyk {
             s.cmyk_bitmap = cmyk;
@@ -139,14 +151,14 @@ pub fn convert_shape(s: &mut Shape, f: &dyn Fn(Color) -> Color, to: ColorTarget)
             ShapeKind::Group { children } => {
                 n += children
                     .iter_mut()
-                    .map(|c| convert_shape(c, f, to))
+                    .map(|c| map_shape(c, f, to))
                     .sum::<usize>();
             }
             ShapeKind::ClipFrame { frame, contents } => {
-                n += convert_shape(frame, f, to);
+                n += map_shape(frame, f, to);
                 n += contents
                     .iter_mut()
-                    .map(|c| convert_shape(c, f, to))
+                    .map(|c| map_shape(c, f, to))
                     .sum::<usize>();
             }
             _ => {}

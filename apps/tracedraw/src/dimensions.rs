@@ -1572,6 +1572,43 @@ impl App {
         crate::interaction::constrain_from(from, p, self.settings.constrain_angle)
     }
 
+    /// The measure of the dimension being placed, as its label will show
+    /// it (the property bar's units and decimals), with the pointer at
+    /// `at`: the length while the second point or the dimension line is
+    /// wanted, the angle while the angular tool's second side or its arc
+    /// is (#2624). None before the first point.
+    pub fn dimension_live_text(&self, at: Point) -> Option<String> {
+        use crate::tools::Tool;
+        let linear = matches!(
+            self.tool,
+            Tool::ParallelDimension | Tool::HorizontalVerticalDimension | Tool::SegmentDimension
+        );
+        let measure = match (self.tool, &self.dimension_points[..]) {
+            (Tool::AngularDimension, [center, a]) => Measure::Angular {
+                center: *center,
+                a: *a,
+                b: at,
+                at,
+            },
+            (Tool::AngularDimension, [center, a, b]) => Measure::Angular {
+                center: *center,
+                a: *a,
+                b: *b,
+                at,
+            },
+            (_, [a]) if linear => {
+                let (a, b) = self.measured_pair(*a, at);
+                Measure::Linear { a, b, at }
+            }
+            (_, [a, b]) if linear => {
+                let (a, b) = self.measured_pair(*a, *b);
+                Measure::Linear { a, b, at }
+            }
+            _ => return None,
+        };
+        Some(Dimension::new(measure, self.dimension_style.clone()).value_text(self.units))
+    }
+
     /// The dimension the tool would make with the pointer at `at`, while
     /// its points are being given (for the preview).
     pub fn dimension_preview(&self, at: Point) -> Option<Dimension> {

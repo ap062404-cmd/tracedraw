@@ -25,6 +25,16 @@ object under the pointer, a locked one or one on a locked layer too
 (reading leaves it as it is; `App::hit_test_to_read`, #365). Applying a
 sampled colour or attributes never changes a locked object.
 
+## Sample again after applying
+
+Both tools' property bars have "Sample again after applying"
+(`settings.eyedropper_sample_after_apply`, off at first, kept between
+sessions). With it on, a click that applies puts the tool back in
+Select mode, so the next click samples: pick, apply, pick, apply with
+no key held and no press of Select Color, for a pen or a touch screen
+(`eyedropper::tests::the_eyedropper_samples_again_after_applying_when_asked`,
+#2380). Off, the tool stays in Apply mode as described above.
+
 ## Colour Eyedropper
 
 - Property bar: Select Color, Apply Color, sample size (1x1, 2x2, 5x5
@@ -33,9 +43,29 @@ sampled colour or attributes never changes a locked object.
   - a bitmap gives the pixel under the pointer, averaged over the
     sample box (box anchored at the pointer pixel, clipped to the
     image), as RGB, whatever format the picture keeps (PNG, JPEG ...);
+    a picture that keeps CMYK ink channels fitting its pixels (one read
+    from a CMYK file, or converted to a CMYK bitmap) gives the inks it
+    keeps, averaged the same way, as CMYK (#2381);
+  - an object with bitmap effects (Hue/Saturation/Lightness and the
+    others) gives the colour it shows with them, read from its picture
+    over the sample box, its painted pixels only; it gave the fill the
+    effects change (#2380,
+    `eyedropper::tests::the_colour_of_an_object_with_a_bitmap_effect_is_read_as_shown`);
+  - a closed object with a lens that lays a colour over what lies
+    beneath (Transparency, Color Add, Color Limit, Tinted Grayscale,
+    Wireframe) gives the lens colour, filled or not, anywhere inside it:
+    an unfilled one lying over other objects gave the colour of the
+    object beneath, a filled one its fill, which the lens does not draw
+    (#2549, `eyedropper::tests::a_shape_with_a_transparency_lens_over_others_gives_its_colour`).
+    A lens is picked anywhere inside it, as it shows there;
   - a solid fill gives its colour; a gradient fill gives its first
     stop; otherwise the outline colour;
   - Shift+click reads the outline colour first.
+  - With objects selected, the colour sampled also goes straight onto
+    them, as a palette swatch would: the fill, or with Shift+click the
+    outline colour (each keeps its own width and dash), one undo step;
+    locked objects keep theirs. Apply mode follows as usual (#2551,
+    `eyedropper::tests::a_sampled_colour_is_applied_to_the_selection`).
 - Apply mode, click on an object: a solid fill with the sampled colour
   (`SetFill`); Ctrl+click samples again (Ctrl+Shift+click: the outline
   first); Shift+click sets the outline colour instead, creating a
@@ -55,13 +85,15 @@ beside the pointer shows the colour a click would take
 - its name, in bold, when it has one: a spot colour's ink, else the first
   colour of the default palette or the palettes shown that is exactly
   equal (`ui::palette::name_of`);
-- its values in its own model when it is a CMYK or RGB colour (CMYK:
-  C, M, Y, K in %, RGB: R, G, B 0 to 255), so a colour converted with
+- its values in its own model, whatever the drawing's primary colour
+  mode (CMYK: C, M, Y, K in %, RGB: R, G, B 0 to 255, HSB and HSL: H in
+  degrees, S and B or L in %, Lab: L, a, b, YIQ: Y, I, Q 0 to 255,
+  grayscale: its level 0 to 255), so a colour converted with
   Tools > Convert Colors reads in the model it went to, a picture in
-  CMYK mode giving its pixels in CMYK (#1254); a colour
-  of another model (HSB, Lab, grey...) in the drawing's primary colour
-  mode (Document Setup); one per line; spot colours show their tint
-  and Registration its name;
+  CMYK mode giving its pixels in CMYK (#1254), and a colour set in HSB,
+  HSL, Lab, YIQ or grayscale reads in that model (#2612: they read in
+  CMYK); one per line; spot colours show their tint and Registration
+  its name;
 - its hex value, upper case (`#E02020`).
 
 The colour is the one the click would take: for the tool what

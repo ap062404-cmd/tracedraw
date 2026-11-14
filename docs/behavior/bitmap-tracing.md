@@ -373,7 +373,12 @@ can be undone.
    the edge (art on a transparent background) there is none and nothing
    is removed (#1250: the commonest of none was the last colour of the
    palette, and Remove entire color took it out of the art, such as the
-   yellow of a bee's head, leaving its fringe as an outline).
+   yellow of a bee's head, leaving its fringe as an outline). The same
+   when the edge is mostly transparent: a colour is the background only
+   when more of the edge is that colour than is transparent (#1930: the
+   stems of a floral pattern that run off the edge were its only colour
+   there, so Remove background took their black for the background and
+   erased every shape touching the edge).
 
 ## Best settings (Optimized, Best optimization)
 
@@ -520,6 +525,10 @@ width equal to the mean local thickness.
 - `trace::tests::art_on_a_transparent_background_keeps_every_colour`
   (#1250): a yellow disc with a black band on a transparent background
   keeps both colours, the head drawn yellow, whatever Remove says.
+- `trace::tests::stems_running_off_a_transparent_edge_are_kept`
+  (#1930): a black stem running off the bottom of a transparent picture
+  and a dot inside, Line Art at detail, smoothing and corner smoothness
+  100 with Remove background found automatically: both are drawn.
 - `trace::tests::fringes_go_to_the_two_sides_and_strokes_stay`,
   `trace::tests::smoothing_takes_bumps_and_notches_off_edges_and_keeps_lines`.
 - `trace::tests::edge_pixels_go_to_the_flat_colours_beside_them`,

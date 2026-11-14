@@ -171,6 +171,24 @@ and `--reset-settings` starts open windows of their own.
   `try_recv` a frame when none came), waiting while a dialog or a question
   is up or the drawings are being closed. Wayland does not let a window
   raise itself: it asks for attention instead.
+- The window comes to the front in the frame the files arrive, restored
+  when it was minimized, before it reads them and whatever it shows
+  (#2129). Windows lets only the program the user last started or
+  clicked bring a window to the foreground, which is the start made for
+  the double-clicked file and not the running window: the start passes
+  that right to the window's process (`AllowSetForegroundWindow` with the
+  process `instance.json` names) once it reaches the window and before
+  it sends the files
+  (`instance::tests::the_start_lets_the_window_come_to_the_front_before_it_sends_the_files`,
+  `instance::tests::the_window_comes_up_when_the_files_arrive_and_before_they_are_read`;
+  the Windows call itself is not covered by a test). It is asked to
+  come up once more when the files have been opened, as before.
+- A minimized window comes up for the files too: it draws nothing, so
+  it runs the app's logic and no ui, and the files are taken and the
+  window restored from the logic (`instance::bring_up_for_handed_over`).
+  When this ran with the ui, a minimized window took nothing until the
+  user restored it from the taskbar (#2129, still so on 0.44.0;
+  `instance::tests::a_minimized_window_comes_up_for_the_files_from_its_logic`).
 - A start with the next renderer after a failed one (see below) takes the
   place over. Portable copies and `TRACEDRAW_CONFIG_DIR` each have their
   own window.
@@ -237,7 +255,12 @@ and `--reset-settings` starts open windows of their own.
   Options > General > Use hardware acceleration (on) picks the graphics
   card named beside it, or with Fastest available a separate card before
   a built-in one, a virtual one, then others; never a software adapter
-  (#616). Off, the software adapter (WARP on Windows, a CPU Vulkan driver
+  (#616). On Windows a card wgpu offers through both Direct3D 12 and
+  Vulkan is taken through Direct3D 12, whose swap chain the desktop
+  compositor presents; a Vulkan swap chain there made the window blink
+  when another window or a dialog came over it or it came back to the
+  front, on Intel and NVIDIA drivers (#1579,
+  `gpu::tests::windows_takes_a_card_through_direct3d_12`). Off, the software adapter (WARP on Windows, a CPU Vulkan driver
   elsewhere). Options shows what draws the window in this run; the
   choice takes effect at the next start.
 - A start that cannot open the window that way runs TraceDraw again with
@@ -427,6 +450,21 @@ and `--reset-settings` starts open windows of their own.
   never paced (`gpu::tests::frames_are_paced_to_the_cap`,
   `gpu::tests::software_renderers_are_recognised`,
   `ui::cursors::tests::a_software_adapter_shows_the_system_pointers`).
+- With Use hardware acceleration off, when working on the drawing turns
+  out slow on the software adapter and this computer has a graphics
+  card, TraceDraw says so once a run (`ui::gpu_hint`): of the last 60
+  frames of a drag, a scroll or a zoom (a frame following another one of
+  work, gaps over a second left out as pauses), 30 or more came over
+  0.1 s apart (under ten a second). The card is the first separate or
+  built-in one the system lists, never a virtual or software adapter,
+  looked for on a thread of its own (`gpu::card_found`). The message
+  shows once the work stops and no other dialog is open; it names the
+  card and offers Turn On (ticks the option, from the next start), Options
+  (Options > General) and Not Now, with "Do not show this message again",
+  which clears "When drawing is slow and hardware acceleration is off" in
+  Options > Global > Warnings (on by default, desktop only). With the
+  option on and the window still on the CPU, the card's driver failed, so
+  no hint shows (`ui::gpu_hint::tests`).
 
 ## Back to the defaults
 

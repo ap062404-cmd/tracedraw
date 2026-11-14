@@ -397,15 +397,82 @@ fn in_rgb(c: Color) -> Color {
     }
 }
 
-/// The name of `c` in the default palette or the palettes shown; empty
-/// when it has none.
+/// The name of `c`: a spot ink's of the drawing, else its name in the
+/// default palette or the palettes shown; empty when it has none.
 pub fn name_of(app: &App, c: Color) -> String {
+    // A spot colour of the drawing goes by its ink's name, such as the
+    // CutContour ink TraceCut adds (#2186).
+    if let Color::Spot { ink, .. } = c {
+        if let Some(i) = app.has_document().then(|| app.doc().ink(ink)).flatten() {
+            if !i.name.is_empty() {
+                return i.name.clone();
+            }
+        }
+    }
     app.palette
         .iter()
         .chain(app.palettes.iter().flat_map(|p| p.colors.iter()))
         .find(|(_, pc)| *pc == c)
         .map(|(n, _)| n.clone())
         .unwrap_or_default()
+}
+
+/// The mark of a spot colour's swatch: a small dot in its lower right
+/// corner, white on a dark colour and black on a light one, so a spot
+/// ink stands out from the process colours beside it (#2321).
+pub fn spot_mark(painter: &egui::Painter, cell: Rect, c: tracedraw_core::Color) {
+    let side = cell.width().min(cell.height());
+    if side < 6.0 {
+        return;
+    }
+    let r = (side * 0.14).clamp(1.5, 3.0);
+    let at = cell.right_bottom() - vec2(r + 2.0, r + 2.0);
+    let (dot, ring) = mark_colors(c);
+    painter.circle(at, r, dot, Stroke::new(0.5, ring));
+}
+
+/// The colours of a mark on a swatch of `c`: the mark itself and its thin
+/// edge, black on a light colour and white on a dark one.
+fn mark_colors(c: tracedraw_core::Color) -> (Color32, Color32) {
+    let [red, green, blue] = c.to_rgb8();
+    let light = 0.299 * red as f32 + 0.587 * green as f32 + 0.114 * blue as f32 > 140.0;
+    if light {
+        (Color32::BLACK, Color32::WHITE)
+    } else {
+        (Color32::WHITE, Color32::BLACK)
+    }
+}
+
+/// The mark of an overprinting fill or outline on a swatch: a small ring
+/// in its lower left corner (the spot colour's dot sits in the lower
+/// right), so a colour that prints over the inks beneath it is told from
+/// one that knocks them out (#2455).
+pub fn overprint_mark(painter: &egui::Painter, cell: Rect, c: tracedraw_core::Color) {
+    let side = cell.width().min(cell.height());
+    if side < 6.0 {
+        return;
+    }
+    let r = (side * 0.14).clamp(1.5, 3.0);
+    let at = cell.left_bottom() + vec2(r + 2.0, -(r + 2.0));
+    let (ring, edge) = mark_colors(c);
+    painter.circle_stroke(at, r + 0.5, Stroke::new(0.5, edge));
+    painter.circle_stroke(at, r, Stroke::new(1.0, ring));
+}
+
+/// The marks a fill or outline swatch of `c` carries: the spot colour's
+/// dot, and the ring when the colour overprints.
+pub fn swatch_marks(
+    painter: &egui::Painter,
+    cell: Rect,
+    c: tracedraw_core::Color,
+    overprint: bool,
+) {
+    if matches!(c, tracedraw_core::Color::Spot { .. }) {
+        spot_mark(painter, cell, c);
+    }
+    if overprint {
+        overprint_mark(painter, cell, c);
+    }
 }
 
 /// Tooltip of a swatch: the colour's name, then its values.
@@ -453,6 +520,18 @@ pub fn color_values(c: Color) -> String {
         }
         Color::Rgb { r, g, b } => format!("R: {} G: {} B: {}", byte(r), byte(g), byte(b)),
         Color::Gray { v } => crate::i18n::trf("palette.gray_value", &[("v", &byte(v).to_string())]),
+        // A spot colour: its tint and the process colour it stands for;
+        // its name (the ink's) goes above, not its number (#2186).
+        Color::Spot {
+            tint, c, m, y, k, ..
+        } => {
+            let t = if tint.is_finite() { tint } else { 1.0 };
+            format!(
+                "{}% {}",
+                pct(t.clamp(0.0, 1.0)),
+                color_values(Color::Cmyk { c, m, y, k })
+            )
+        }
         other => crate::app::color_description(other),
     }
 }
@@ -633,6 +712,8 @@ fn row(app: &mut App, ui: &mut Ui, which: Row, vertical: bool) {
     if bg.double_clicked() {
         if let Some(i) = palette_index_of(app, which) {
             app.open_palette_editor(i);
+        } else if shows_document(app, which) {
+            app.open_palette_editor(crate::ui::palette_editor::DOCUMENT);
         }
     }
     // A right click on the row outside the swatches opens the same menu.
@@ -883,6 +964,9 @@ fn swatch(
         }
         Some((_, c)) => {
             painter.rect_filled(cell, 0.0, crate::canvas::to_color32(*c));
+            if matches!(c, tracedraw_core::Color::Spot { .. }) {
+                spot_mark(painter, cell, *c);
+            }
         }
     }
     let current = shows_document(app, which)
@@ -1006,6 +1090,18 @@ fn swatch(
                 } else {
                     app.palette_fill(*c);
                 }
+            }
+        }
+    }
+    // A double click on a colour edits it in the Palette Editor: its
+    // name, value and whether it is a spot ink (#2580). The first click
+    // has applied it, as in the reference program.
+    if resp.double_clicked() && !touch_outline {
+        if let Some(ci) = color_index.filter(|_| entry.is_some()) {
+            if shows_document(app, which) {
+                app.open_palette_editor_at(crate::ui::palette_editor::DOCUMENT, ci);
+            } else if let Some(i) = palette_index_of(app, which) {
+                app.open_palette_editor_at(i, ci);
             }
         }
     }
@@ -1284,6 +1380,11 @@ fn menu_of(app: &mut App, ui: &mut Ui, which: Row, swatch: bool) {
         sep(ui);
     }
     if document {
+        // Edit Palette...: the Palette Editor on the document palette
+        // (#2321).
+        if item(ui, "palette.edit", "", app.has_document()) {
+            app.open_palette_editor(crate::ui::palette_editor::DOCUMENT);
+        }
         document_items(app, ui, swatch);
         sep(ui);
     }
@@ -1711,6 +1812,73 @@ pub fn mix(a: Color, b: Color, share: f32) -> Color {
 mod tests {
     use super::*;
 
+    /// How many circles `paint` draws: each mark of a swatch is made of them.
+    fn circles_painted(paint: impl Fn(&egui::Painter)) -> usize {
+        let ctx = crate::theme::ui_context();
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(200.0, 200.0))),
+                ..Default::default()
+            },
+            |ui| paint(ui.painter()),
+        );
+        out.textures_delta.clear();
+        out.shapes
+            .iter()
+            .filter(|s| matches!(s.shape, egui::Shape::Circle(_)))
+            .count()
+    }
+
+    /// A spot colour's swatch carries its dot and an overprinting one its
+    /// ring; a process colour carries neither unless it overprints, and a
+    /// swatch too small to hold a mark carries none (#2455).
+    #[test]
+    fn swatches_carry_the_spot_and_overprint_marks() {
+        let cell = Rect::from_min_size(pos2(10.0, 10.0), vec2(24.0, 24.0));
+        let spot = crate::palette::spot_color("Gold 871", Color::cmyk_pct(0.0, 20.0, 80.0, 10.0));
+        let plain = Color::cmyk_pct(0.0, 100.0, 100.0, 0.0);
+        let marks = |c, over| circles_painted(|p| swatch_marks(p, cell, c, over));
+        assert_eq!(marks(plain, false), 0);
+        assert_eq!(marks(spot, false), 1, "the dot");
+        assert_eq!(marks(plain, true), 2, "the ring");
+        assert_eq!(marks(spot, true), 3, "the dot and the ring");
+        let tiny = Rect::from_min_size(pos2(10.0, 10.0), vec2(4.0, 4.0));
+        assert_eq!(circles_painted(|p| swatch_marks(p, tiny, spot, true)), 0);
+    }
+
+    /// The ring sits in the lower left corner and the dot in the lower
+    /// right, so the two never cover each other; both stay in the swatch.
+    #[test]
+    fn the_overprint_ring_and_the_spot_dot_keep_apart() {
+        let cell = Rect::from_min_size(pos2(0.0, 0.0), vec2(24.0, 24.0));
+        let spot = crate::palette::spot_color("Gold 871", Color::BLACK);
+        let ctx = crate::theme::ui_context();
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(200.0, 200.0))),
+                ..Default::default()
+            },
+            |ui| swatch_marks(ui.painter(), cell, spot, true),
+        );
+        out.textures_delta.clear();
+        let circles: Vec<_> = out
+            .shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Circle(c) => Some(c.clone()),
+                _ => None,
+            })
+            .collect();
+        let dot = circles.first().expect("dot");
+        let ring = circles.last().expect("ring");
+        assert!(dot.center.x > cell.center().x, "{dot:?}");
+        assert!(ring.center.x < cell.center().x, "{ring:?}");
+        for c in [dot, ring] {
+            assert!(cell.contains(c.center), "{c:?}");
+            assert!(c.center.y > cell.center().y, "{c:?}");
+        }
+    }
+
     /// A drawing with a picture of four colours (red, green, blue and
     /// white quarters), selected when `select`.
     fn app_with_picture(select: bool) -> App {
@@ -2044,6 +2212,63 @@ mod tests {
         app.settings.palette.auto_update_document = false;
         app.apply_fill(Fill::Solid(Color::cmyk_pct(0.0, 100.0, 0.0, 0.0)));
         assert_eq!(app.doc().palette, vec![green]);
+    }
+
+    /// A colour applied any other way than from a palette or the colour
+    /// panel joins the document palette too, in the step that applied it:
+    /// the Color Eyedropper, the Object Properties outline and fill
+    /// commands, an outline colour copied over. A colour being dragged in
+    /// a picker joins only when it is let go (#2378).
+    #[test]
+    fn every_colour_applied_joins_the_document_palette() {
+        use tracedraw_core::{geometry::Point, geometry::Rect as R, Command, ShapeKind, Stroke};
+        let mut app = App::headless();
+        let id = app
+            .new_shape(ShapeKind::Rect {
+                rect: R::new(0.0, 0.0, 10.0, 10.0),
+                radius: 0.0,
+                corners: None,
+            })
+            .expect("shape");
+        app.select(vec![id]);
+        assert!(app.doc().palette.is_empty());
+        let steps = app.engine.history_labels().0.len();
+        // The Color Eyedropper's colour put on the object.
+        let picked = Color::rgb8(12, 34, 56);
+        assert!(app.apply_color_at(Point::new(5.0, 5.0), picked, false));
+        assert_eq!(app.doc().palette, vec![picked]);
+        assert_eq!(app.engine.history_labels().0.len(), steps + 1, "one step");
+        app.undo();
+        assert!(app.doc().palette.is_empty(), "undone with the fill");
+        app.redo();
+        // An outline given by a command, as the dockers give it.
+        let pen = Color::rgb8(200, 100, 0);
+        app.run(Command::SetStroke {
+            shapes: vec![id],
+            stroke: Some(Stroke::new(pen, 0.5)),
+        });
+        assert_eq!(app.doc().palette, vec![picked, pen]);
+        // Only the width copied over: no colour joins.
+        let other = Color::rgb8(1, 2, 3);
+        app.run(Command::PatchStroke {
+            shapes: vec![id],
+            stroke: Stroke::new(other, 2.0),
+            fields: vec![tracedraw_core::patch::StrokeField::Width],
+        });
+        assert_eq!(app.doc().palette, vec![picked, pen]);
+        // A drag in a colour picker: only the colour let go on joins.
+        app.apply_fill_live(Fill::Solid(Color::rgb8(0, 255, 0)));
+        app.apply_fill_live(Fill::Solid(Color::rgb8(0, 0, 255)));
+        assert_eq!(app.doc().palette, vec![picked, pen]);
+        app.end_live_fill();
+        assert_eq!(app.doc().palette, vec![picked, pen, Color::rgb8(0, 0, 255)]);
+        // Off in the options: nothing joins.
+        app.settings.palette.auto_update_document = false;
+        app.run(Command::SetFill {
+            shapes: vec![id],
+            fill: Fill::Solid(other),
+        });
+        assert_eq!(app.doc().palette.len(), 3);
     }
 
     /// On the Welcome Screen the palette takes no clicks: a click on a

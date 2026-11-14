@@ -286,7 +286,9 @@ pub struct ModuleAst {
     pub consts: Vec<ModConst>,
     pub types: Vec<UserType>,
     pub enums: Vec<EnumDecl>,
-    /// Declared external (Windows API) procedures: name and public.
-    pub declares: Vec<(String, bool)>,
+    /// Declared external (Windows API) procedures: name, public and the
+    /// name the library gives it (`Alias "ShellExecuteA"`), when there is
+    /// one.
+    pub declares: Vec<(String, bool, Option<String>)>,
     pub procs: Vec<Proc>,
 }

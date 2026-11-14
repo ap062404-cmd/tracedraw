@@ -2,9 +2,12 @@
 
 Tools > Options is a submenu: TraceDraw
 (Ctrl+J), Customization, Tools, Global, Workspaces and AI each open the
-Options window on their pages. Page > Document Setup opens it on the
-document's pages (also a double-click on a ruler, the page border or its
-shadow). The window has a tab for each of them along the top, so every
+Options window on their pages, and Document Setup (greyed with no
+drawing open) on the document's pages, so every tab of the window has
+its entry there and in the standard bar's Options list (#2006,
+`ui::menus::options_items_tests::the_options_list_has_document_setup`).
+Page > Document Setup opens it on the document's pages too (also a
+double-click on a ruler, the page border or its shadow). The window has a tab for each of them along the top, so every
 option is a click away: TraceDraw, Customization, Tools, Global,
 Workspaces, AI and, while a drawing is open, Document Setup. A tab
 shows its set's page list and the page of that set shown last (else its
@@ -22,6 +25,14 @@ was changed on every tab (#633).
   100 px of the dialog stays inside the left, right and bottom edges,
   so even a dialog as large as the window can be pushed aside to show
   the drawing (#908).
+- The window keeps its size and its place whatever page it shows: its
+  body is drawn in a child of its own, cut at the window's edge
+  (`chrome::dialog`), so a page cannot make the window wider or taller.
+  A page a little too wide did (the Edit page by 32 px: its Reset
+  button stood past the slider that took the whole row), and the
+  window, placed by its centre, moved to the side by half of every such
+  change, and by another half pixel each time the position was rounded
+  (#2199, `ui::options::tests::the_window_keeps_its_place_from_page_to_page`).
 - The tabs in a row at the top of the body, over a light line, the
   current one selected.
 - A white page list on the left (225 px; rows 23 px apart; the current

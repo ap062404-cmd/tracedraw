@@ -79,6 +79,10 @@ A ferramenta [[tool.three_point_ellipse]] desenha uma elipse inclinada:
 1. Arraste para desenhar a linha central da elipse, em qualquer ângulo.
 2. Mova o ponteiro para definir a altura e clique.
 
+Para um círculo em volta de um ponto, pressione no ponto e arraste com
+<kbd>Ctrl</kbd> pressionado: a linha arrastada é o raio, e o círculo é
+desenhado ao soltar, sem clique para a altura.
+
 ## O painel Cantos {#corners}
 
 O painel [[docker.corners_docker]] arredonda, recorta ou chanfra os cantos de

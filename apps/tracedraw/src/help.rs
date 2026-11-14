@@ -52,6 +52,7 @@ pub fn dialog_topic(d: &Dialog, options: OptionsPage) -> &'static str {
         Dialog::BitmapDuotone(_) => "bitmaps/color-modes#duotone",
         Dialog::BitmapPaletted(_) => "bitmaps/color-modes#paletted",
         Dialog::RemoveBackground(_) => "bitmaps/remove-background",
+        Dialog::Imposition(_) => "printing/print",
         Dialog::NodeAlign { .. } => "lines-shapes/shape-tool#align-nodes",
         Dialog::RenamePage { .. } => "pages-layout/pages#rename-page",
         Dialog::GoToPage { .. } => "pages-layout/pages#go-to-page",
@@ -80,6 +81,7 @@ pub fn dialog_topic(d: &Dialog, options: OptionsPage) -> &'static str {
         Dialog::UpdatePolicy => "welcome/about-and-updates#automatic-check",
         Dialog::OpenNotes(_) | Dialog::MissingFonts(_) => "get-started/open-and-save#open-notes",
         Dialog::ConfirmShelfRemove { .. } => "objects/shelf#remove",
+        Dialog::HardwareAccelerationHint { .. } => "customize/options-app#general",
         Dialog::Export(_) => "file-formats/export",
         Dialog::Print(_) => "printing/print",
         Dialog::PrintMerge(_) => "printing/print-merge",
@@ -107,7 +109,9 @@ pub fn dialog_topic(d: &Dialog, options: OptionsPage) -> &'static str {
         Dialog::CustomHyphens(_) => "text/writing-tools#custom-hyphens",
         Dialog::Encode(_) => "text/writing-tools#encode",
         Dialog::BorderGrommet(_) => "printing/border-and-grommet",
-        Dialog::ColorManagement(_) | Dialog::ConvertColors(_) => "color/color-management",
+        Dialog::ColorManagement(_) | Dialog::ConvertColors(_) | Dialog::Recolor(_) => {
+            "color/color-management"
+        }
         Dialog::FontManager(_) => "text/fonts#font-manager",
         Dialog::TraceCut(_) => "objects/tracecut",
         Dialog::PaletteEditor(_) => "color/palettes#palette-editor",
@@ -292,6 +296,7 @@ pub fn tool_topic(t: Tool) -> &'static str {
         Tool::Envelope => "effects/envelope",
         Tool::Extrude => "effects/extrude",
         Tool::BlockShadow => "effects/block-shadow",
+        Tool::InnerShadow => "effects/drop-shadow",
         Tool::Transparency => "color/transparency",
         Tool::ColorEyedropper => "color/eyedroppers#color-eyedropper",
         Tool::AttributesEyedropper => "color/eyedroppers#attributes-eyedropper",

@@ -204,13 +204,26 @@ pub fn toggled(t: Theme) -> Theme {
     }
 }
 
+/// The theme in use, as an index into [`Theme::ALL`]. Tests run on
+/// threads of their own and each keeps its own theme (Light until it sets
+/// another), as with the button sizes: a test that switches the theme
+/// never changes the colours, or the pointer bitmaps kept by theme,
+/// another test is checking.
+#[cfg(not(test))]
 static CURRENT: AtomicU8 = AtomicU8::new(0);
+#[cfg(test)]
+thread_local! {
+    static CURRENT: AtomicU8 = const { AtomicU8::new(0) };
+}
 
 /// Use `theme` for the interface from now on (the tokens and
 /// [`visuals`]).
 pub fn set_theme(theme: Theme) {
     let i = Theme::ALL.iter().position(|t| *t == theme).unwrap_or(0);
+    #[cfg(not(test))]
     CURRENT.store(i as u8, Ordering::Relaxed);
+    #[cfg(test)]
+    CURRENT.with(|c| c.store(i as u8, Ordering::Relaxed));
 }
 
 static SHADOWS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
@@ -236,10 +249,11 @@ pub fn shadow(s: egui::epaint::Shadow) -> egui::epaint::Shadow {
 
 /// The theme in use.
 pub fn theme() -> Theme {
-    Theme::ALL
-        .get(CURRENT.load(Ordering::Relaxed) as usize)
-        .copied()
-        .unwrap_or(Theme::Light)
+    #[cfg(not(test))]
+    let i = CURRENT.load(Ordering::Relaxed);
+    #[cfg(test)]
+    let i = CURRENT.with(|c| c.load(Ordering::Relaxed));
+    Theme::ALL.get(i as usize).copied().unwrap_or(Theme::Light)
 }
 
 const fn rgb(v: u32) -> Color32 {
@@ -1048,12 +1062,69 @@ const UI_SCRIPT_FONTS: &[&[&str]] = &[
         "Leelawadee UI",
         "Saysettha OT",
     ],
+    // Thai: file names, layer and page names typed in it (#2168).
+    &[
+        "Noto Sans Thai",
+        "Noto Sans Thai UI",
+        "Leelawadee UI",
+        "Leelawadee",
+        "Tahoma",
+        "Thonburi",
+        "Sukhumvit Set",
+        "Loma",
+        "Garuda",
+        "Waree",
+        "Norasi",
+        "FreeSerif",
+    ],
 ];
+
+/// The first family of the CJK group the interface language `code` reads
+/// its Han characters with, when that is not the Simplified Chinese one.
+fn cjk_lead(code: &str) -> Option<&'static str> {
+    match code {
+        "ja" => Some("Noto Sans CJK JP"),
+        "zh-TW" => Some("Noto Sans CJK TC"),
+        _ => None,
+    }
+}
+
+/// [`UI_SCRIPT_FONTS`] in the order the interface language `code` wants
+/// them. Chinese and Japanese share the Han characters, which take the
+/// shapes of the first CJK font installed, so a Japanese interface puts
+/// its own font before the Chinese ones (it showed Chinese shapes of the
+/// kanji, #2634), as Traditional Chinese does.
+fn script_groups_for(code: &str) -> Vec<&'static [&'static str]> {
+    let mut groups: Vec<&'static [&'static str]> = UI_SCRIPT_FONTS.to_vec();
+    let Some(lead) = cjk_lead(code) else {
+        return groups;
+    };
+    let Some(i) = groups.iter().position(|g| g.first() == Some(&lead)) else {
+        return groups;
+    };
+    let group = groups.remove(i);
+    let at = groups
+        .iter()
+        .position(|g| g.first() == Some(&"Noto Sans CJK SC"))
+        .unwrap_or(0);
+    groups.insert(at, group);
+    groups
+}
+
+/// After the interface language changed from `old` to `new`: read the
+/// system fonts again in the new order when the two languages want the
+/// Han characters from different fonts (see [`script_groups_for`]).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn language_changed(ctx: &egui::Context, old: &str, new: &str) {
+    if cjk_lead(old) != cjk_lead(new) {
+        install_fonts(ctx);
+    }
+}
 
 /// Add the system fonts covering the non-Latin UI languages to `defs`;
 /// returns their keys.
 fn fallback_fonts(defs: &mut egui::FontDefinitions) -> Vec<String> {
-    let groups = UI_SCRIPT_FONTS;
+    let groups = script_groups_for(&crate::i18n::language());
     let fs = tracedraw_text::fonts();
     let mut added = Vec::new();
     for group in groups {
@@ -1084,6 +1155,23 @@ fn fallback_fonts(defs: &mut egui::FontDefinitions) -> Vec<String> {
 mod theme_tests {
     use super::*;
 
+    /// A test that switches the theme leaves the theme of the tests
+    /// running alongside alone: the pointer bitmaps are kept by theme, and
+    /// a switch between drawing one and asking for it again drew it anew.
+    #[test]
+    fn a_theme_switched_in_another_test_is_not_this_ones() {
+        assert_eq!(theme(), Theme::Light);
+        std::thread::spawn(|| {
+            for t in Theme::ALL {
+                set_theme(t);
+                assert_eq!(theme(), t);
+            }
+        })
+        .join()
+        .expect("the other test");
+        assert_eq!(theme(), Theme::Light);
+    }
+
     /// Names typed in Hebrew show in the interface (the file name field,
     /// the recent files, the tabs) when the system has a font for it.
     #[test]
@@ -1101,6 +1189,48 @@ mod theme_tests {
             for c in "שלום".chars() {
                 assert!(ctx.fonts_mut(|f| f.has_glyph(&font, c)), "{c}");
             }
+        }
+    }
+
+    /// Names typed in Thai show in the interface (the file name field,
+    /// the file list, the recent files, the tabs) when the system has a
+    /// font for it, consonants and the marks above and below them
+    /// (#2168: a Thai file name showed as boxes).
+    #[test]
+    fn thai_names_have_an_interface_font() {
+        // The fonts Windows, macOS and the common Linux installs bring
+        // for Thai.
+        let thai = [
+            "Noto Sans Thai",
+            "Leelawadee UI",
+            "Tahoma",
+            "Thonburi",
+            "Loma",
+        ];
+        let has_one = tracedraw_text::fonts().first_face_data(&thai).is_some();
+        if has_one {
+            let ctx = ui_context();
+            let mut out = ctx.run_ui(Default::default(), |_| {});
+            out.textures_delta.clear();
+            let font = egui::FontId::proportional(14.0);
+            for c in "สวัสดี ไฟล์งานพิมพ์".chars().filter(|c| *c != ' ')
+            {
+                assert!(ctx.fonts_mut(|f| f.has_glyph(&font, c)), "{c}");
+            }
+        }
+    }
+
+    /// The fonts Windows (Leelawadee UI, Tahoma), macOS (Thonburi) and
+    /// the common Linux installs (Noto Sans Thai, Loma) bring for Thai
+    /// are asked for as one script's, so a Thai name does not depend on
+    /// the font of another script happening to hold Thai letters.
+    #[test]
+    fn the_thai_interface_fonts_cover_every_system() {
+        let thai = UI_SCRIPT_FONTS
+            .iter()
+            .find(|g| g.first() == Some(&"Noto Sans Thai"));
+        for family in ["Leelawadee UI", "Tahoma", "Thonburi", "Loma"] {
+            assert!(thai.is_some_and(|g| g.contains(&family)), "{family}");
         }
     }
 
@@ -1169,6 +1299,37 @@ mod theme_tests {
         assert_eq!(Theme::from_id("purple"), Theme::Light);
         assert_eq!(toggled(Theme::MediumLight), Theme::Dark);
         assert_eq!(toggled(Theme::MediumDark), Theme::Light);
+    }
+
+    /// A Japanese interface takes the kanji from a Japanese font, not a
+    /// Chinese one (#2634); Traditional Chinese from its own; the others
+    /// keep the list as it is.
+    #[test]
+    fn the_interface_language_picks_its_own_cjk_font_first() {
+        let lead = |code: &str| {
+            script_groups_for(code)
+                .iter()
+                .map(|g| g[0])
+                .find(|f| f.starts_with("Noto Sans CJK"))
+        };
+        assert_eq!(lead("ja"), Some("Noto Sans CJK JP"));
+        assert_eq!(lead("zh-TW"), Some("Noto Sans CJK TC"));
+        assert_eq!(lead("zh-CN"), Some("Noto Sans CJK SC"));
+        assert_eq!(lead("en"), Some("Noto Sans CJK SC"));
+        assert_eq!(script_groups_for("en"), UI_SCRIPT_FONTS.to_vec());
+        for code in ["ja", "zh-TW"] {
+            let mut a = script_groups_for(code);
+            let mut b = UI_SCRIPT_FONTS.to_vec();
+            a.sort();
+            b.sort();
+            assert_eq!(a, b, "{code}: the same groups, reordered");
+        }
+        // The Japanese group holds the fonts Japanese systems have.
+        let ja = script_groups_for("ja");
+        let jp = ja.iter().find(|g| g[0] == "Noto Sans CJK JP").expect("JP");
+        for f in ["Meiryo", "Yu Gothic UI", "Hiragino Sans"] {
+            assert!(jp.contains(&f), "{f}");
+        }
     }
 
     /// The browser build fetches a font for the interface languages no

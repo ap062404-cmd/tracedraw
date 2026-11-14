@@ -1232,7 +1232,9 @@ mod tests {
         // The lower one locked: the upper one stays, the lower moves.
         app.select(vec![b]);
         app.set_locked(true);
-        app.select(vec![a, b]);
+        // Set as such: a locked object is never selected (#2347), but a
+        // selection that held one still leaves it in place.
+        app.selection = vec![a, b];
         settings.crossings.separate = true;
         let w = app.tracecut_work_out(ToolId::FindCrossings, &settings);
         assert!(app.tracecut_commit(&w, &settings, None));
@@ -1242,7 +1244,7 @@ mod tests {
         app.undo();
         app.select(vec![a]);
         app.set_locked(true);
-        app.select(vec![a, b]);
+        app.selection = vec![a, b];
         let w = app.tracecut_work_out(ToolId::FindCrossings, &settings);
         let rev = app.engine.revision();
         assert!(!app.tracecut_commit(&w, &settings, None));

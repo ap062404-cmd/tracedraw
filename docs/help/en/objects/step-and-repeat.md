@@ -18,8 +18,12 @@ column of lines, a grid of tiles. Open it with
    - [[docker.spacing]]: the gap between one copy and the next, so the copies
      never overlap whatever their size.
 
-   Then type the distance. 0 keeps the copies in line.
-4. Do the same under [[docker.vertical_settings]].
+   Then type the distance. 0 keeps the copies in line. Choose **Right** or
+   **Left** for the way the copies go.
+4. Do the same under [[docker.vertical_settings]], with **Down** or **Up**.
+
+   Untick the horizontal or the vertical settings to make copies along the
+   other direction only: a row across, or a column up or down.
 5. Click [[docker.apply]].
 
 While you work in the panel (the pointer is on it, you are typing in one of

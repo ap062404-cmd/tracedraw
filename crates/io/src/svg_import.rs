@@ -122,10 +122,12 @@ pub fn parse(svg: &str, ids: &mut IdSource) -> std::result::Result<Imported, Str
     // Text elements become marker paths that usvg places; should the
     // changed source not read, the file is read as it is, without text.
     let (prepared, mut texts) = crate::svg_text::prepare(svg);
+    let (prepared, mut links) = mark_links(&prepared);
     let tree = match usvg::Tree::from_str(&prepared, &opt) {
         Ok(tree) => tree,
         Err(_) if prepared != svg => {
             texts.clear();
+            links.clear();
             usvg::Tree::from_str(svg, &opt).map_err(|e| e.to_string())?
         }
         Err(e) => return Err(e.to_string()),
@@ -137,6 +139,7 @@ pub fn parse(svg: &str, ids: &mut IdSource) -> std::result::Result<Imported, Str
     let cx = Cx {
         to_page,
         texts: &texts,
+        links: &links,
     };
     let mut shapes = Vec::new();
     for node in tree.root().children() {
@@ -156,6 +159,119 @@ struct Cx<'a> {
     to_page: Affine,
     /// The text elements, by the number their marker path carries.
     texts: &'a [crate::svg_text::SvgText],
+    /// The links, by the id of the group their `<a>` element became.
+    links: &'a std::collections::HashMap<String, Link>,
+}
+
+/// A link of the file: an `<a>` element around objects.
+struct Link {
+    href: String,
+    /// The element had no id: the one it carries was made here and is
+    /// not a name.
+    made_id: bool,
+}
+
+const XLINK_NS: &str = "http://www.w3.org/1999/xlink";
+const SVG_NS: &str = "http://www.w3.org/2000/svg";
+
+/// Turn the `<a>` elements of `svg` that link objects into groups with
+/// an id, and give their addresses by that id (#2191). usvg reads an
+/// `<a>` as a group but keeps neither its address nor its id, so the
+/// links of a file were lost. Links inside text, clips, masks, patterns
+/// and markers stay as they are, and so does an element not spelled
+/// `<a ...> ... </a>`. A source that cannot be read is given back
+/// unchanged.
+fn mark_links(svg: &str) -> (String, std::collections::HashMap<String, Link>) {
+    let mut links = std::collections::HashMap::new();
+    let opt = roxmltree::ParsingOptions {
+        allow_dtd: true,
+        ..Default::default()
+    };
+    let Ok(doc) = roxmltree::Document::parse_with_options(svg, opt) else {
+        return (svg.to_string(), links);
+    };
+    let named = |n: roxmltree::Node, name: &str| {
+        n.is_element() && n.tag_name().name() == name && n.tag_name().namespace() == Some(SVG_NS)
+    };
+    let taken: std::collections::HashSet<&str> = doc
+        .descendants()
+        .filter_map(|n| n.attribute("id"))
+        .collect();
+    // What takes the place of which bytes of the source.
+    let mut edits: Vec<(std::ops::Range<usize>, String)> = Vec::new();
+    let mut made = 0usize;
+    for node in doc.descendants().filter(|n| named(*n, "a")) {
+        let Some(href) = node
+            .attribute("href")
+            .or_else(|| node.attribute((XLINK_NS, "href")))
+            .map(str::trim)
+            .filter(|h| !h.is_empty())
+        else {
+            continue;
+        };
+        if node.ancestors().skip(1).any(|a| {
+            ["text", "clipPath", "mask", "pattern", "marker"]
+                .iter()
+                .any(|name| named(a, name))
+        }) {
+            continue;
+        }
+        let range = node.range();
+        let Some(text) = svg.get(range.clone()) else {
+            continue;
+        };
+        let opens = text
+            .strip_prefix("<a")
+            .and_then(|rest| rest.chars().next())
+            .is_some_and(|c| c.is_whitespace() || c == '>');
+        // The end tag: `</a`, blanks, `>` at the very end.
+        let close = text
+            .rfind("</a")
+            .filter(|c| text.get(c + 3..).is_some_and(|rest| rest.trim() == ">"));
+        let (true, Some(close)) = (opens, close) else {
+            continue;
+        };
+        let own = node.attribute("id").filter(|id| !id.is_empty());
+        let id = match own {
+            Some(id) => id.to_string(),
+            None => loop {
+                made += 1;
+                let id = format!("tracedraw-link-{made}");
+                if !taken.contains(id.as_str()) {
+                    break id;
+                }
+            },
+        };
+        let open = match own {
+            Some(_) => "g".to_string(),
+            None => format!("g id=\"{id}\""),
+        };
+        edits.push((range.start + 1..range.start + 2, open));
+        edits.push((
+            range.start + close + 2..range.start + close + 3,
+            "g".to_string(),
+        ));
+        links.insert(
+            id,
+            Link {
+                href: href.to_string(),
+                made_id: own.is_none(),
+            },
+        );
+    }
+    if edits.is_empty() {
+        return (svg.to_string(), links);
+    }
+    edits.sort_by_key(|(r, _)| r.start);
+    let mut out = String::with_capacity(svg.len() + edits.len() * 24);
+    let mut at = 0;
+    for (range, rep) in &edits {
+        out.push_str(&svg[at..range.start]);
+        out.push_str(rep);
+        at = range.end;
+    }
+    out.push_str(&svg[at..]);
+    (out, links)
 }
 
 fn convert_node(node: &usvg::Node, cx: &Cx, ids: &mut IdSource) -> Option<Shape> {
@@ -188,6 +304,12 @@ fn convert_group(g: &usvg::Group, cx: &Cx, ids: &mut IdSource) -> Option<Shape> 
     if children.is_empty() {
         return None;
     }
+    // A link's group carries the address; an id made for it is no name.
+    let link = cx.links.get(g.id());
+    let name = match link {
+        Some(l) if l.made_id => "",
+        _ => g.id(),
+    };
     let opacity = g.opacity().get() as f64;
     let mut shape = if let Some(clip) = g.clip_path() {
         // Clip path -> ClipFrame with the union of the clip's paths as frame.
@@ -219,7 +341,7 @@ fn convert_group(g: &usvg::Group, cx: &Cx, ids: &mut IdSource) -> Option<Shape> 
                 },
             )
         }
-    } else if children.len() == 1 && g.id().is_empty() {
+    } else if children.len() == 1 && name.is_empty() {
         children.pop().unwrap()
     } else {
         group_of(children, ids)
@@ -227,8 +349,11 @@ fn convert_group(g: &usvg::Group, cx: &Cx, ids: &mut IdSource) -> Option<Shape> 
     if opacity < 1.0 {
         shape.opacity *= opacity;
     }
-    if !g.id().is_empty() {
-        shape.name = Some(g.id().to_string());
+    if !name.is_empty() {
+        shape.name = Some(name.to_string());
+    }
+    if let Some(link) = link {
+        shape.link = Some(link.href.clone());
     }
     Some(shape)
 }
@@ -499,6 +624,33 @@ mod tests {
         assert!((st.width - 2.0 * PX_TO_MM).abs() < 1e-6);
         assert_eq!(children[0].name.as_deref(), Some("r"));
         assert_eq!(children[1].fill, Fill::Solid(Color::rgb8(0, 255, 0)));
+    }
+
+    /// Objects inside `<a>` come in with the link's address, a lone
+    /// object carrying it itself, several as a linked group; what the
+    /// SVG export writes for linked objects reads back (#2191).
+    #[test]
+    fn links_around_objects_are_read() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="96" height="96">
+            <a href="https://example.com/one"><rect x="0" y="0" width="10" height="10" fill="#f00"/></a>
+            <a xlink:href="mailto:a@b.c" id="mail">
+              <rect x="20" y="0" width="10" height="10" fill="#0f0"/>
+              <rect x="40" y="0" width="10" height="10" fill="#00f"/>
+            </a >
+            <rect x="60" y="0" width="10" height="10" fill="#000"/>
+        </svg>"##;
+        let mut ids = IdSource::default();
+        let out = parse(svg, &mut ids).unwrap();
+        assert_eq!(out.shapes.len(), 3);
+        let one = &out.shapes[0];
+        assert!(matches!(one.kind, ShapeKind::Path { .. }), "{:?}", one.kind);
+        assert_eq!(one.link.as_deref(), Some("https://example.com/one"));
+        assert_eq!(one.name, None, "no name from the id made for the link");
+        let two = &out.shapes[1];
+        assert!(matches!(&two.kind, ShapeKind::Group { children } if children.len() == 2));
+        assert_eq!(two.link.as_deref(), Some("mailto:a@b.c"));
+        assert_eq!(two.name.as_deref(), Some("mail"));
+        assert_eq!(out.shapes[2].link, None);
     }
 
     /// A file of 50 000 nested groups is refused before the XML reader

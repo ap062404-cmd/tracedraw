@@ -78,6 +78,13 @@ cell does nothing and says so on the status bar.
   row, and the table's top stays put. No row or column gets smaller
   than 1 mm. A line shows the new place while dragging; the release is
   one "Resize Table" step.
+- Scaling a table with the Pick tool (its handles, or the property bar's
+  size and scale) resizes its rows and columns in proportion and leaves
+  its text alone, as a paragraph text's frame does: the font size,
+  spacing and cell margins stay, and the text flows anew in the cells.
+  Turning, slanting and mirroring act on the whole table as before
+  (#2433,
+  `text_frames::tests::scaling_a_table_resizes_its_cells_and_keeps_the_text`).
 - Property bar W and H (document units, with cells selected): the total
   width of the columns and the total height of the rows the selected
   cells cover; a new value is shared out over them in proportion. The
@@ -203,8 +210,11 @@ alignment. Empty cells keep no style.
 
 ## Typing in cells
 
-With the Table tool, a click in a cell makes it active and puts the caret
-at the character under the pointer. Typing, Backspace, Delete, Home, End,
+With the Table tool, or the Text tool, a click in a cell makes it active
+and puts the caret at the character under the pointer; the Text tool
+makes no new text over the table, and a click off the table lets the
+cell go (#2438,
+`pick_drag_tests::the_text_tool_types_into_the_table_cell_clicked`). Typing, Backspace, Delete, Home, End,
 Ctrl+Home/End, Ctrl+A and Ctrl+B/I/U work as in text editing (formatting
 applies to the selected characters, or to the whole cell without a
 selection); Enter adds a line, Tab and Shift+Tab move to the next and

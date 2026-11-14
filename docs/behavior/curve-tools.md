@@ -175,17 +175,21 @@ delete the selection as everywhere (#1527,
 - Each click (or the start of a drag) places a control point; there are
   no handles. The curve is the cubic B-spline of the control points: it
   starts at the first and ends at the last, tangent there to the control
-  polygon, and stays inside the points' hull (quadratic with three
-  points, a line with two). While drawing, the control polygon shows
+  polygon, and stays inside the points' hull (a line with two). An open
+  one is the uniform spline with each end point counted three times, so
+  its ends are made the way its middle is (#2184). While drawing, the control polygon shows
   dashed with the curve over it, both following the pointer.
 - The preview is the curve a click would make: the pointer is a
   tentative next control point. Right after a click the pointer is on
   the point just placed and adds nothing, so the preview is the curve
   through the points placed so far, with no doubled end point; a second
   click on the last point places no second point. Finishing makes the
-  last preview without the tentative point (#1506). The last spans of
-  the curve still change as points are added, as a B-spline's do: each
-  point shapes the spans next to it.
+  last preview without the tentative point (#1506). When the pointer
+  moves off the point just placed, the curve drawn so far does not jump:
+  a tentative point where the last one is leaves the curve as it was,
+  and moving it reshapes only the last spans, gradually as the pointer
+  moves (#2184, `geometry::tests::
+  a_new_bspline_end_point_does_not_move_the_curve_before_it`).
 - C or V held while a point is placed (or C or V with a second click on
   the last point) makes it a fixed point, as the Shape tool's C does
   (#1758): the curve passes through it with a corner, in the preview and

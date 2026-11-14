@@ -171,7 +171,7 @@ pub fn for_key(key: &str) -> Option<Glyph> {
         "page_tab.insert_before" => PageInsertBefore,
         "menu.layout.rename_page" => PageRename,
         "menu.layout.go_to_page" => PageGoto,
-        "menu.layout.duplicate_page" => PageDuplicate,
+        "menu.layout.duplicate_page" | "page_tab.duplicate_to_new_document" => PageDuplicate,
         "menu.layout.switch_orientation" => PageOrientation,
         "menu.layout.page_number_settings" | "menu.object.insert_page_number" => PageNumber,
         "menu.layout.document_options" | "menu.layout.page_layout" => DocOptions,

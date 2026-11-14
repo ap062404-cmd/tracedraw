@@ -372,6 +372,13 @@ pub enum Command {
         #[serde(default)]
         spots: bool,
     },
+    /// Recolour every colour of `shapes` (any depth) by `recolor`: hue,
+    /// saturation, lightness or a tint, each colour keeping its lightness
+    /// next to the others (see `recolor.rs`).
+    Recolor {
+        shapes: Vec<ShapeId>,
+        recolor: crate::recolor::Recolor,
+    },
     /// Move `shapes` directly in front of (or behind) `reference` in its layer.
     OrderRelative {
         shapes: Vec<ShapeId>,
@@ -453,6 +460,12 @@ pub enum Command {
     /// (#1928): one added, moved, deleted, locked or restyled.
     SetMasterGuides {
         guides: Vec<Guide>,
+    },
+    /// Show or hide the master page's guidelines (`page` `None`) or a
+    /// page's own, each with its own eye (#1775).
+    SetGuidesShown {
+        page: Option<PageId>,
+        shown: bool,
     },
 }
 
@@ -568,6 +581,7 @@ impl Command {
             Command::SetObjectData { .. } => "Object Data",
             Command::SetPictureInks { .. } => "Edit Object",
             Command::ConvertColors { .. } => "Convert Colors",
+            Command::Recolor { .. } => "Recolor",
             Command::ReplaceFontFamily { .. } => "Replace Font",
             Command::OrderRelative { in_front: true, .. } => "In Front Of",
             Command::OrderRelative { .. } => "Behind",
@@ -589,6 +603,7 @@ impl Command {
             Command::DeleteGuide { .. } => "Delete Guideline",
             Command::SetGuides { .. } => "Guidelines",
             Command::SetMasterGuides { .. } => "Guidelines",
+            Command::SetGuidesShown { .. } => "Show Guidelines",
         }
     }
 
@@ -1233,6 +1248,12 @@ impl Command {
                 }
                 crate::color_convert::convert_document(doc, shapes, *to, *spots);
             }
+            Command::Recolor { shapes, recolor } => {
+                for id in shapes {
+                    any(doc, *id)?;
+                }
+                crate::recolor::recolor_document(doc, shapes, recolor);
+            }
             Command::ReplaceFontFamily { from, to } => {
                 doc.replace_font_family(from, to);
             }
@@ -1460,8 +1481,25 @@ impl Command {
                 for id in contents {
                     doc.shape(*id)?;
                 }
-                let mut inner = Vec::new();
+                // The objects keep their stacking order inside the frame,
+                // the lowest first, whatever order they were picked in: a
+                // selection lists objects clicked one by one in the order
+                // of the clicks, and objects picked front first came out
+                // turned over (#2310).
+                let place = |id: &ShapeId| -> Result<(usize, usize)> {
+                    let (lid, i) = doc.locate(*id)?;
+                    let li = doc.all_layers().position(|l| l.id == lid).unwrap_or(0);
+                    Ok((li, i))
+                };
+                let mut ordered = Vec::with_capacity(contents.len());
                 for id in contents {
+                    if !ordered.iter().any(|(_, o)| o == id) {
+                        ordered.push((place(id)?, *id));
+                    }
+                }
+                ordered.sort_by_key(|(at, _)| *at);
+                let mut inner = Vec::new();
+                for (_, id) in &ordered {
                     let (lid, i) = doc.locate(*id)?;
                     inner.push(doc.layer_mut(lid)?.shapes.remove(i));
                 }
@@ -1593,6 +1631,16 @@ impl Command {
             }
             Command::SetGuides { page, guides } => doc.page_mut(*page)?.guides = guides.clone(),
             Command::SetMasterGuides { guides } => doc.master_guides = guides.clone(),
+            Command::SetGuidesShown { page, shown } => match page {
+                None => doc.master_guides_hidden = !*shown,
+                Some(p) => {
+                    doc.page(*p)?;
+                    doc.page_guides_hidden.retain(|q| q != p);
+                    if !*shown {
+                        doc.page_guides_hidden.push(*p);
+                    }
+                }
+            },
             Command::Ungroup { group } => {
                 let (layer_id, idx) = doc.locate(*group)?;
                 let g = doc.layer_mut(layer_id)?.shapes.remove(idx);
@@ -3732,6 +3780,31 @@ mod tests {
             .unwrap();
         assert_eq!(doc.layer(layer).unwrap().shapes.len(), 2);
         assert!(doc.shape(ia).is_ok());
+    }
+
+    /// Objects placed inside a frame keep their stacking order, the
+    /// lowest first, whatever order they were picked in (#2310).
+    #[test]
+    fn placing_inside_a_frame_keeps_the_stacking_order() {
+        let mut doc = Document::default();
+        let layer = doc.pages[0].layers[0].id;
+        let shapes: Vec<Shape> = (0..4).map(|i| rect(&mut doc, i as f64 * 3.0)).collect();
+        let ids: Vec<ShapeId> = shapes.iter().map(|s| s.id).collect();
+        for shape in shapes {
+            Command::AddShape { layer, shape }.apply(&mut doc).unwrap();
+        }
+        // Picked front first, one click after another.
+        Command::PlaceInside {
+            contents: vec![ids[2], ids[1], ids[0]],
+            frame: ids[3],
+        }
+        .apply(&mut doc)
+        .unwrap();
+        let ShapeKind::ClipFrame { contents, .. } = &doc.shape(ids[3]).unwrap().1.kind else {
+            panic!("a clip frame");
+        };
+        let inside: Vec<ShapeId> = contents.iter().map(|s| s.id).collect();
+        assert_eq!(inside, vec![ids[0], ids[1], ids[2]]);
     }
 
     /// A clip frame moved (turned, resized) after it was made carries

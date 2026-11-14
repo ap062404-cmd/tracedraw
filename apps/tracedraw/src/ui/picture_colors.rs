@@ -9,6 +9,12 @@
 //! when the number changes, never every frame. A built-in or locked
 //! palette takes no colours: OK then makes a new palette of the user's
 //! with them. See docs/behavior/color-palettes.md.
+//!
+//! The same window makes colour styles of objects let go on the Color
+//! Styles docker (#2625): a picture's colours as above, a vector's fill
+//! and outline colours (all of them, exactly, while they are no more
+//! than the number asked for), grouped into a colour harmony unless that
+//! is unticked. See docs/behavior/color-palettes.md.
 
 use crate::app::App;
 use crate::i18n::{tr, trf};
@@ -31,6 +37,8 @@ pub enum PaletteTarget {
     Palette(usize),
     /// The document palette (one undo step).
     Document,
+    /// The drawing's colour styles (#2625), one undo step.
+    ColorStyles,
 }
 
 /// The window's state: where the colours go, how many, and the colours
@@ -47,6 +55,11 @@ pub struct PictureColorsState {
     /// How many times the colours were worked out (a check that they are
     /// not every frame).
     pub computed: u32,
+    /// The vectors' own colours (fills and outlines), kept as they are
+    /// (CMYK, spot) while they are no more than `count` (#2625).
+    exact: Vec<Color>,
+    /// Colour styles only: the new styles form one harmony.
+    pub harmony: bool,
 }
 
 impl PictureColorsState {
@@ -58,7 +71,22 @@ impl PictureColorsState {
             colors: Vec::new(),
             shown_for: 0,
             computed: 0,
+            exact: Vec::new(),
+            harmony: true,
         };
+        st.colors();
+        st
+    }
+
+    /// The window for colour styles from objects (#2625): the pixels of
+    /// the pictures among them (`sample`) and the vectors' colours
+    /// (`exact`).
+    pub fn for_color_styles(sample: Vec<[u8; 3]>, exact: Vec<Color>) -> Self {
+        let mut st = PictureColorsState::new(PaletteTarget::ColorStyles, Vec::new());
+        st.sample = Arc::new(sample);
+        st.exact = exact;
+        st.shown_for = 0;
+        st.computed = 0;
         st.colors();
         st
     }
@@ -68,7 +96,17 @@ impl PictureColorsState {
     pub fn colors(&mut self) -> &[Color] {
         self.count = self.count.clamp(MIN_COUNT, MAX_COUNT);
         if self.shown_for != self.count {
-            self.colors = crate::ops2::picture_colors_from_sample(&self.sample, self.count);
+            self.colors = if self.sample.is_empty() && self.exact.len() <= self.count as usize {
+                // Vectors only, no more colours than asked for: theirs.
+                self.exact.clone()
+            } else if self.sample.is_empty() {
+                let rgb: Vec<[u8; 3]> = self.exact.iter().map(|c| c.to_rgb8()).collect();
+                crate::ops2::picture_colors_from_sample(&rgb, self.count)
+            } else {
+                let mut sample = self.sample.as_ref().clone();
+                sample.extend(self.exact.iter().map(|c| c.to_rgb8()));
+                crate::ops2::picture_colors_from_sample(&sample, self.count)
+            };
             self.shown_for = self.count;
             self.computed += 1;
         }
@@ -132,7 +170,7 @@ impl App {
     /// `target` takes colours itself (else OK makes a new palette).
     pub fn picture_target_takes_colors(&self, target: PaletteTarget) -> bool {
         match target {
-            PaletteTarget::Document => self.has_document(),
+            PaletteTarget::Document | PaletteTarget::ColorStyles => self.has_document(),
             PaletteTarget::Palette(i) => self.palette_takes_colors(i),
         }
     }
@@ -141,8 +179,102 @@ impl App {
     pub fn picture_target_name(&self, target: PaletteTarget) -> String {
         match target {
             PaletteTarget::Document => self.document_palette_name(),
+            PaletteTarget::ColorStyles => tr("docker.color_styles"),
             PaletteTarget::Palette(i) => self.palette_name(i),
         }
+    }
+
+    /// The pointer is over the Color Styles docker with objects selected:
+    /// a move let go now makes colour styles of their colours instead of
+    /// moving them (#2625).
+    pub fn color_styles_drop_target(&self) -> bool {
+        !self.selection.is_empty()
+            && self.has_document()
+            && self
+                .color_styles_rect
+                .zip(self.pointer_screen)
+                .is_some_and(|(r, p)| r.contains(p))
+    }
+
+    /// The selection's colours for colour styles: the pixels of its
+    /// pictures (also in groups and clip frames) and the fill and outline
+    /// colours of everything in it.
+    pub fn selection_color_sample(&self) -> (Vec<[u8; 3]>, Vec<Color>) {
+        fn pictures(shapes: &[tracedraw_core::Shape], out: &mut Vec<[u8; 3]>) {
+            use tracedraw_core::ShapeKind;
+            for s in shapes {
+                match &s.kind {
+                    ShapeKind::Bitmap { png, .. } => {
+                        if let Some(img) = crate::bitmap_fx::decode(png) {
+                            out.extend(crate::bitmap_modes::palette_sample(&img));
+                        }
+                    }
+                    ShapeKind::Group { children } => pictures(children, out),
+                    ShapeKind::ClipFrame { frame, contents } => {
+                        pictures(std::slice::from_ref(frame), out);
+                        pictures(contents, out);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let shapes = self.selected_shapes();
+        let mut sample = Vec::new();
+        pictures(&shapes, &mut sample);
+        let mut exact = Vec::new();
+        App::colors_of(&shapes, &mut exact);
+        (sample, exact)
+    }
+
+    /// Open the window that makes colour styles of the selection's
+    /// colours (#2625). False (and a word in the status line) when the
+    /// selection has no colour to take.
+    pub fn open_color_styles_from_selection(&mut self) -> bool {
+        let (sample, exact) = self.selection_color_sample();
+        if sample.is_empty() && exact.is_empty() {
+            self.status = tr("palette.extract_styles_nothing");
+            return false;
+        }
+        self.dialog = crate::ui::dialogs::Dialog::PictureColors(Box::new(
+            PictureColorsState::for_color_styles(sample, exact),
+        ));
+        true
+    }
+
+    /// OK for colour styles: each of `colors` the drawing has no style of
+    /// yet becomes one ("Color N"), in a new harmony ("Harmony N") with
+    /// `harmony`; one undo step. Returns how many were added.
+    pub fn add_color_styles(&mut self, colors: &[Color], harmony: bool) -> usize {
+        let mut st = self.doc().color_styles.clone();
+        let group = harmony.then(|| {
+            let mut n = 1;
+            loop {
+                let name = trf("palette.harmony_name", &[("n", &n.to_string())]);
+                if !st
+                    .iter()
+                    .any(|s| s.harmony.as_deref() == Some(name.as_str()))
+                {
+                    break name;
+                }
+                n += 1;
+            }
+        });
+        let before = st.len();
+        for c in colors {
+            if st.iter().any(|s| s.color == *c) {
+                continue;
+            }
+            st.push(tracedraw_core::ColorStyle {
+                name: format!("Color {}", st.len() + 1),
+                color: *c,
+                harmony: group.clone(),
+            });
+        }
+        let added = st.len() - before;
+        if added > 0 {
+            self.run(tracedraw_core::Command::SetColorStyles { styles: st });
+        }
+        added
     }
 
     /// OK in the window: `colors` join `target` (those it has not got
@@ -150,9 +282,12 @@ impl App {
     /// changed. Says in the status line what happened; returns how many
     /// colours were added.
     pub fn add_picture_colors(&mut self, target: PaletteTarget, colors: &[Color]) -> usize {
+        if target == PaletteTarget::ColorStyles {
+            return self.add_color_styles(colors, true);
+        }
         let count_in = |app: &App, t: PaletteTarget| match t {
             PaletteTarget::Document if app.has_document() => app.doc().palette.len(),
-            PaletteTarget::Document => 0,
+            PaletteTarget::Document | PaletteTarget::ColorStyles => 0,
             PaletteTarget::Palette(i) => app.palettes.get(i).map_or(0, |p| p.colors.len()),
         };
         let target = if self.picture_target_takes_colors(target) {
@@ -172,6 +307,7 @@ impl App {
             PaletteTarget::Document => {
                 self.add_colors_to_document_palette(colors);
             }
+            PaletteTarget::ColorStyles => {}
             PaletteTarget::Palette(i) => {
                 self.add_colors_to_palette(i, colors);
             }
@@ -194,9 +330,17 @@ impl App {
 pub fn dialog(app: &mut App, ctx: &Context, st: &mut PictureColorsState, close: &mut bool) {
     let takes = app.picture_target_takes_colors(st.target);
     let name = app.picture_target_name(st.target);
-    crate::ui::dialogs::window(ctx, tr("palette.extract_title")).show(ctx, |ui| {
+    let styles = st.target == PaletteTarget::ColorStyles;
+    let title = if styles {
+        tr("palette.extract_styles_title")
+    } else {
+        tr("palette.extract_title")
+    };
+    crate::ui::dialogs::window(ctx, title).show(ctx, |ui| {
         ui.set_max_width(360.0);
-        let note = if takes {
+        let note = if styles {
+            tr("palette.extract_into_styles")
+        } else if takes {
             trf("palette.extract_into", &[("name", &name)])
         } else {
             trf("palette.extract_new_palette", &[("name", &name)])
@@ -249,9 +393,29 @@ pub fn dialog(app: &mut App, ctx: &Context, st: &mut PictureColorsState, close: 
             .color(Tokens::text_dim())
             .size(11.0),
         );
+        if styles {
+            ui.add_space(4.0);
+            ui.checkbox(&mut st.harmony, tr("palette.extract_harmony"))
+                .rich_tip(crate::ui::tips::pair(
+                    "palette.extract_harmony",
+                    "palette.extract_harmony_tip",
+                ));
+        }
         ui.add_space(6.0);
         if crate::ui::dialogs::ok_cancel(ui, close) {
-            app.add_picture_colors(st.target, &colors);
+            if styles {
+                let added = app.add_color_styles(&colors, st.harmony);
+                app.status = if added == 0 {
+                    trf("palette.extract_none", &[("name", &name)])
+                } else {
+                    trf(
+                        "palette.extract_added",
+                        &[("n", &added.to_string()), ("name", &name)],
+                    )
+                };
+            } else {
+                app.add_picture_colors(st.target, &colors);
+            }
         }
     });
 }
@@ -493,5 +657,101 @@ mod tests {
         app.select(vec![pic]);
         moving(&mut app, egui::pos2(100.0, 100.0));
         assert_eq!(app.picture_drop_target(), None);
+    }
+
+    /// Vectors let go on the Color Styles docker open the window for
+    /// colour styles and stay where they were; their fill and outline
+    /// colours are offered exactly (a CMYK one stays CMYK) while they are
+    /// no more than the number asked for, fewer ones are worked out past
+    /// it; OK makes them styles in one harmony, Harmony 1, then Harmony 2
+    /// for the next ones, skipping colours that are styles already
+    /// (#2625).
+    #[test]
+    fn objects_dropped_on_the_color_styles_docker_become_a_harmony() {
+        let (mut app, _) = app_with_picture();
+        let kind = |x: f64| tracedraw_core::ShapeKind::Rect {
+            rect: tracedraw_core::geometry::Rect::new(x, 0.0, x + 10.0, 10.0),
+            radius: 0.0,
+            corners: None,
+        };
+        let a = app.new_shape(kind(0.0)).expect("a");
+        let b = app.new_shape(kind(20.0)).expect("b");
+        let cmyk = Color::cmyk_pct(0.0, 60.0, 100.0, 0.0);
+        let red = Color::rgb8(200, 10, 10);
+        let blue = Color::rgb8(10, 10, 200);
+        app.select(vec![a]);
+        app.apply_fill(tracedraw_core::Fill::Solid(cmyk));
+        app.apply_outline_color(Some(blue));
+        app.select(vec![b]);
+        app.apply_fill(tracedraw_core::Fill::Solid(red));
+        app.select(vec![a, b]);
+        let before = app.doc().find_shape(a).expect("a").clone();
+        app.color_styles_rect = Some(egui::Rect::from_min_size(
+            egui::pos2(1000.0, 100.0),
+            egui::vec2(250.0, 400.0),
+        ));
+        moving(&mut app, egui::pos2(100.0, 100.0));
+        assert!(!app.color_styles_drop_target());
+        moving(&mut app, egui::pos2(1100.0, 200.0));
+        assert!(app.color_styles_drop_target());
+        app.end_drag();
+        let crate::ui::dialogs::Dialog::PictureColors(st) = &mut app.dialog else {
+            panic!("no window: {:?}", app.dialog);
+        };
+        assert_eq!(st.target, PaletteTarget::ColorStyles);
+        assert!(st.harmony);
+        let colors = st.colors().to_vec();
+        for c in [cmyk, blue, red] {
+            assert!(colors.contains(&c), "{c:?} missing from {colors:?}");
+        }
+        st.count = 2;
+        assert_eq!(st.colors().len(), 2);
+        assert_eq!(
+            app.doc().find_shape(a).expect("a").transform,
+            before.transform,
+            "the objects did not move"
+        );
+        app.dialog = crate::ui::dialogs::Dialog::None;
+        assert_eq!(app.add_color_styles(&colors, true), colors.len());
+        let styles = app.doc().color_styles.clone();
+        assert_eq!(styles.len(), colors.len());
+        assert!(styles
+            .iter()
+            .all(|s| s.harmony.as_deref() == Some("Harmony 1")));
+        assert!(styles.iter().any(|s| s.color == cmyk));
+        app.undo();
+        assert!(app.doc().color_styles.is_empty(), "one undo step");
+        app.redo();
+        // Again with one new colour: only it is added, in Harmony 2.
+        let green = Color::rgb8(10, 200, 10);
+        assert_eq!(app.add_color_styles(&[red, green], true), 1);
+        let last = app.doc().color_styles.last().cloned().expect("style");
+        assert_eq!(
+            (last.color, last.harmony.as_deref()),
+            (green, Some("Harmony 2"))
+        );
+        assert_eq!(app.add_color_styles(&[Color::rgb8(1, 2, 3)], false), 1);
+        assert_eq!(app.doc().color_styles.last().expect("style").harmony, None);
+    }
+
+    /// A picture let go on the Color Styles docker offers its colours as
+    /// it does on a palette; nothing selected with colour: no window.
+    #[test]
+    fn a_picture_dropped_on_the_color_styles_docker_offers_its_colours() {
+        let (mut app, _) = app_with_picture();
+        app.color_styles_rect = Some(egui::Rect::from_min_size(
+            egui::pos2(1000.0, 100.0),
+            egui::vec2(250.0, 400.0),
+        ));
+        moving(&mut app, egui::pos2(1100.0, 200.0));
+        app.end_drag();
+        let crate::ui::dialogs::Dialog::PictureColors(st) = &mut app.dialog else {
+            panic!("no window: {:?}", app.dialog);
+        };
+        assert_eq!(st.target, PaletteTarget::ColorStyles);
+        assert_eq!(st.colors().len(), 4);
+        app.dialog = crate::ui::dialogs::Dialog::None;
+        app.select(Vec::new());
+        assert!(!app.open_color_styles_from_selection());
     }
 }

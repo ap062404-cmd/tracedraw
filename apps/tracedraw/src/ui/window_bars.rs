@@ -698,6 +698,7 @@ pub(crate) enum PageTabAction {
     InsertAfter,
     InsertBefore,
     Duplicate,
+    DuplicateToNewDocument,
     Delete,
     SwitchOrientation,
 }
@@ -706,11 +707,15 @@ pub(crate) enum PageTabAction {
 /// row has a picture and the menu has no separators; the page size and
 /// background stay in the Layout menu. An ellipsis marks the rows that
 /// open a dialog.
-pub(crate) const PAGE_TAB_MENU: [(&str, PageTabAction); 6] = [
+pub(crate) const PAGE_TAB_MENU: [(&str, PageTabAction); 7] = [
     ("menu.layout.rename_page", PageTabAction::Rename),
     ("page_tab.insert_after", PageTabAction::InsertAfter),
     ("page_tab.insert_before", PageTabAction::InsertBefore),
     ("menu.layout.duplicate_page", PageTabAction::Duplicate),
+    (
+        "page_tab.duplicate_to_new_document",
+        PageTabAction::DuplicateToNewDocument,
+    ),
     ("page_tab.delete", PageTabAction::Delete),
     (
         "menu.layout.switch_orientation",
@@ -734,7 +739,6 @@ pub(crate) fn page_tab_menu(app: &App, ui: &mut Ui) -> Option<PageTabAction> {
 /// Carry out a page tab menu command on the current page.
 pub(crate) fn apply_page_tab_action(app: &mut App, action: PageTabAction) {
     use crate::ui::dialogs::Dialog;
-    use tracedraw_core::Command;
     match action {
         PageTabAction::Rename => {
             let name = app
@@ -747,6 +751,7 @@ pub(crate) fn apply_page_tab_action(app: &mut App, action: PageTabAction) {
         PageTabAction::InsertBefore => app.insert_page(false),
         PageTabAction::InsertAfter => app.insert_page(true),
         PageTabAction::Duplicate => app.dialog = Dialog::duplicate_page(),
+        PageTabAction::DuplicateToNewDocument => app.duplicate_page_to_new_document(),
         PageTabAction::Delete => {
             if app.doc().pages.len() > 1 {
                 app.delete_page();
@@ -755,10 +760,8 @@ pub(crate) fn apply_page_tab_action(app: &mut App, action: PageTabAction) {
         PageTabAction::SwitchOrientation => {
             let s = app.page_size();
             let page = app.page;
-            app.run(Command::ResizePage {
-                page,
-                size: tracedraw_core::geometry::Size::new(s.height, s.width),
-            });
+            let size = tracedraw_core::geometry::Size::new(s.height, s.width);
+            app.resize_pages_about_centre(&[page], size, "Switch Page Orientation");
             app.fit_pending = true;
         }
     }
@@ -1043,7 +1046,7 @@ mod tests {
     }
 
     #[test]
-    fn the_page_tab_menu_has_six_rows_in_order_each_with_a_picture() {
+    fn the_page_tab_menu_has_seven_rows_in_order_each_with_a_picture() {
         use super::PageTabAction as A;
         use crate::i18n::tr;
         let mut app = App::headless();
@@ -1057,6 +1060,7 @@ mod tests {
                 "page_tab.insert_after",
                 "page_tab.insert_before",
                 "menu.layout.duplicate_page",
+                "page_tab.duplicate_to_new_document",
                 "page_tab.delete",
                 "menu.layout.switch_orientation",
             ]
@@ -1069,6 +1073,7 @@ mod tests {
                 A::InsertAfter,
                 A::InsertBefore,
                 A::Duplicate,
+                A::DuplicateToNewDocument,
                 A::Delete,
                 A::SwitchOrientation
             ]
@@ -1106,13 +1111,13 @@ mod tests {
         // With one page, Delete is greyed and cannot be hit.
         let one = App::headless();
         let keys: Vec<String> = replayed_rows(&one).into_iter().map(|(k, _)| k).collect();
-        assert_eq!(keys.len(), 5);
+        assert_eq!(keys.len(), 6);
         assert!(!keys.iter().any(|k| k == "page_tab.delete"));
     }
 
     #[test]
     fn the_page_tab_menu_has_no_separators() {
-        // The menu is exactly as tall as six rows stacked.
+        // The menu is exactly as tall as seven rows stacked.
         let app = App::headless();
         let ctx = crate::theme::ui_context();
         let mut heights = [0.0f32; 3];
@@ -1132,10 +1137,10 @@ mod tests {
             });
         });
         let step = heights[1] - heights[0];
-        let six = heights[0] + 5.0 * step;
+        let seven = heights[0] + 6.0 * step;
         assert!(
-            (heights[2] - six).abs() < 0.5,
-            "menu {} vs six rows {six}",
+            (heights[2] - seven).abs() < 0.5,
+            "menu {} vs seven rows {seven}",
             heights[2]
         );
     }
@@ -1186,6 +1191,44 @@ mod tests {
         assert_eq!(app.page_index(), 1);
         assert_eq!(app.doc().pages[0].id, first);
         assert_eq!(count(&app, 1), 1);
+    }
+
+    /// Duplicate Page to New Document (#2510): a new untitled drawing in
+    /// its own tab with a copy of the current page, its size, layers and
+    /// objects; the drawing it came from keeps its pages.
+    #[test]
+    fn duplicate_page_to_new_document_opens_a_copy_of_the_page() {
+        use super::{apply_page_tab_action, PageTabAction};
+        let mut app = App::headless();
+        app.insert_page(true);
+        let second = app.page;
+        app.run(tracedraw_core::Command::ResizePage {
+            page: second,
+            size: tracedraw_core::geometry::Size::new(100.0, 50.0),
+        });
+        app.new_shape(tracedraw_core::ShapeKind::Rect {
+            rect: tracedraw_core::Rect::new(0.0, 0.0, 10.0, 10.0),
+            radius: 0.0,
+            corners: None,
+        })
+        .expect("shape");
+        let tabs = app.docs.len();
+        let layers = app.doc().page(second).map(|p| p.layers.len()).ok();
+        apply_page_tab_action(&mut app, PageTabAction::DuplicateToNewDocument);
+        assert_eq!(app.docs.len(), tabs + 1);
+        assert!(app.file.is_none());
+        assert_eq!(app.doc().pages.len(), 1);
+        let page = &app.doc().pages[0];
+        assert_eq!(app.page, page.id);
+        assert_eq!(Some(page.layers.len()), layers);
+        let shapes: usize = page.layers.iter().map(|l| l.shapes.len()).sum();
+        assert_eq!(shapes, 1);
+        let s = app.page_size();
+        assert!((s.width - 100.0).abs() < 1e-9 && (s.height - 50.0).abs() < 1e-9);
+        assert!(app.engine.undo_label().is_none());
+        // The first drawing keeps both pages.
+        app.switch_document(tabs - 1);
+        assert_eq!(app.doc().pages.len(), 2);
     }
 
     #[test]

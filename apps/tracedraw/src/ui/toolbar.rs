@@ -194,9 +194,9 @@ pub(crate) fn zoom_box_pub(app: &mut App, ui: &mut Ui, id: &str, width: f32) {
 
 fn zoom_box(app: &mut App, ui: &mut Ui, id: &str, width: f32) {
     let edit_id = egui::Id::new((id, "text"));
-    let mut text = ui
-        .data(|d| d.get_temp::<String>(edit_id))
-        .unwrap_or_else(|| format!("{:.0}%", app.zoom_percent()));
+    let stored = ui.data(|d| d.get_temp::<String>(edit_id));
+    let fresh = stored.is_none();
+    let mut text = stored.unwrap_or_else(|| format!("{:.0}%", app.zoom_percent()));
     let field = egui::Frame::new()
         .fill(crate::theme::Tokens::field())
         .stroke(egui::Stroke::new(1.0, Tokens::control_border()))
@@ -209,10 +209,13 @@ fn zoom_box(app: &mut App, ui: &mut Ui, id: &str, width: f32) {
                 let r = ui.add_sized(
                     [width - 22.0, 24.0],
                     egui::TextEdit::singleline(&mut text)
+                        .id(edit_id)
                         .frame(egui::Frame::NONE)
                         .vertical_align(egui::Align::Center)
                         .margin(egui::Margin::symmetric(4, 2)),
                 );
+                // Typed over, not into: "64" in "58%" was "5864%" (#1329).
+                crate::ui::field::select_all_when_focused(ui, &r, fresh, &text);
                 if r.has_focus() {
                     ui.data_mut(|d| d.insert_temp(edit_id, text.clone()));
                 } else {
@@ -493,8 +496,8 @@ pub(crate) fn draw_item(app: &mut App, ui: &mut Ui, bar: &str, id: &str) {
             }
         }
         "paste" => {
-            let can_paste =
-                doc && (app.clipboard.is_some() || app.text_clip.is_some() || app.editing_text());
+            // A copy made in another program pastes too.
+            let can_paste = doc;
             if std_button(
                 ui,
                 icons::Action::Paste,
@@ -1288,6 +1291,8 @@ pub fn property_bar(app: &mut App, ui: &mut Ui) {
                     app.sync_text_defaults_from(id);
                 }
                 text_properties(app, ui);
+                crate::ui::propbar::sep(ui);
+                crate::ui::propbar::wrap_part(app, ui);
                 crate::ui::propbar::arrange_part(app, ui);
             }
             Tool::Pick | Tool::FreeformPick
@@ -1345,6 +1350,8 @@ pub fn property_bar(app: &mut App, ui: &mut Ui) {
                 object_properties(app, ui);
                 vsep(ui);
                 bitmap_properties(app, ui);
+                crate::ui::propbar::sep(ui);
+                crate::ui::propbar::wrap_part(app, ui);
                 crate::ui::propbar::arrange_part(app, ui);
             }
             Tool::Pick | Tool::FreeformPick => {
@@ -1631,6 +1638,11 @@ pub fn property_bar(app: &mut App, ui: &mut Ui) {
                 {
                     app.eyedropper_apply = true;
                 }
+                ui.checkbox(
+                    &mut app.settings.eyedropper_sample_after_apply,
+                    tr("toolbar.sample_after_apply"),
+                )
+                .rich_tip(crate::ui::tips::keyed("toolbar.sample_after_apply"));
                 vsep(ui);
                 dim_labelled(ui, "toolbar.sample_size", |ui| {
                     for n in [1u32, 2, 5] {
@@ -1656,7 +1668,7 @@ pub fn property_bar(app: &mut App, ui: &mut Ui) {
                         egui::StrokeKind::Inside,
                     );
                     ui.label(
-                        egui::RichText::new(crate::app::color_description(c))
+                        egui::RichText::new(crate::app::color_description_in(app.doc(), c))
                             .color(Tokens::text_dim())
                             .size(11.0),
                     );
@@ -1688,6 +1700,11 @@ pub fn property_bar(app: &mut App, ui: &mut Ui) {
                 {
                     app.eyedropper_apply = true;
                 }
+                ui.checkbox(
+                    &mut app.settings.eyedropper_sample_after_apply,
+                    tr("toolbar.sample_after_apply"),
+                )
+                .rich_tip(crate::ui::tips::keyed("toolbar.sample_after_apply"));
                 vsep(ui);
                 let g = &mut app.eyedropper_groups;
                 ui.menu_button(tr("toolbar.attr_properties"), |ui| {
@@ -1807,6 +1824,7 @@ pub fn property_bar(app: &mut App, ui: &mut Ui) {
                     );
                 }
             }
+            Tool::InnerShadow => inner_shadow_bar(app, ui),
             Tool::InteractiveFill => interactive_fill_bar(app, ui, &shapes),
             Tool::ShapeRecognition | Tool::Sketch => crate::ui::drawing_bars::drawing_bar(app, ui),
             Tool::AreaFill => crate::ui::fill_tool_bars::smart_fill_bar(app, ui),
@@ -1914,6 +1932,10 @@ fn object_properties(app: &mut App, ui: &mut Ui) {
         return;
     }
     crate::ui::propbar::object_bar(app, ui);
+    // The nudge distances, at hand while objects are moved with the
+    // arrow keys (#2608).
+    vsep(ui);
+    crate::ui::propbar::nudge_part(app, ui);
 }
 
 /// The bitmap part of the Pick tool's property bar: the commands of the
@@ -2061,6 +2083,7 @@ fn text_properties(app: &mut App, ui: &mut Ui) {
     if !app.has_text_target() && app.live_font.is_none() {
         app.text_font = app.text_default_font.clone();
         app.text_size_pt = app.text_default_size;
+        app.bar_to_new_text_style();
     }
     let mut changed = crate::ui::tips::tip_over(ui, crate::ui::tips::keyed("toolbar.font"), |ui| {
         crate::ui::font_list::text_font_list(app, ui, "propbar_font", 180.0)
@@ -2096,6 +2119,21 @@ fn text_properties(app: &mut App, ui: &mut Ui) {
             .rich_tip(tr(key))
             .clicked()
         {
+            let style = match key {
+                "toolbar.bold" => Some((!app.text_bold, app.text_italic)),
+                "toolbar.italic" => Some((app.text_bold, !app.text_italic)),
+                _ => None,
+            };
+            // With no text to change, bold or italic would be those of
+            // new text: asked first, as for the font and size (#2346).
+            if let Some(style) = style.filter(|_| !app.has_text_target()) {
+                app.dialog = crate::ui::dialogs::Dialog::TextDefaults {
+                    font: None,
+                    style: Some(style),
+                    size: None,
+                };
+                continue;
+            }
             match key {
                 "toolbar.bold" => app.text_bold = !app.text_bold,
                 "toolbar.italic" => app.text_italic = !app.text_italic,
@@ -2108,7 +2146,13 @@ fn text_properties(app: &mut App, ui: &mut Ui) {
     vsep(ui);
     if text_align_list(app, ui) {
         let a = app.text_align;
-        app.apply_text_align(a);
+        if app.has_text_target() {
+            app.apply_text_align(a);
+        } else {
+            // The alignment of new text: set on the bar with nothing to
+            // align (#2346).
+            app.text_default_align = a;
+        }
     }
     // Horizontal or vertical text, offered with a CJK interface language
     // or for text in those scripts (#257).
@@ -2413,7 +2457,7 @@ fn transparency_controls(app: &mut App, ui: &mut Ui, stacked: bool) {
                                 .selectable_label(kind_shown && f.kind == k, tr(n))
                                 .clicked()
                             {
-                                f.kind = k;
+                                crate::mixed::set_mask_kind(f, k);
                                 field = Some(F::MaskKind);
                             }
                         }
@@ -2542,6 +2586,8 @@ pub(crate) fn text_size_list(app: &mut App, ui: &mut Ui) -> bool {
         .open_memory(None)
         .width(anchor.width())
         .show(|ui| {
+            // A size and its unit on one row (#2651).
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
             egui::ScrollArea::vertical()
                 .max_height(320.0)
                 .show(ui, |ui| {
@@ -2720,12 +2766,26 @@ fn shape_tool_bar(app: &mut App, ui: &mut Ui) {
     {
         return;
     }
-    // Text: the chosen characters' offsets and angle.
+    // Text: the text fields (font, size, weight, alignment and the
+    // rest, for the chosen characters or the whole text, #2365), then
+    // the chosen characters' offsets and angle.
     if !shapes.is_empty()
         && shapes
             .iter()
             .all(|s| matches!(s.kind, ShapeKind::Text { on_path: None, .. }))
     {
+        // The fields show the first chosen character (else the text's
+        // first), read again each frame as with the Pick tool: unread,
+        // they kept what they showed before, so choosing other
+        // characters did not show their format, and a second click on
+        // Bold, compared with that stale reading, changed nothing
+        // (#2365).
+        if let Some(first) = shapes.first() {
+            let id = first.id;
+            app.sync_text_defaults_from(id);
+        }
+        text_properties(app, ui);
+        crate::ui::propbar::sep(ui);
         crate::ui::propbar::char_offset_part(app, ui);
         crate::ui::propbar::sep(ui);
         ui.label(
@@ -2949,7 +3009,7 @@ fn shape_tool_bar(app: &mut App, ui: &mut Ui) {
             ),
         ] {
             if pic_button(ui, pic, &tr(key), true, app.corner_bar_op == op).clicked() {
-                app.corner_bar_op = op;
+                app.set_corner_op(op);
             }
         }
         let mut set = None;
@@ -3243,11 +3303,94 @@ fn interactive_fill_bar(app: &mut App, ui: &mut Ui, shapes: &[tracedraw_core::do
         app.set_fountain_node(i, c, o, p, false);
     }
     vsep(ui);
+    // Copy Fill: the next click picks the object whose fill the
+    // selection takes (#2471).
+    let copy = ui
+        .add_enabled(
+            !shapes.is_empty(),
+            egui::Button::new(tr("toolbar.copy_fill")).selected(app.pending_copy_fill),
+        )
+        .rich_tip(crate::ui::tips::keyed("toolbar.copy_fill"));
+    if copy.clicked() {
+        app.start_copy_fill();
+    }
+    // The selection's fill, to drag onto another object (#2523).
+    fill_drag_swatch(app, ui, base.as_ref().filter(|_| !shapes.is_empty()));
+    vsep(ui);
     ui.label(
         egui::RichText::new(tr("toolbar.fill_hint"))
             .color(Tokens::text_dim())
             .size(11.0),
     );
+}
+
+/// The Interactive Fill bar's swatch of the selected object's fill:
+/// dragged onto another object, that object takes the whole fill (a
+/// colour, a gradient with its stops, angle and transparency, a pattern),
+/// one undo step; the pointer says whether letting go changes anything
+/// and the object that would take it is framed (#2523).
+fn fill_drag_swatch(app: &mut App, ui: &mut Ui, src: Option<&tracedraw_core::document::Shape>) {
+    let (rect, resp) =
+        ui.allocate_exact_size(egui::vec2(28.0, 18.0), egui::Sense::click_and_drag());
+    let color = src.and_then(|s| crate::app::fill_preview_color(&crate::copy_props::shown_fill(s)));
+    crate::ui::status::draw_swatch(ui.painter(), rect, color);
+    let resp = resp.rich_tip(crate::ui::tips::keyed("toolbar.drag_fill"));
+    let Some(src) = src else {
+        app.fill_swatch_drag = None;
+        return;
+    };
+    if resp.drag_started_by(egui::PointerButton::Primary) {
+        app.fill_swatch_drag = Some(src.clone());
+    }
+    if app.fill_swatch_drag.is_some() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        app.fill_swatch_drag = None;
+    }
+    let pos = ui.ctx().pointer_latest_pos();
+    if resp.dragged() {
+        if let (Some(from), Some(pos)) = (app.fill_swatch_drag.as_ref().map(|s| s.id), pos) {
+            let ctx = ui.ctx();
+            let target = app.fill_swatch_target(pos, from);
+            ctx.set_cursor_icon(if target.is_some() {
+                egui::CursorIcon::Copy
+            } else {
+                egui::CursorIcon::NoDrop
+            });
+            let painter = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Tooltip,
+                egui::Id::new("fill_swatch_drag"),
+            ));
+            if let Some(b) = target
+                .and_then(|id| app.doc().find_shape(id))
+                .map(|s| s.bounds())
+            {
+                let a = app
+                    .view
+                    .to_screen(tracedraw_core::geometry::Point::new(b.x0, b.y0));
+                let c = app
+                    .view
+                    .to_screen(tracedraw_core::geometry::Point::new(b.x1, b.y1));
+                painter.rect_stroke(
+                    egui::Rect::from_two_pos(a, c).expand(2.0),
+                    0.0,
+                    egui::Stroke::new(1.5, crate::ui::icons::accent()),
+                    egui::StrokeKind::Outside,
+                );
+            }
+            let r =
+                egui::Rect::from_min_size(pos + egui::vec2(12.0, 12.0), egui::Vec2::splat(16.0));
+            painter.rect_filled(r.expand(1.0), 0.0, egui::Color32::WHITE);
+            crate::ui::status::draw_swatch(&painter, r, color);
+            ctx.request_repaint();
+        }
+    }
+    if resp.drag_stopped() {
+        let dragged = app.fill_swatch_drag.take();
+        if let (Some(s), Some(p)) = (dragged, pos) {
+            if !rect.contains(p) {
+                app.drop_swatch_fill(&s, p);
+            }
+        }
+    }
 }
 
 /// The Common Shapes tool's bar: the shape picked from a grid of
@@ -3549,6 +3692,156 @@ fn path_thumbnail(
     resp
 }
 
+/// The Drop Shadow and Inner Shadow tools' buttons at the start of both
+/// shadow bars, the one in use pushed in: a click changes tool, as in
+/// CorelDRAW. Users looked for an inner shadow on the Drop Shadow bar and
+/// took its feather direction Inside for it (discussion #2462).
+fn shadow_tool_buttons(app: &mut App, ui: &mut Ui) {
+    for (tool, name, desc) in [
+        (Tool::DropShadow, "tool.drop_shadow", "tooldesc.drop_shadow"),
+        (
+            Tool::InnerShadow,
+            "tool.inner_shadow",
+            "tooldesc.inner_shadow",
+        ),
+    ] {
+        let on = app.tool == tool;
+        if crate::ui::propbar::tool_button(ui, tool, &crate::ui::tips::pair(name, desc), true, on)
+            .clicked()
+            && !on
+        {
+            app.set_tool(tool);
+        }
+    }
+    vsep(ui);
+}
+
+/// The Inner Shadow tool's property bar (#2473): offset, colour, opacity,
+/// feathering and merge mode of the selected object's inner shadow, else
+/// of the next one dragged, and a button that removes it.
+fn inner_shadow_bar(app: &mut App, ui: &mut Ui) {
+    use tracedraw_core::{geometry::Vec2 as CVec2, live::Effect};
+    shadow_tool_buttons(app, ui);
+    let current = app.selected_inner_shadow_at();
+    let has_selection = !app.selection.is_empty();
+    let (mut offset, mut st) = current.unwrap_or((CVec2::new(2.0, -2.0), app.inner_shadow));
+    let mut changed = false;
+    let mut dx = offset.x;
+    let mut dy = offset.y;
+    changed |= dim_labelled_as(
+        ui,
+        "docker.offset",
+        "toolbar.inner_shadow_offset_desc",
+        |ui| {
+            ui.add(
+                crate::ui::field::NumField::new(&mut dx)
+                    .speed(0.1)
+                    .range(-500.0..=500.0)
+                    .fixed_decimals(2)
+                    .suffix(" mm"),
+            )
+        },
+    )
+    .changed();
+    changed |= ui
+        .add(
+            crate::ui::field::NumField::new(&mut dy)
+                .speed(0.1)
+                .range(-500.0..=500.0)
+                .fixed_decimals(2)
+                .suffix(" mm"),
+        )
+        .rich_tip(crate::ui::tips::pair(
+            "docker.offset",
+            "toolbar.inner_shadow_offset_desc",
+        ))
+        .changed();
+    offset = CVec2::new(dx, dy);
+    if crate::ui::color_picker::color_button(ui, &mut st.color) {
+        changed = true;
+    }
+    let mut opacity = (st.opacity * 100.0).round();
+    if dim_labelled_as(ui, "toolbar.opacity", "toolbar.shadow_opacity_desc", |ui| {
+        ui.add(
+            crate::ui::field::NumField::new(&mut opacity)
+                .range(0.0..=100.0)
+                .suffix(" %"),
+        )
+    })
+    .changed()
+    {
+        st.opacity = opacity / 100.0;
+        changed = true;
+    }
+    if dim_labelled(ui, "toolbar.feathering", |ui| {
+        ui.add(
+            crate::ui::field::NumField::new(&mut st.blur)
+                .speed(0.1)
+                .range(0.0..=50.0)
+                .suffix(" mm"),
+        )
+    })
+    .changed()
+    {
+        changed = true;
+    }
+    dim_labelled(ui, "transparency.merge_mode", |ui| {
+        crate::ui::keynav::ComboBox::from_id_salt("inner_shadow_merge")
+            .selected_text(st.merge.name())
+            .width(90.0)
+            .show_ui(ui, |ui| {
+                for m in tracedraw_core::live::MergeMode::ALL {
+                    if ui.selectable_label(st.merge == m, m.name()).clicked() {
+                        st.merge = m;
+                        changed = true;
+                    }
+                }
+            })
+    });
+    let effect = Effect::InnerShadow {
+        offset,
+        color: st.color,
+        opacity: st.opacity,
+        blur: st.blur,
+        merge: st.merge,
+    };
+    if changed {
+        app.inner_shadow = st;
+        if current.is_some() {
+            app.push_effect(effect.clone(), true);
+        }
+    }
+    vsep(ui);
+    if current.is_none()
+        && ui
+            .add_enabled(
+                has_selection,
+                egui::Button::new(tr("toolbar.apply_inner_shadow")),
+            )
+            .rich_tip(crate::ui::tips::keyed("toolbar.apply_inner_shadow"))
+            .clicked()
+    {
+        app.push_effect(effect.clone(), true);
+    }
+    if ui
+        .add_enabled(
+            current.is_some(),
+            egui::Button::new(tr("toolbar.clear_inner_shadow")),
+        )
+        .rich_tip(crate::ui::tips::keyed("toolbar.clear_inner_shadow"))
+        .clicked()
+    {
+        app.remove_effects_of_kind(&effect);
+    }
+    if current.is_none() {
+        ui.label(
+            egui::RichText::new(tr("hint.bar_inner_shadow"))
+                .color(Tokens::text_dim())
+                .size(11.0),
+        );
+    }
+}
+
 /// The Drop Shadow tool's property bar: presets, opacity, feathering and
 /// its direction and edges, merge mode, the flat offset or the
 /// perspective angle, stretch and fade, colour, Break Apart and Clear.
@@ -3565,6 +3858,7 @@ fn shadow_bar(app: &mut App, ui: &mut Ui, shapes: &[tracedraw_core::Shape]) {
     let first = app.selected_shadow().map(|(_, sh, _)| sh);
     let mut sh = app.shadow_bar_shadow();
     let mut changed = false;
+    shadow_tool_buttons(app, ui);
     dim(ui, "toolbar.drop_shadow");
     if ui
         .add_enabled(
@@ -3845,6 +4139,153 @@ mod tests {
             .collect()
     }
 
+    /// The Pick tool's bar shows the Nudge, Super nudge and Micro nudge
+    /// distances with nothing selected and with an object selected; a
+    /// value typed there is the one the arrow keys use (#2608).
+    #[test]
+    fn the_pick_bar_shows_and_sets_the_nudge_distances() {
+        let ctx = crate::theme::ui_context();
+        let mut app = App::headless();
+        app.show_welcome = false;
+        app.units = crate::app::Units::Millimeters;
+        app.nudge_mm = 1.5;
+        app.settings.super_nudge_mm = 7.25;
+        app.settings.micro_nudge_mm = 0.125;
+        let tips = [
+            crate::ui::tips::keyed("toolbar.nudge_tip"),
+            crate::ui::tips::keyed("toolbar.super_nudge_tip"),
+            crate::ui::tips::keyed("toolbar.micro_nudge_tip"),
+        ];
+        let shows = |texts: &[(String, egui::Rect)], v: &str| {
+            texts
+                .iter()
+                .find(|(t, _)| t.starts_with(v))
+                .map(|(_, r)| *r)
+        };
+        // Nothing selected.
+        crate::ui::tips::start_recording();
+        let texts = frame(&ctx, &mut app, Vec::new());
+        let seen = crate::ui::tips::recorded();
+        for t in &tips {
+            assert!(seen.contains(t), "nothing selected: {t}");
+        }
+        for v in ["1.5", "7.25", "0.125"] {
+            assert!(shows(&texts, v).is_some(), "nothing selected: {v}");
+        }
+        // An object selected.
+        let id = app
+            .new_shape(ShapeKind::Rect {
+                rect: tracedraw_core::Rect::new(10.0, 10.0, 40.0, 30.0),
+                radius: 0.0,
+                corners: None,
+            })
+            .expect("shape");
+        app.select(vec![id]);
+        frame(&ctx, &mut app, Vec::new());
+        crate::ui::tips::start_recording();
+        let texts = frame(&ctx, &mut app, Vec::new());
+        let seen = crate::ui::tips::recorded();
+        for t in &tips {
+            assert!(seen.contains(t), "object selected: {t}");
+        }
+        // The Super nudge typed over: 3 mm.
+        let at = shows(&texts, "7.25").expect("super nudge shown").center();
+        let button = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let key = |k: egui::Key| egui::Event::Key {
+            key: k,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(&ctx, &mut app, vec![egui::Event::PointerMoved(at)]);
+        frame(&ctx, &mut app, vec![button(true)]);
+        frame(&ctx, &mut app, vec![button(false)]);
+        let mut clear = vec![key(egui::Key::End)];
+        clear.extend((0..12).map(|_| key(egui::Key::Backspace)));
+        frame(&ctx, &mut app, clear);
+        frame(&ctx, &mut app, vec![egui::Event::Text("3".into())]);
+        frame(&ctx, &mut app, vec![key(egui::Key::Enter)]);
+        frame(&ctx, &mut app, Vec::new());
+        assert!(
+            (app.settings.super_nudge_mm - 3.0).abs() < 1e-9,
+            "{}",
+            app.settings.super_nudge_mm
+        );
+        assert_eq!(app.nudge_mm, 1.5);
+        assert_eq!(app.settings.micro_nudge_mm, 0.125);
+    }
+
+    /// Both shadow bars start with the Drop Shadow and Inner Shadow tools'
+    /// buttons, the one in use pushed in; a click on the other changes
+    /// tool (discussion #2462).
+    #[test]
+    fn the_shadow_bars_switch_between_drop_and_inner_shadow() {
+        use crate::tools::Tool;
+        let ctx = crate::theme::ui_context();
+        let mut app = App::headless();
+        app.show_welcome = false;
+        let tips = [
+            crate::ui::tips::pair("tool.drop_shadow", "tooldesc.drop_shadow"),
+            crate::ui::tips::pair("tool.inner_shadow", "tooldesc.inner_shadow"),
+        ];
+        for tool in [Tool::DropShadow, Tool::InnerShadow] {
+            app.set_tool(tool);
+            crate::ui::tips::start_recording();
+            frame(&ctx, &mut app, Vec::new());
+            let seen = crate::ui::tips::recorded();
+            for t in &tips {
+                assert!(seen.contains(t), "{tool:?}: {t}");
+            }
+        }
+        // A click on the second button (Inner Shadow) from the Drop
+        // Shadow tool, then on the first one back.
+        let run = |app: &mut App, events: Vec<egui::Event>| {
+            let mut at = egui::Rect::NOTHING;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 200.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                ui.horizontal(|ui| {
+                    shadow_tool_buttons(app, ui);
+                    at = ui.min_rect();
+                });
+            });
+            out.textures_delta.clear();
+            at
+        };
+        let click = |app: &mut App, pos: egui::Pos2| {
+            let button = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            run(app, vec![egui::Event::PointerMoved(pos)]);
+            run(app, vec![button(true)]);
+            run(app, vec![button(false)]);
+        };
+        app.set_tool(Tool::DropShadow);
+        let row = run(&mut app, Vec::new());
+        let side = row.height();
+        let first = egui::pos2(row.left() + side / 2.0, row.center().y);
+        let second = egui::pos2(row.left() + side * 1.5 + 4.0, row.center().y);
+        click(&mut app, second);
+        assert_eq!(app.tool, Tool::InnerShadow);
+        click(&mut app, first);
+        assert_eq!(app.tool, Tool::DropShadow);
+    }
+
     /// The Common Shapes picker has an All tab listing every set at once,
     /// each under its name, besides the tab of each set (#1650).
     #[test]
@@ -3932,5 +4373,48 @@ mod tests {
             frame(&ctx, &mut app, Vec::new());
         }
         assert!(matches!(app.dialog, Dialog::FontManager(_)));
+    }
+
+    /// Wrap Paragraph Text is on the bar with paragraph text alone or a
+    /// picture alone selected, not only with text and an object together
+    /// (#2620, discussion #2618).
+    #[test]
+    fn wrap_paragraph_text_shows_for_text_or_a_picture_alone() {
+        let ctx = crate::theme::ui_context();
+        let mut app = App::headless();
+        app.show_welcome = false;
+        let text = app
+            .new_shape(ShapeKind::Text {
+                spans: vec![tracedraw_core::TextSpan::new("Words", "Arial", 12.0)],
+                origin: tracedraw_core::Point::new(20.0, 20.0),
+                frame: Some(tracedraw_core::geometry::Size::new(100.0, 60.0)),
+                align: tracedraw_core::TextAlign::Left,
+                para: Default::default(),
+                on_path: None,
+            })
+            .expect("text");
+        let picture = app
+            .new_shape(ShapeKind::Bitmap {
+                rect: tracedraw_core::geometry::Rect::new(130.0, 20.0, 150.0, 40.0),
+                width_px: 1,
+                height_px: 1,
+                png: tiny_skia::Pixmap::new(1, 1)
+                    .expect("pixmap")
+                    .encode_png()
+                    .expect("png")
+                    .into(),
+                fx: None,
+            })
+            .expect("picture");
+        let wrap = tr("context.wrap_paragraph_text");
+        for (what, ids) in [("text", vec![text]), ("picture", vec![picture])] {
+            app.set_tool(crate::tools::Tool::Pick);
+            app.select(ids);
+            frame(&ctx, &mut app, Vec::new());
+            crate::ui::tips::start_recording();
+            frame(&ctx, &mut app, Vec::new());
+            let seen = crate::ui::tips::recorded();
+            assert!(seen.contains(&wrap), "{what}: {seen:?}");
+        }
     }
 }

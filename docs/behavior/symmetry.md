@@ -24,7 +24,11 @@ object), and what the other effects add around the object (contour steps,
 blend steps, extrusion faces, bevels, block shadows) is mirrored with it,
 under the object for what lies under it (#2121,
 `live::symmetry_tests::mirrored_copies_carry_the_other_effects`,
-`render::tests::a_mirrored_copy_keeps_the_transparency`).
+`render::tests::a_mirrored_copy_keeps_the_transparency`). A fountain
+fill and a gradient transparency are mirrored with each copy, so a fade
+running toward a mirror line runs toward it from the other side too
+(`Shape::carry_fills`,
+`live::symmetry_tests::mirrored_copies_mirror_their_gradients`).
 
 ## Defaults
 

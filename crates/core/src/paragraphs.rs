@@ -27,6 +27,11 @@ pub struct ParagraphFormat {
     pub word_spacing_pct: f64,
     pub space_before: f64,
     pub space_after: f64,
+    /// In percent of the character height (#2613); not in older files.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub space_before_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub space_after_pct: Option<f64>,
     pub first_line_indent: f64,
     pub left_indent: f64,
     pub right_indent: f64,
@@ -55,6 +60,8 @@ impl ParagraphFormat {
             word_spacing_pct: p.word_spacing_pct,
             space_before: p.space_before,
             space_after: p.space_after,
+            space_before_pct: p.space_before_pct,
+            space_after_pct: p.space_after_pct,
             first_line_indent: p.first_line_indent,
             left_indent: p.left_indent,
             right_indent: p.right_indent,
@@ -76,6 +83,8 @@ impl ParagraphFormat {
         p.word_spacing_pct = self.word_spacing_pct;
         p.space_before = self.space_before;
         p.space_after = self.space_after;
+        p.space_before_pct = self.space_before_pct;
+        p.space_after_pct = self.space_after_pct;
         p.first_line_indent = self.first_line_indent;
         p.left_indent = self.left_indent;
         p.right_indent = self.right_indent;
@@ -107,6 +116,8 @@ impl ParagraphFormat {
             word_spacing_pct,
             space_before,
             space_after,
+            space_before_pct,
+            space_after_pct,
             first_line_indent,
             left_indent,
             right_indent,

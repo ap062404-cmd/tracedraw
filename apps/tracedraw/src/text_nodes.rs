@@ -229,7 +229,50 @@ pub fn spacing_after_drag(s: &Shape, horizontal: bool, word: bool, d: Vec2) -> O
     Some(kind)
 }
 
+/// What one press of the letter spacing keys adds to or takes from the
+/// character spacing, in percent of a space's width.
+pub const CHAR_SPACING_STEP: f64 = 5.0;
+
 impl App {
+    /// Ctrl+Shift+> and Ctrl+Shift+<: the letters of the text being
+    /// edited, else of every selected text (one fitted to a path too),
+    /// one step further apart or closer, one undo step for all of them.
+    /// Paragraphs with a spacing of their own change by the same amount
+    /// (#193). False when no text took it.
+    pub fn step_char_spacing(&mut self, wider: bool) -> bool {
+        let delta = if wider {
+            CHAR_SPACING_STEP
+        } else {
+            -CHAR_SPACING_STEP
+        };
+        let texts: Vec<Shape> = match self.text_edit.as_ref().map(|te| te.shape) {
+            Some(id) => self.doc().find_shape(id).cloned().into_iter().collect(),
+            None => self
+                .selected_shapes()
+                .into_iter()
+                .filter(|s| matches!(s.kind, ShapeKind::Text { .. }))
+                .collect(),
+        };
+        let cmds: Vec<Command> = texts
+            .iter()
+            .map(|s| {
+                let mut kind = s.kind.clone();
+                tracedraw_core::paragraphs::edit_paragraph_formats(&mut kind, None, |f| {
+                    f.char_spacing_pct = (f.char_spacing_pct + delta).clamp(-100.0, 2000.0)
+                });
+                Command::SetShapeKind { shape: s.id, kind }
+            })
+            .collect();
+        if cmds.is_empty() {
+            return false;
+        }
+        if let Err(e) = self.engine.run_batch("Character Spacing", &cmds) {
+            self.status = e.to_string();
+            return false;
+        }
+        true
+    }
+
     /// Selected text objects the Shape tool edits.
     pub fn node_texts(&self) -> Vec<Shape> {
         self.selected_shapes()
@@ -758,6 +801,46 @@ mod tests {
         assert_eq!(app.node_selection, vec![(id, 0)]);
         app.select(vec![]);
         assert!(!app.choose_chars_in(|_| true));
+    }
+
+    /// The letter spacing keys move the letters of every selected text
+    /// one step apart or together, a text fitted to a path too, in one
+    /// undo step; with no text selected they do nothing (#193).
+    #[test]
+    fn the_spacing_keys_step_the_character_spacing_of_selected_texts() {
+        let (mut app, a) = text_app("ab cd");
+        let b = app
+            .new_shape(ShapeKind::Text {
+                spans: vec![TextSpan::new("round", "DejaVu Sans", 24.0)],
+                origin: Point::new(10.0, 60.0),
+                frame: None,
+                align: TextAlign::Left,
+                para: ParagraphStyle::default(),
+                on_path: None,
+            })
+            .expect("b");
+        let spacing = |app: &App, id: ShapeId| match &app.doc().find_shape(id).expect("text").kind {
+            ShapeKind::Text { para, .. } => para.char_spacing_pct,
+            _ => panic!("text"),
+        };
+        app.select(vec![a, b]);
+        let steps = app.engine.history_labels().0.len();
+        assert!(app.step_char_spacing(true));
+        assert!(app.step_char_spacing(true));
+        assert_eq!(spacing(&app, a), 2.0 * CHAR_SPACING_STEP);
+        assert_eq!(spacing(&app, b), 2.0 * CHAR_SPACING_STEP);
+        assert_eq!(app.engine.history_labels().0.len(), steps + 2);
+        assert!(app.step_char_spacing(false));
+        assert_eq!(spacing(&app, a), CHAR_SPACING_STEP);
+        app.undo();
+        assert_eq!(spacing(&app, a), 2.0 * CHAR_SPACING_STEP);
+        // Never under -100 %: the letters would run backwards.
+        for _ in 0..40 {
+            app.step_char_spacing(false);
+        }
+        assert_eq!(spacing(&app, b), -100.0);
+        app.select(Vec::new());
+        assert!(!app.step_char_spacing(true));
     }
 
     #[test]

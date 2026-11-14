@@ -78,6 +78,7 @@ pub const BUILTIN_FUNCTIONS: &[&str] = &[
     "lcase",
     "left",
     "len",
+    "loadpicture",
     "lof",
     "log",
     "ltrim",

@@ -118,7 +118,86 @@ pub fn relink_copies(originals: &[Shape], copies: &mut [Shape]) {
     }
 }
 
+/// The paragraph frames among `shapes` (inside groups and clip frames
+/// too) that a PDF import marked as one chain
+/// ([`tracedraw_io::pdf_paragraphs::FLOW_KEY`], #2323), now that they
+/// have the ids they keep: the object data each is to get, the mark taken
+/// out and the links to the frames before and after it put in. A frame
+/// whose partner did not come along (a page left out) just loses the mark.
+pub fn imported_flow_links(shapes: &[&Shape]) -> Vec<(ShapeId, Vec<(String, String)>)> {
+    use tracedraw_io::pdf_paragraphs::FLOW_KEY;
+    fn walk<'a>(s: &'a Shape, out: &mut Vec<(&'a Shape, usize, usize)>) {
+        if let Some((_, v)) = s.data.iter().find(|(k, _)| k == FLOW_KEY) {
+            let mut parts = v.split(':').map(|p| p.parse::<usize>().ok());
+            if let (Some(Some(chain)), Some(Some(place))) = (parts.next(), parts.next()) {
+                out.push((s, chain, place));
+            } else {
+                out.push((s, usize::MAX, 0));
+            }
+        }
+        match &s.kind {
+            ShapeKind::Group { children } => {
+                for c in children {
+                    walk(c, out);
+                }
+            }
+            ShapeKind::ClipFrame { frame, contents } => {
+                walk(frame, out);
+                for c in contents {
+                    walk(c, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut marked = Vec::new();
+    for s in shapes {
+        walk(s, &mut marked);
+    }
+    marked.sort_by_key(|(_, chain, place)| (*chain, *place));
+    let mut out = Vec::with_capacity(marked.len());
+    for (i, (s, chain, _)) in marked.iter().enumerate() {
+        let linked = |j: Option<usize>| {
+            j.and_then(|j| marked.get(j))
+                .filter(|(o, c, _)| c == chain && *c != usize::MAX && o.id != s.id)
+                .map(|(o, _, _)| o.id)
+        };
+        let prev = linked(i.checked_sub(1));
+        let next = linked(Some(i + 1));
+        let mut data: Vec<(String, String)> = s
+            .data
+            .iter()
+            .filter(|(k, _)| k != FLOW_KEY)
+            .cloned()
+            .collect();
+        without_links(&mut data);
+        let data = with_key(with_key(data, PREV, prev), NEXT, next);
+        out.push((s.id, data));
+    }
+    out
+}
+
 impl App {
+    /// Link the paragraph frames a PDF import marked as one chain among
+    /// the objects `ids` just brought in (see [`imported_flow_links`]).
+    pub fn link_imported_flows(&mut self, ids: &[ShapeId]) {
+        let links = {
+            let shapes: Vec<&Shape> = ids
+                .iter()
+                .filter_map(|id| self.doc().find_shape(*id))
+                .collect();
+            imported_flow_links(&shapes)
+        };
+        if links.is_empty() {
+            return;
+        }
+        let cmds: Vec<Command> = links
+            .into_iter()
+            .map(|(shape, data)| Command::SetObjectData { shape, data })
+            .collect();
+        let _ = self.engine.run_batch("Import", &cmds);
+    }
+
     fn frame_data(&self, id: ShapeId) -> Option<Vec<(String, String)>> {
         let s = self.doc().find_shape(id)?;
         matches!(s.kind, ShapeKind::Text { frame: Some(_), .. }).then(|| s.data.clone())
@@ -1073,5 +1152,120 @@ mod tests {
         app.select(vec![a3]);
         app.duplicate();
         assert!(!app.is_linked_frame(app.selection[0]));
+    }
+
+    /// A published text that flows from the end of one page into the top
+    /// of the next, opened or imported as new pages: two paragraph frames
+    /// linked as one chain, so text typed in the first flows on into the
+    /// second (#2323).
+    #[test]
+    fn a_pdf_with_text_running_over_a_page_opens_as_linked_frames() {
+        use tracedraw_core::document::{Layer, Page};
+        tracedraw_text::install();
+        let long = "TraceDraw reads the lines of a PDF back into paragraph text, so that a \
+            word typed in the middle of a page pushes the words after it along the lines and on \
+            into the next frame, as it does in the drawing the file was published from. Every \
+            frame is laid out again before it replaces its lines.";
+        let spans = [TextSpan::new(long, "DejaVu Sans", 11.0)];
+        let size_a = Size::new(100.0, 22.0);
+        let fitted = tracedraw_text::fonts()
+            .layout(&TextRequest {
+                spans: &spans,
+                frame: Some(size_a),
+                align: TextAlign::Left,
+                para: &Default::default(),
+                on_path: None,
+            })
+            .fitted_chars;
+        let head: String = long.chars().take(fitted).collect();
+        let tail: String = long.chars().skip(fitted).collect();
+        let page = Size::new(150.0, 120.0);
+        let mut src = tracedraw_core::Document::new("flow", page);
+        let mut ids = src.ids().clone();
+        let mut shape = |text: &str, y: f64, size: Size| {
+            let mut s = Shape::new(
+                ids.shape(),
+                ShapeKind::Text {
+                    spans: vec![TextSpan::new(text, "DejaVu Sans", 11.0)],
+                    origin: Point::new(20.0, y),
+                    frame: Some(size),
+                    align: TextAlign::Left,
+                    para: Default::default(),
+                    on_path: None,
+                },
+            );
+            s.fill = tracedraw_core::Fill::Solid(tracedraw_core::Color::BLACK);
+            s.stroke = None;
+            s
+        };
+        let a = shape(&head, 10.0, size_a);
+        let b = shape(&tail, 40.0, Size::new(100.0, 70.0));
+        src.pages[0].layers[0].shapes.push(a);
+        let mut layer = Layer::new(ids.layer(), "Layer 1");
+        layer.shapes.push(b);
+        src.pages.push(Page {
+            id: ids.page(),
+            name: "Page 2".into(),
+            size: page,
+            layers: vec![layer],
+            guides: Vec::new(),
+            background: None,
+        });
+        src.set_ids(ids);
+        let dir = std::env::temp_dir().join(format!("tracedraw-pdfflow-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("flow.pdf");
+        std::fs::write(&path, tracedraw_io::pdf::document_to_pdf(&src)).expect("written");
+
+        let frames = |app: &App, pages: std::ops::Range<usize>| -> Vec<ShapeId> {
+            app.doc().pages[pages]
+                .iter()
+                .flat_map(|p| &p.layers)
+                .flat_map(|l| &l.shapes)
+                .filter(|s| matches!(s.kind, ShapeKind::Text { frame: Some(_), .. }))
+                .map(|s| s.id)
+                .collect()
+        };
+        let mut app = App::headless();
+        app.settings.formats.pdf_ask_text = false;
+        app.open_path(path.clone());
+        let found = frames(&app, 0..2);
+        assert_eq!(found.len(), 2, "{}", app.status);
+        let (fa, fb) = (found[0], found[1]);
+        assert_eq!(app.next_frame(fa), Some(fb));
+        assert_eq!(app.prev_frame(fb), Some(fa));
+        assert!(app.doc().find_shape(fa).is_some_and(|s| s
+            .data
+            .iter()
+            .all(|(k, _)| k != tracedraw_io::pdf_paragraphs::FLOW_KEY)));
+        assert_eq!(
+            format!("{}{}", text_of(&app, fa), text_of(&app, fb)).trim_end(),
+            long
+        );
+        // Typing at the start of the first frame pushes words on into
+        // the second; nothing is lost.
+        app.begin_text_edit(fa);
+        app.text_set_caret_at(0, false);
+        app.text_insert("New words at the start. ");
+        assert_eq!(
+            format!("{}{}", text_of(&app, fa), text_of(&app, fb)).trim_end(),
+            format!("New words at the start. {long}")
+        );
+        assert!(text_of(&app, fb).len() > tail.len());
+
+        // Imported as new pages: linked too, in one undo step.
+        let mut app = App::headless();
+        app.settings.formats.pdf_ask_text = false;
+        let steps = app.engine.history_labels().0.len();
+        app.import_pdf(&path);
+        if let crate::ui::dialogs::Dialog::PdfPages(st) =
+            std::mem::replace(&mut app.dialog, crate::ui::dialogs::Dialog::None)
+        {
+            app.import_pdf_pages(&path, &st.pdf, &[0, 1], true);
+        }
+        let found = frames(&app, 1..3);
+        assert_eq!(found.len(), 2, "{}", app.status);
+        assert_eq!(app.next_frame(found[0]), Some(found[1]));
+        assert_eq!(app.engine.history_labels().0.len(), steps + 1);
     }
 }

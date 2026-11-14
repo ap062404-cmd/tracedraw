@@ -191,11 +191,7 @@ fn icon_button(
         },
     );
     crate::ui::propbar::frame(ui, rect, enabled && resp.hovered(), pressed);
-    let color = if enabled {
-        Tokens::icon()
-    } else {
-        Tokens::border()
-    };
+    let color = crate::ui::propbar::icon_color(enabled);
     draw(
         ui.painter(),
         Rect::from_center_size(rect.center(), Vec2::splat(16.0)),

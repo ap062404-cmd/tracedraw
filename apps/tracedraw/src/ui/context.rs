@@ -32,7 +32,7 @@ fn ci_tip(ui: &mut Ui, close: &mut bool, key: &str, enabled: bool, tip: Option<&
 /// position of the right click. Clicking an item or anywhere else closes
 /// it; submenus open on hover.
 pub fn context_menu(app: &mut App, ui: &mut Ui, response: &Response) {
-    let Some((pos, p)) = app.context_menu else {
+    let Some((pos, _)) = app.context_menu else {
         return;
     };
     let id = egui::Id::new("canvas_context_menu");
@@ -57,35 +57,50 @@ pub fn context_menu(app: &mut App, ui: &mut Ui, response: &Response) {
     .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
     .show(|ui| {
         ui.set_min_width(200.0);
-        body(ui, |ui| {
-            let on_guide = app.selection.is_empty()
-                && matches!(app.tool, Tool::Pick | Tool::FreeformPick)
-                && app.guide_at(p).is_some();
-            if let Some(hit) = app.tab_ruler_menu {
-                tab_ruler_menu(app, ui, hit, &mut close);
-            } else if let Some(locked) = app.context_locked {
-                locked_menu(app, ui, locked, &mut close);
-            } else if app.editing_text() {
-                text_edit_menu(app, ui, &mut close);
-            } else if app.tool == Tool::Shape {
-                node_menu(app, ui, &mut close);
-            } else if on_guide {
-                guide_menu(app, ui, &mut close);
-            } else if app.selection.is_empty() {
-                page_menu(app, ui, p, &mut close);
-            } else {
-                object_menu(app, ui, &mut close);
-            }
-        })
+        body(ui, |ui| menu_items(app, ui, &mut close))
     });
     if close || shown.is_none() {
         egui::Popup::close_id(&ctx, id);
         app.context_menu = None;
         app.context_locked = None;
+        app.context_docker = None;
         app.tab_ruler_menu = None;
         ctx.data_mut(|d| d.remove::<egui::Pos2>(pos_id));
     }
     let _ = response;
+}
+
+/// The rows of the context menu: which menu fits where it was opened
+/// (the tab ruler, a locked object, an Objects docker row, text being
+/// edited, the Shape tool's nodes, a guideline, the page, the selection).
+pub(crate) fn menu_items(app: &mut App, ui: &mut Ui, close: &mut bool) {
+    let Some((_, p)) = app.context_menu else {
+        return;
+    };
+    let on_guide = app.selection.is_empty()
+        && matches!(app.tool, Tool::Pick | Tool::FreeformPick)
+        && app.guide_at(p).is_some();
+    if let Some(hit) = app.tab_ruler_menu {
+        tab_ruler_menu(app, ui, hit, close);
+    } else if let Some(locked) = app.context_locked {
+        locked_menu(app, ui, locked, close);
+    } else if let Some(id) = app.context_docker.filter(|_| !app.selection.is_empty()) {
+        // From the Objects docker: the docker's own commands,
+        // then the same menu as on the drawing (#2601).
+        crate::ui::objects_docker::row_menu_items(app, ui, id, close);
+        sep(ui);
+        object_menu(app, ui, close);
+    } else if app.editing_text() {
+        text_edit_menu(app, ui, close);
+    } else if app.tool == Tool::Shape {
+        node_menu(app, ui, close);
+    } else if on_guide {
+        guide_menu(app, ui, close);
+    } else if app.selection.is_empty() {
+        page_menu(app, ui, p, close);
+    } else {
+        object_menu(app, ui, close);
+    }
 }
 
 /// Right-click on the tab ruler (#1852): the four kinds of stop, the one
@@ -719,13 +734,9 @@ fn page_menu(app: &mut App, ui: &mut Ui, p: tracedraw_core::Point, close: &mut b
         finish_clip_edit_row(app, ui, close);
         sep(ui);
     }
-    if ci(
-        ui,
-        close,
-        "menu.edit.paste",
-        "Ctrl+V",
-        app.clipboard.is_some() || app.text_clip.is_some(),
-    ) {
+    // Offered like Edit > Paste: a copy made in another program pastes
+    // too, not only one made here.
+    if ci(ui, close, "menu.edit.paste", "Ctrl+V", true) {
         app.paste_any_at(Some(p));
     }
     if ci(ui, close, "menu.edit.select_all_objects", "Ctrl+A", true) {

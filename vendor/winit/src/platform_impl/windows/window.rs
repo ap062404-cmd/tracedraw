@@ -254,8 +254,29 @@ impl Window {
         None
     }
 
+    /// TraceDraw: a size bound in logical units (vendor/README.md, #2487).
+    /// One given in physical pixels, as egui-winit gives every bound, held
+    /// that many pixels on a monitor of another scaling: moved to a
+    /// monitor of a smaller scaling, the window could not take the size
+    /// Windows gave it there, came out larger, and went back and forth
+    /// between the monitors growing. In logical units the bound follows
+    /// the scaling, as `WM_GETMINMAXINFO` and `WM_DPICHANGED` read it.
+    fn scaled_bound(&self, size: Size) -> Size {
+        match size {
+            Size::Physical(p) => {
+                let scale = self.window_state_lock().scale_factor;
+                match crate::size_bounds::logical_bound(p.width as f64, p.height as f64, scale) {
+                    Some((w, h)) => Size::Logical(crate::dpi::LogicalSize::new(w, h)),
+                    None => size,
+                }
+            },
+            logical => logical,
+        }
+    }
+
     #[inline]
     pub fn set_min_inner_size(&self, size: Option<Size>) {
+        let size = size.map(|s| self.scaled_bound(s));
         self.window_state_lock().min_size = size;
         // Make windows re-check the window size bounds.
         let size = self.inner_size();
@@ -264,6 +285,7 @@ impl Window {
 
     #[inline]
     pub fn set_max_inner_size(&self, size: Option<Size>) {
+        let size = size.map(|s| self.scaled_bound(s));
         self.window_state_lock().max_size = size;
         // Make windows re-check the window size bounds.
         let size = self.inner_size();

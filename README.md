@@ -512,7 +512,8 @@ TraceDraw is dual-licensed under [MIT](LICENSE-MIT) or
 [Apache-2.0](LICENSE-APACHE), at your option.
 Copyright &copy; 2026 TraceDraw members and contributors.
 
-Written by the TraceDraw maintainers with Claude Code, Anthropic's AI coding assistant,
+Created by Ighor Toth, founder and lead maintainer. Written by the
+TraceDraw maintainers with Claude Code, Anthropic's AI coding assistant,
 as co-author: commits it helped write carry a `Co-Authored-By` line, and
 the About box says so too.
 

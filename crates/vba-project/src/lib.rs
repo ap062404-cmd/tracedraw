@@ -187,7 +187,17 @@ fn all_streams(bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, Error> {
 /// Read a VBA project from a compound file (`.gms` or any file with a
 /// `VBA` storage holding a `dir` stream).
 pub fn read_gms(bytes: &[u8]) -> Result<Project, Error> {
-    let streams = all_streams(compound_part(bytes))?;
+    let part = compound_part(bytes);
+    // The drawing suites' header with no compound file after it: the
+    // project is kept packed or encrypted, a form not read here (one of
+    // the files of #2165, protected by its maker).
+    if part.starts_with(b"GMS") {
+        return Err(Error::NotAProject(
+            "its code is stored packed or encrypted (a protected macro file), which cannot be read"
+                .into(),
+        ));
+    }
+    let streams = all_streams(part)?;
     project_from_streams(&streams)
 }
 

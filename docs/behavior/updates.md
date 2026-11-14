@@ -44,8 +44,11 @@ Updates opens the releases page).
   once it is ready the button becomes Restart Now, after a failure Try
   Again. What's new opens the release notes. Dismiss, the cross and Escape
   close it for the session; a card dismissed during the download comes
-  back once, when the file is ready. It waits for any dialog (the
-  first-start question, recovery) and does not show over one. Help >
+  back once, when the file is ready. It shows on the Welcome Screen, on
+  an empty workspace and over the page sorter as well as over a drawing
+  (TraceDraw opens on the Welcome Screen, so the card must be there at
+  start). It waits for any dialog (the first-start question, recovery)
+  and does not show over one. Help >
   Updates shows its own box instead of the card.
 - Every start while an update is known: the check at start runs once a
   day, and also at every start while the last check found a newer release

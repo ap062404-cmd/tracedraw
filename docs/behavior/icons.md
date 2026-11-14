@@ -66,6 +66,12 @@ on a wire.
   (`ui::icons::tests::the_accent_marks_the_live_point_and_dimmed_icons_stay_plain`).
 - Coloured tool icons (Customization > Appearance): the ink takes the
   group's hue, the accent stays blue (see `options.md`).
+- A property bar button that cannot run now (the Shape tool's node
+  buttons with no node chosen, among others) draws its picture in the
+  theme's disabled icon colour (`propbar::icon_color`), greyed but plain to see on the bar in every
+  theme. It was the panels' line colour, darker than the bar on the Dark
+  theme, so those buttons all but disappeared (#2065,
+  `ui::propbar::tests::greyed_bar_icons_stand_out_from_the_bar_in_every_theme`).
 
 ## The set
 

@@ -396,6 +396,10 @@ struct ListState {
     /// Where the filter button and its choices were drawn last, with
     /// their labels, for tests.
     filter_hits: Vec<(String, Rect)>,
+    /// How tall the list beside the filter's choices was drawn last: the
+    /// choices scroll within it, the popup no taller than the list
+    /// (#867).
+    list_height: f32,
 }
 
 /// A font list showing `current`, `width` points wide. Returns what was
@@ -449,6 +453,9 @@ fn font_list_with(
     let popup_id = id.with("popup");
     let ctx = ui.ctx().clone();
     let mut st: ListState = ctx.data(|d| d.get_temp(id)).unwrap_or_default();
+    // The filter's choices show as they were left, in every font list
+    // and the next time TraceDraw starts (#867).
+    st.filter_open = app.settings.font_filter_open;
     app.font_previews.refresh();
     let mut pick: Option<FontPick> = None;
 
@@ -724,7 +731,7 @@ fn font_list_with(
         })
         .show(|ui| {
             ui.horizontal_top(|ui| {
-                ui.vertical(|ui| {
+                let list = ui.vertical(|ui| {
                     ui.set_width(POPUP_W);
                     list_body(
                         app,
@@ -738,6 +745,7 @@ fn font_list_with(
                         &mut hovered_now,
                     );
                 });
+                st.list_height = list.response.rect.height();
                 // The filter's choices beside the list (#867).
                 if st.filter_open {
                     ui.separator();
@@ -776,6 +784,7 @@ fn font_list_with(
         st.expanded = None;
         field.surrender_focus();
     }
+    app.settings.font_filter_open = st.filter_open;
     ctx.data_mut(|d| d.insert_temp(id, st));
     (pick, live)
 }
@@ -1005,8 +1014,12 @@ fn list_body(
         let mut s = app.settings.font_sample_px;
         // The slider fills the row between the small and the large A.
         ui.spacing_mut().slider_width = (ui.available_width() - 24.0).max(60.0);
-        ui.add(crate::ui::Slider::new(&mut s, SAMPLE_SIZES).show_value(false).reserve(24.0))
-            .rich_tip(tr("font_list.sample_size"));
+        ui.add(
+            crate::ui::Slider::new(&mut s, SAMPLE_SIZES)
+                .show_value(false)
+                .reserve(24.0),
+        )
+        .rich_tip(tr("font_list.sample_size"));
         app.settings.font_sample_px = s;
         ui.label(
             egui::RichText::new("A")
@@ -1203,10 +1216,10 @@ where
     *field = if on { *field | bit } else { *field & !bit };
 }
 
-/// The filter's choices, beside the list: which fonts show, then a section
-/// each for the style, weight, width, technology, scripts, OpenType
-/// features, embedding rights and folders, every value read from the font
-/// files (#867). Ticking a box filters at once and leaves the list open.
+/// The filter's choices, beside the list: which fonts show, the Font
+/// Manager's folders, then a section each for the style, weight, width,
+/// technology, scripts, OpenType features and embedding rights, every
+/// value read from the font files (#867). Ticking a box filters at once and leaves the list open.
 fn filter_panel(ui: &mut Ui, st: &mut ListState, folders: &[std::path::PathBuf]) {
     let before = (st.filter.clone(), st.show);
     if ui
@@ -1224,9 +1237,18 @@ fn filter_panel(ui: &mut Ui, st: &mut ListState, folders: &[std::path::PathBuf])
             .color(Tokens::text_dim())
             .size(10.5),
     );
+    // The choices scroll in the height the list beside them takes, so the
+    // popup has no empty space under the list (#867).
+    let top = ui.min_rect().top();
+    let used = ui.cursor().top() - top;
+    let height = if st.list_height > 0.0 {
+        (st.list_height - used).max(120.0)
+    } else {
+        LIST_H + PREVIEW_H
+    };
     egui::ScrollArea::vertical()
         .id_salt("font_filter_scroll")
-        .max_height(LIST_H + PREVIEW_H + 60.0)
+        .max_height(height)
         .auto_shrink([false, true])
         .show(ui, |ui| {
             filter_section(ui, &tr("font_list.section_show"), |ui| {
@@ -1239,6 +1261,30 @@ fn filter_panel(ui: &mut Ui, st: &mut ListState, folders: &[std::path::PathBuf])
                     st.filter_hits.push((label, r.rect));
                     if r.clicked() {
                         st.show = s;
+                    }
+                }
+            });
+            filter_section(ui, &tr("font_manager.folders"), |ui| {
+                if folders.is_empty() {
+                    ui.label(
+                        egui::RichText::new(tr("font_list.no_folders"))
+                            .color(Tokens::text_dim())
+                            .size(11.0),
+                    );
+                }
+                for dir in folders {
+                    let name = dir
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| dir.display().to_string());
+                    let on = st.filter.folders.contains(dir);
+                    let mut v = on;
+                    let r = ui
+                        .checkbox(&mut v, egui::RichText::new(name.clone()).size(11.5))
+                        .on_hover_text(dir.display().to_string());
+                    st.filter_hits.push((name, r.rect));
+                    if r.changed() {
+                        st.filter.set_folder(dir, v);
                     }
                 }
             });
@@ -1295,30 +1341,6 @@ fn filter_panel(ui: &mut Ui, st: &mut ListState, folders: &[std::path::PathBuf])
                     let on = st.filter.embedding & embedding_bit(e) != 0;
                     if let Some(v) = filter_box(ui, st, tr(embedding_key(e)), on) {
                         set_bit(&mut st.filter.embedding, embedding_bit(e), v);
-                    }
-                }
-            });
-            filter_section(ui, &tr("font_manager.folders"), |ui| {
-                if folders.is_empty() {
-                    ui.label(
-                        egui::RichText::new(tr("font_list.no_folders"))
-                            .color(Tokens::text_dim())
-                            .size(11.0),
-                    );
-                }
-                for dir in folders {
-                    let name = dir
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_else(|| dir.display().to_string());
-                    let on = st.filter.folders.contains(dir);
-                    let mut v = on;
-                    let r = ui
-                        .checkbox(&mut v, egui::RichText::new(name.clone()).size(11.5))
-                        .on_hover_text(dir.display().to_string());
-                    st.filter_hits.push((name, r.rect));
-                    if r.changed() {
-                        st.filter.set_folder(dir, v);
                     }
                 }
             });
@@ -2048,6 +2070,8 @@ impl App {
             self.text_font = f;
         }
         if let Some((bold, italic)) = style {
+            self.text_default_bold = bold;
+            self.text_default_italic = italic;
             self.text_bold = bold;
             self.text_italic = italic;
         }
@@ -2490,6 +2514,7 @@ mod live_tests {
             let id = egui::Id::new("font_host").with(("font_list", salt));
             let popup = id.with("popup");
             let state = || -> ListState { ctx.data(|d| d.get_temp(id)).unwrap_or_default() };
+            app.settings.font_filter_open = false;
             run(&mut app, Vec::new());
             // The arrow at the right of the field opens the list.
             click(&mut app, origin + egui::vec2(180.0 - 9.0, 9.0));
@@ -2549,8 +2574,23 @@ mod live_tests {
                 !egui::Popup::is_id_open(&ctx, popup),
                 "{salt}: closes outside"
             );
-            // The filter is kept for the next time the list opens.
+            // The filter is kept for the next time the list opens, and its
+            // choices show again there, in a popup no taller than the
+            // list: they scroll beside it (#867).
             assert!(state().filter.has(FontTrait::Serif));
+            assert!(app.settings.font_filter_open, "{salt}: left open");
+            click(&mut app, origin + egui::vec2(180.0 - 9.0, 9.0));
+            assert!(egui::Popup::is_id_open(&ctx, popup), "{salt}: opens again");
+            let st = state();
+            assert!(st.filter_open, "{salt}: choices show again");
+            assert!(st.list_height > 0.0);
+            let area = ctx.memory(|m| m.area_rect(popup)).expect("popup drawn");
+            assert!(
+                area.height() <= st.list_height + 30.0,
+                "{salt}: {area:?} for a list {} tall",
+                st.list_height
+            );
+            click(&mut app, egui::pos2(900.0, 880.0));
         }
     }
 

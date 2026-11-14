@@ -56,6 +56,12 @@ impl App {
                 return ColorTarget::Shadow(id);
             }
         }
+        // A square at an end of the blend in hand (Blend tool): the fill
+        // of that end's object, wherever the square lies on it, as the
+        // middle of a letter may be outside its outline (#965).
+        if let Some(id) = self.blend_end_object_at(p) {
+            return ColorTarget::Fill(id);
+        }
         // Inside a closed object counts even when it has no fill yet.
         let Some(id) = self.hit_test_inside(p) else {
             return ColorTarget::Nothing;
@@ -71,6 +77,27 @@ impl App {
         } else {
             ColorTarget::Fill(id)
         }
+    }
+
+    /// The object a fill dragged from the status bar would go to at `at`
+    /// (screen): the one under the pointer, inside or on its outline.
+    pub fn fill_target(&self, at: Pos2) -> Option<ShapeId> {
+        match self.color_target(at) {
+            ColorTarget::Fill(id) | ColorTarget::Outline(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// Drop a whole `fill` (colour, fountain, pattern, none) on the object
+    /// at `at`; the selection stays as it was. False when nothing took it.
+    pub fn drop_fill(&mut self, fill: Fill, at: Pos2) -> bool {
+        let Some(id) = self.fill_target(at) else {
+            return false;
+        };
+        let saved = std::mem::replace(&mut self.selection, vec![id]);
+        self.apply_fill(fill);
+        self.selection = saved;
+        true
     }
 
     /// Drop `color` (`None`: No Color) at `at` (screen); false when
@@ -139,6 +166,21 @@ mod tests {
         app.apply_fill(Fill::Solid(Color::rgb8(0, 0, 255)));
         app.select(Vec::new());
         (app, id)
+    }
+
+    #[test]
+    fn a_fill_dropped_on_an_object_replaces_its_fill() {
+        let (mut app, id) = app_with_rect();
+        let inside = app.view.to_screen(Point::new(35.0, 25.0));
+        let green = Fill::Solid(Color::rgb8(0, 200, 0));
+        assert!(app.drop_fill(green.clone(), inside));
+        assert_eq!(
+            app.doc().find_shape(id).map(|s| s.fill.clone()),
+            Some(green)
+        );
+        assert!(app.selection.is_empty());
+        let outside = app.view.to_screen(Point::new(150.0, 150.0));
+        assert!(!app.drop_fill(Fill::None, outside));
     }
 
     #[test]

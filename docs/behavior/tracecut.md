@@ -14,6 +14,18 @@ The geometry is the `tracedraw-tracecut` crate (pure geometry over
 page-space outlines in millimetres); the window turns its results into
 commands. Contributed by LaMka21 (#170).
 
+Every tool takes an object by the outline it draws: groups opened, a
+clip frame by its frame, and an object whose outline a live effect
+reshapes (an envelope, a perspective, a distortion) by the reshaped
+outline, not the one it had before the effect. So an enveloped object
+is cut where it shows, and nesting keeps what shows apart; it used to
+be placed by its outline from before the envelope, and its neighbours
+landed on the part the envelope had pulled out (#2227,
+`tracedraw_tracecut::tests::an_enveloped_object_gives_the_outline_it_draws`,
+`tracecut_nest::tests::an_enveloped_object_is_nested_by_what_it_draws`).
+What an effect adds beside the object (contour steps, blend steps, a
+shadow) is not part of its outline.
+
 ## Layout
 
 - **Tool list** (left, 210 wide), grouped: Cut, Nesting, Measure, Make. A
@@ -240,7 +252,12 @@ one undo step ("CutContour"). Its swatch joins the document palette in
 that step when it is not there yet, as a colour applied from the
 Properties docker does (unless the document palette's Automatically
 Update is off), so the CutContour colour can be picked again from it
-(#1927). The name is kept on export: PDF writes a
+(#1927). The swatch goes by the ink's name, CutContour, in the document
+palette, the Palette Manager, the status bar and any palette it is added
+to, never by the ink's number ("Spot 1"), so cutting RIPs that look for
+the separation named CutContour exactly find it (#2186,
+`tracecut_cut::tests::the_cut_contour_swatch_is_named_cut_contour`).
+The name is kept on export: PDF writes a
 Separation colour space named CutContour (as for every spot colour), EPS
 and PostScript a Separation colour space with the ink's name and its
 process stand-in, and SVG, which has no spot colours, writes the colour

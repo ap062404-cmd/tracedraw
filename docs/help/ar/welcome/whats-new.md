@@ -20,6 +20,7 @@
 
 ## أبرز ما في الإصدارات الأخيرة {#highlights}
 
+- **البثق والظلال ومجموعة من الإصلاحات.** يُبقي [[menu.effects > menu.effects.extrude]] الجسم المدار في الفضاء في مكانه، ولم يعد الشطب على النص ينطوي؛ تحتفظ الظلال بفتحات الحلقات وتسقط من الكائن المبثوق مع جسمه؛ ينظر [[menu.edit > menu.edit.select_similar]] داخل المجموعات؛ يحافظ [[menu.bitmaps > menu.bitmaps.convert_to_bitmap]] على موضع الصورة في الترتيب؛ أصبح [[menu.view > menu.view.navigator]] أمرًا في القائمة بالمفتاح N؛ تُفتح ملفات .cdr بجداولها، وتظهر أسماء الملفات التايلاندية بحروفها.
 - **مسارات أداة CNC والتصدير والتحديد.** ينشئ [[menu.tools > menu.tools.tracecut]] رمز G-code لآلة تفريز CNC ويرسم الحلقات المعدنية والصناديق بوصلات الأصابع والصواني المطوية؛ ويسأل [[menu.file > menu.file.export]] عن الملف أولًا ثم يعرض خيارات التنسيق، بينما يعرضها [[menu.file > menu.file.export_with_options]] دائمًا؛ ويغيّر [[menu.edit > menu.edit.select_similar]] و[[menu.edit > menu.edit.invert_selection]] التحديد؛ ويضع [[menu.object > menu.object.insert > menu.object.add_dimensions]] أبعاد التحديد؛ والجديد أيضًا التعبئات الإجرائية وأزرار OpenType والواجهة باللغة اللاوية.
 - **صفحات متقابلة ونص مرتبط.** يعرض [[menu.layout > menu.layout.facing_pages]] الصفحات جنبًا إلى جنب كصفحات مزدوجة؛ ويربط [[menu.text > menu.text.link_content]] النصوص بحيث تغير الكتابة في أحدها الأخرى؛ ويسأل ملف PDF متعدد الصفحات عن الصفحات المطلوب استيرادها؛ ويمكن لـ [[menu.edit > menu.edit.step_and_repeat]] ملء صفحة بالنسخ.
 - **اللمس والهواتف.** تبقى أزرار Shift وCtrl وAlt في الشريط القياسي مضغوطة

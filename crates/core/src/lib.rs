@@ -36,6 +36,7 @@ pub mod patch;
 pub mod picture_inks;
 mod press;
 pub mod procedural;
+pub mod recolor;
 pub mod shadow;
 pub mod shaping;
 pub mod spreads;

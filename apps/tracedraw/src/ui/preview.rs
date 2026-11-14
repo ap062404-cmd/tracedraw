@@ -6,6 +6,22 @@ use crate::theme::Tokens;
 use egui::Ui;
 use tracedraw_core::Command;
 
+/// What the full-screen preview shows: the selection's box with Preview
+/// Selected Only, else the page and every object of it, those lying off
+/// the page too, as the drawing window shows them. Only the page showed,
+/// so a drawing made beside or larger than its page was previewed as an
+/// empty sheet (#2317).
+pub fn preview_bounds(app: &App) -> tracedraw_core::geometry::Rect {
+    let page = app.page_rect();
+    if app.preview_selected_only {
+        return app.selection_bounds().unwrap_or(page);
+    }
+    match app.doc().content_bounds(app.page).ok().flatten() {
+        Some(b) if b.width().is_finite() && b.height().is_finite() => page.union(b),
+        _ => page,
+    }
+}
+
 pub fn fullscreen(app: &mut App, ui: &mut Ui) {
     let ctx = ui.ctx().clone();
     egui::CentralPanel::default()
@@ -13,11 +29,7 @@ pub fn fullscreen(app: &mut App, ui: &mut Ui) {
         .show(ui, |ui| {
             let rect = ui.available_rect_before_wrap();
             let page = app.page_rect();
-            let bounds = if app.preview_selected_only {
-                app.selection_bounds().unwrap_or(page)
-            } else {
-                page
-            };
+            let bounds = preview_bounds(app);
             let painter = ui.painter_at(rect);
             // Fit the page into the screen.
             let margin = 20.0;
@@ -71,10 +83,20 @@ pub fn fullscreen(app: &mut App, ui: &mut Ui) {
                     egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                     egui::Color32::WHITE,
                 );
-                // Options > Display > Full-screen preview > Show page border.
+                // Options > Display > Full-screen preview > Show page border:
+                // round the page, inside what is shown.
                 if !app.preview_selected_only && app.settings.preview_page_border {
+                    let at = |x: f64, y: f64| {
+                        page_rect.min
+                            + egui::vec2(
+                                ((x - bounds.x0) * zoom) as f32,
+                                ((bounds.y1 - y) * zoom) as f32,
+                            )
+                    };
+                    let sheet =
+                        egui::Rect::from_two_pos(at(page.x0, page.y0), at(page.x1, page.y1));
                     painter.rect_stroke(
-                        page_rect,
+                        sheet,
                         0.0,
                         egui::Stroke::new(1.0, Tokens::page_border()),
                         egui::StrokeKind::Outside,
@@ -193,5 +215,113 @@ pub fn page_sorter(app: &mut App, ui: &mut Ui) {
         if app.page == id {
             app.page = app.doc().pages[0].id;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tracedraw_core::geometry::Rect;
+
+    /// A drawing lying off its page is previewed with the page, not cut
+    /// away to an empty sheet; Preview Selected Only shows the selection
+    /// alone (#2317).
+    #[test]
+    fn the_preview_shows_objects_off_the_page() {
+        let mut app = App::headless();
+        app.show_welcome = false;
+        let page = app.page_rect();
+        assert_eq!(preview_bounds(&app), page, "an empty drawing: its page");
+        // A wide bar above the page, as a title drawn off the sheet.
+        let bar = Rect::new(
+            page.x0 - 200.0,
+            page.y1 + 50.0,
+            page.x1 + 200.0,
+            page.y1 + 90.0,
+        );
+        let id = app
+            .new_shape(tracedraw_core::ShapeKind::Rect {
+                rect: bar,
+                radius: 0.0,
+                corners: None,
+            })
+            .expect("a rectangle");
+        let b = preview_bounds(&app);
+        assert!(
+            b.x0 <= bar.x0 + 1e-6 && b.x1 >= bar.x1 - 1e-6 && b.y1 >= bar.y1 - 1e-6,
+            "{b:?} {bar:?}"
+        );
+        assert!(b.y0 <= page.y0 + 1e-6, "the page stays in: {b:?}");
+        // Rendered as the preview renders it, the bar shows.
+        let zoom = 0.5;
+        let opts = tracedraw_render::RenderOptions {
+            width: (b.width() * zoom).ceil() as u32,
+            height: (b.height() * zoom).ceil() as u32,
+            view: tracedraw_render::ViewTransform {
+                zoom,
+                origin_x: -b.x0 * zoom,
+                origin_y: b.y1 * zoom,
+            },
+            preview: None,
+            wireframe: false,
+            ..tracedraw_render::RenderOptions::default()
+        };
+        let doc = app.engine.document().clone();
+        let pm = tracedraw_render::render_page(&doc, app.page, &opts).expect("render");
+        // Some of the bar's outline is drawn in the strip above the page.
+        let top = ((b.y1 - bar.y1) * zoom).floor() as u32;
+        let bottom = ((b.y1 - bar.y0) * zoom).ceil() as u32;
+        let drawn = (top..bottom.min(pm.height()))
+            .flat_map(|y| (0..pm.width()).map(move |x| (x, y)))
+            .filter(|(x, y)| pm.pixel(*x, *y).is_some_and(|p| p.alpha() > 0))
+            .count();
+        assert!(drawn > 0, "the bar is drawn");
+        // Preview Selected Only: the selection's box.
+        app.select(vec![id]);
+        app.preview_selected_only = true;
+        let sel = app.selection_bounds().expect("selected");
+        assert_eq!(preview_bounds(&app), sel);
+    }
+
+    /// One frame of the whole window with `events`.
+    fn window(ctx: &egui::Context, app: &mut App, events: Vec<egui::Event>) {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1400.0, 900.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| crate::ui::root(app, ui));
+        out.textures_delta.clear();
+    }
+
+    fn f9() -> egui::Event {
+        egui::Event::Key {
+            key: egui::Key::F9,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn f9_opens_the_full_screen_preview_and_closes_it() {
+        // #2195: F9 worked only from the View menu.
+        let ctx = crate::theme::ui_context();
+        let mut app = App::headless();
+        app.show_welcome = false;
+        window(&ctx, &mut app, Vec::new());
+        assert!(!app.fullscreen_preview);
+        window(&ctx, &mut app, vec![f9()]);
+        assert!(app.fullscreen_preview, "F9 opens the preview");
+        window(&ctx, &mut app, Vec::new());
+        assert!(app.fullscreen_preview, "it stays open");
+        window(&ctx, &mut app, vec![f9()]);
+        assert!(!app.fullscreen_preview, "F9 again closes it");
+        window(&ctx, &mut app, Vec::new());
+        assert!(!app.fullscreen_preview);
     }
 }

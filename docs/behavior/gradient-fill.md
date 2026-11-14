@@ -91,10 +91,16 @@ history and the saved state as they were (`App::preview_edit_fill`,
 Dragging with Interactive Fill on an object (anywhere inside it, filled
 or not) puts the start node at the press point and the end node at the
 release point, keeping the kind and colours of a gradient the object
-already has (a linear black to white one otherwise); the skew handle
-goes square to the line, as far from the start as the end. A click on
-an object with a gradient picks it (its nodes show); on one without, it
-gives the default fill; Ctrl constrains the angle to steps of the
+already has (otherwise a linear one from the object's solid colour, or
+the default colour when it has none, to white: a red circle gives red
+to white, #2498); the skew handle goes square to the line, as far from
+the start as the end. A click on an object with a fill picks it and
+keeps the fill (a gradient's nodes show); only an object without a fill
+takes the default fill (#2498,
+`fill_tool::tests::interactive_fill_starts_from_the_objects_colour`); a
+click on the selected fill's line keeps that fill picked, unless another
+object lies on top there, which is picked instead (#2508,
+`ui::tests::interactive_fill_click_picks_the_object_over_the_selected_fill_line`); Ctrl constrains the angle to steps of the
 constrain angle (15 degrees at first, #1661);
 dragging a palette colour onto a stop recolours it; dragging a colour
 onto the fill line adds a stop.
@@ -104,7 +110,20 @@ Pattern, Texture, Mesh), then the type's fields: the colour for a
 uniform fill; for a gradient the kind (Linear, Radial, Conical, Square),
 the start and end colours, the angle and the edge pad. With a selection
 the fields edit it; with nothing selected they set the default fill for
-the next object.
+the next object. After the fields, Copy Fill: clicked, it waits for a
+click on another object, and the selected objects take that object's
+whole fill (a colour, a gradient with its stops, angle and transparency,
+a pattern, a texture, a mesh fitted to each object), their outlines
+untouched, one undo step; inside a group the object clicked gives it,
+and a right click cancels (#2471,
+`pick_drag_tests::copy_fill_gives_the_selection_the_fill_of_the_object_clicked`).
+Beside it, a swatch of the selected object's fill: dragged onto another
+object and let go, that object takes the whole fill the same way, the
+selection staying as it was. While it is dragged the pointer shows
+whether letting go changes anything and the object that would take the
+fill is framed; let go over nothing or over the object it came from, it
+changes nothing, and Esc drops it (#2523,
+`pick_drag_tests::a_fill_dragged_from_the_bar_swatch_goes_to_the_object_under_it`).
 
 Handles on the canvas (Interactive Fill, gradient-filled selection):
 three nodes placed freely. The
@@ -117,7 +136,11 @@ the dashed ellipse their frame makes, square fills the parallelogram.
   line gets shorter or longer and turns); radial, conical and square
   fills move whole, end and skew handle with the start.
 - End: sets the length and the angle; the skew handle turns with the
-  line and keeps its length.
+  line. A linear fill's keeps its length; a radial, conical or square
+  fill's grows and shrinks with the line, so a circle stays a circle and
+  an ellipse keeps its ratio (#2373). With Ctrl or Shift the line turns
+  in steps of the constrain angle about the start (a linear fill's start
+  node, dragged so, turns it about the end).
 - Skew handle: sets the second axis on its own, so a radial fill
   becomes an ellipse and a linear fill's bands slant.
 - The line: a drag that starts on the line from the start to the end
@@ -148,9 +171,13 @@ pos_i)`.
   0.001 inside its neighbours.
 - Drag a midpoint slider: sets `mid` (0.01 to 0.99) of the blend.
 - Click a node (the start and the end too): picks it. The node bar
-  opens under it with the node's colour (the swatch opens the colour
-  picker) and its transparency (0 % opaque to 100 % clear); the
-  property bar shows the node's colour, transparency and position
+  opens under it, compact (a slider groove of 70 points), with the
+  node's colour (the swatch opens the colour picker) and the object's
+  uniform transparency (0 % opaque to 100 % clear, the value of the
+  Properties docker's Transparency; a run of slider changes is one undo
+  step, #2507,
+  `ui::tests::the_node_bar_is_compact_and_sets_the_objects_transparency`);
+  the property bar shows the node's colour, transparency and position
   (the position only for nodes between the ends). A palette colour
   clicked while a node is picked goes to the node. The node bar's
   dotted grip (at its left) and the colour picker's (along its top)

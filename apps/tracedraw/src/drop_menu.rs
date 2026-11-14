@@ -4,9 +4,12 @@
 //! Copy Fill Here, Copy Outline Here, Copy All Properties (onto the object
 //! under the pointer), Place Inside (that object becomes the selection's
 //! clip frame), or Cancel. Ctrl keeps the drag horizontal or vertical;
-//! Esc cancels it. A move with the left button let go over another object
-//! with Alt held copies the fill there without a menu, with Alt+Shift
-//! the outline (`App::copy_style_onto`, discussion #2066).
+//! Esc cancels it. Let go over another object with Shift held, that
+//! object takes the outline of the selection without the menu, with Alt
+//! the fill and with Ctrl fill and outline, as in CorelDRAW. A move with
+//! the left button let go over another object with Alt held copies the
+//! fill there without a menu, with Alt+Shift the outline
+//! (`App::copy_style_onto`, discussion #2066).
 
 use crate::app::App;
 use egui::{Painter, Response, Ui};
@@ -84,6 +87,21 @@ impl DropAction {
         }
     }
 
+    /// What a right-button drag let go over another object does without
+    /// the menu, by the keys held (discussion #2066): Shift copies the
+    /// outline, Alt the fill, Ctrl (Cmd on a Mac) fill and outline.
+    pub fn for_right_drop(mods: egui::Modifiers) -> Option<DropAction> {
+        if mods.alt {
+            Some(DropAction::CopyFill)
+        } else if mods.shift {
+            Some(DropAction::CopyOutline)
+        } else if mods.command {
+            Some(DropAction::CopyProperties)
+        } else {
+            None
+        }
+    }
+
     /// Whether the action needs an object under the pointer.
     pub fn needs_target(self) -> bool {
         matches!(
@@ -100,7 +118,6 @@ impl App {
     /// Right-button drags with the Pick tools; true when the input was
     /// used here.
     pub fn right_drag_input(&mut self, response: &Response, p: Point) -> bool {
-        let constrain = response.ctx.input(|i| i.modifiers.command);
         if response.drag_started_by(egui::PointerButton::Secondary) {
             // A right drag from a selected object, also one covered by
             // another object there, moves the selection as it is (#1684).
@@ -133,28 +150,64 @@ impl App {
         }
         if response.drag_stopped() || !response.ctx.input(|i| i.pointer.secondary_down()) {
             drag.current = p;
-            self.right_drag = None;
-            let offset = drag.offset(constrain);
-            if offset.hypot() * self.view.zoom as f64 >= 2.0 {
-                let selection = self.selection.clone();
-                self.drop_menu = Some(DropMenu {
-                    screen: self.view.to_screen(p),
-                    offset,
-                    target: self.hit_test_where(p, |id| selection.contains(&id)),
-                });
-            }
+            let mods = response.ctx.input(|i| i.modifiers);
+            self.right_drag_released(drag, mods);
             return true;
         }
         true
     }
 
-    /// The selection's outline where a right-button drag would put it.
+    /// The object under `p` that is not being dragged.
+    fn right_drop_target(&self, p: Point) -> Option<ShapeId> {
+        let selection = &self.selection;
+        self.hit_test_where(p, |id| selection.contains(&id))
+    }
+
+    /// What a right-button drag that ended with the keys `mods` held does
+    /// there, and the object it does it to (shown while dragging).
+    pub fn right_drop_style(
+        &self,
+        p: Point,
+        mods: egui::Modifiers,
+    ) -> Option<(DropAction, ShapeId)> {
+        let action = DropAction::for_right_drop(mods)?;
+        Some((action, self.right_drop_target(p)?))
+    }
+
+    /// A right-button drag let go at `drag.current` with the keys `mods`
+    /// held: over another object with Shift, Alt or Ctrl that object takes
+    /// the outline, the fill or both at once (discussion #2066); otherwise
+    /// the drop menu opens there.
+    pub fn right_drag_released(&mut self, drag: RightDrag, mods: egui::Modifiers) {
+        self.right_drag = None;
+        let p = drag.current;
+        if let Some((action, target)) = self.right_drop_style(p, mods) {
+            self.copy_style_onto(target, action);
+            return;
+        }
+        let offset = drag.offset(mods.command);
+        if offset.hypot() * self.view.zoom as f64 >= 2.0 {
+            self.drop_menu = Some(DropMenu {
+                screen: self.view.to_screen(p),
+                offset,
+                target: self.right_drop_target(p),
+            });
+        }
+    }
+
+    /// The selection's outline where a right-button drag would put it;
+    /// with Shift, Alt or Ctrl held over another object, that object
+    /// marked and what the drop will copy onto it instead (#2066).
     pub fn draw_right_drag(&self, painter: &Painter) {
         let Some(drag) = self.right_drag else {
             return;
         };
-        let constrain = painter.ctx().input(|i| i.modifiers.command);
-        let t = Affine::translate(drag.offset(constrain));
+        let mods = painter.ctx().input(|i| i.modifiers);
+        if let Some((action, target)) = self.right_drop_style(drag.current, mods) {
+            crate::canvas::draw_drop_style(self, painter, action, target);
+            return;
+        }
+        let t = Affine::translate(drag.offset(mods.command));
         crate::canvas::draw_transform_outline(self, painter, t);
     }
 
@@ -239,6 +292,10 @@ impl App {
 
     /// Copies of the selection moved by `offset`, selected.
     pub fn duplicate_by(&mut self, offset: Vec2) {
+        // The copy goes where the drag ended, also when the dragged
+        // objects are the copies of a Duplicate still selected: the step
+        // a repeated Duplicate takes put it far from the drop (#2640).
+        self.last_duplicate.clear();
         let saved = self.duplicate_offset;
         self.duplicate_offset = offset;
         self.duplicate();
@@ -369,6 +426,38 @@ mod tests {
     }
 
     #[test]
+    fn copy_here_from_copies_still_selected_lands_where_the_drag_ended() {
+        // #2640: a right drag copied from a copy still selected (after
+        // Duplicate or an earlier Copy Here) landed by the earlier step,
+        // not where the drag ended.
+        let mut app = App::headless();
+        let (a, _) = two_boxes(&mut app);
+        app.select(vec![a]);
+        let menu = |dx: f64, dy: f64| DropMenu {
+            screen: egui::Pos2::ZERO,
+            offset: Vec2::new(dx, dy),
+            target: None,
+        };
+        app.drop_action(menu(80.0, 0.0), DropAction::Copy);
+        let first = app.selection[0];
+        assert!((bounds(&app, first).x0 - 80.0).abs() < 1e-6);
+        app.drop_action(menu(5.0, 30.0), DropAction::Copy);
+        let second = app.selection[0];
+        assert_ne!(second, first);
+        let r = bounds(&app, second);
+        assert!((r.x0 - 85.0).abs() < 1e-6, "copy at {r:?}");
+        assert!((r.y0 - (bounds(&app, first).y0 + 30.0)).abs() < 1e-6);
+        // The same after Edit > Duplicate.
+        app.select(vec![a]);
+        app.duplicate();
+        let dup = app.selection[0];
+        let at = bounds(&app, dup);
+        app.drop_action(menu(0.0, 40.0), DropAction::Copy);
+        let r = bounds(&app, app.selection[0]);
+        assert!((r.x0 - at.x0).abs() < 1e-6 && (r.y0 - (at.y0 + 40.0)).abs() < 1e-6);
+    }
+
+    #[test]
     fn fill_outline_and_properties_go_onto_the_target() {
         let mut app = App::headless();
         let (a, b) = two_boxes(&mut app);
@@ -412,5 +501,53 @@ mod tests {
         let frame = app.doc().shape(b).map(|(_, s)| s.clone()).expect("frame");
         assert!(matches!(frame.kind, ShapeKind::ClipFrame { .. }));
         assert_eq!(app.selection, vec![b]);
+    }
+
+    /// Discussion #2066: a right-button drag let go over another object
+    /// with Shift held copies the outline there without the menu, with
+    /// Alt the fill and with Ctrl both, as in CorelDRAW; without keys the
+    /// menu opens.
+    #[test]
+    fn right_drop_with_shift_alt_or_ctrl_copies_without_the_menu() {
+        let shape = |app: &App, id| app.doc().shape(id).map(|(_, s)| s.clone()).ok();
+        let mods = |shift, alt, command| egui::Modifiers {
+            shift,
+            alt,
+            command,
+            ctrl: command,
+            ..Default::default()
+        };
+        for (keys, fill, outline) in [
+            (mods(true, false, false), false, true),
+            (mods(false, true, false), true, false),
+            (mods(false, false, true), true, true),
+        ] {
+            let mut app = App::headless();
+            let (a, b) = two_boxes(&mut app);
+            app.select(vec![a]);
+            let over_b = bounds(&app, b).center();
+            let drag = RightDrag {
+                start: bounds(&app, a).center(),
+                current: over_b,
+            };
+            app.right_drag_released(drag, keys);
+            assert!(app.drop_menu.is_none(), "no menu with {keys:?}");
+            let (sa, sb) = (shape(&app, a).expect("a"), shape(&app, b).expect("b"));
+            assert_eq!(sb.fill == sa.fill, fill, "fill with {keys:?}");
+            assert_eq!(sb.stroke == sa.stroke, outline, "outline with {keys:?}");
+            assert!((bounds(&app, a).x0).abs() < 1e-6, "the source stays");
+        }
+        // No keys: the menu, nothing changed yet.
+        let mut app = App::headless();
+        let (a, b) = two_boxes(&mut app);
+        app.select(vec![a]);
+        let before = app.doc().clone();
+        let drag = RightDrag {
+            start: bounds(&app, a).center(),
+            current: bounds(&app, b).center(),
+        };
+        app.right_drag_released(drag, egui::Modifiers::default());
+        assert_eq!(app.drop_menu.map(|m| m.target), Some(Some(b)));
+        assert_eq!(*app.doc(), before);
     }
 }

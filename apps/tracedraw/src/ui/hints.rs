@@ -330,6 +330,7 @@ impl Topic {
             ],
             Topic::Effects => &[
                 Tool::DropShadow,
+                Tool::InnerShadow,
                 Tool::Contour,
                 Tool::Blend,
                 Tool::Distort,

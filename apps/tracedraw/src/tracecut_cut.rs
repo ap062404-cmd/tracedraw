@@ -1110,6 +1110,49 @@ mod tests {
             .contains("data-spot-stroke=\"CutContour\""));
     }
 
+    /// #2186: the swatch CutContour adds goes by the name CutContour
+    /// wherever it shows (the document palette, the Palette Manager, the
+    /// status bar, a palette it is added to), never by its ink number,
+    /// and the PDF's separation is named CutContour exactly.
+    #[test]
+    fn the_cut_contour_swatch_is_named_cut_contour() {
+        let mut app = App::headless();
+        let a = rect(&mut app, 0.0, 0.0, 20.0, 20.0);
+        app.select(vec![a]);
+        let c = app.tracecut_cut_contour(&CutContourSettings::default());
+        assert!(app.tracecut_apply_changes(&c));
+        let swatch = app.doc().palette.first().copied().expect("swatch");
+        assert!(matches!(swatch, Color::Spot { .. }));
+        assert_eq!(crate::ui::palette::name_of(&app, swatch), CUT_CONTOUR);
+        let tip =
+            crate::ui::palette::swatch_tip(&crate::ui::palette::name_of(&app, swatch), swatch);
+        assert!(tip.starts_with("CutContour\n"), "{tip}");
+        assert!(!tip.contains("Spot"), "{tip}");
+        assert_eq!(
+            crate::app::color_description_in(app.doc(), swatch),
+            "CutContour 100%"
+        );
+        let stroke = app.doc().find_shape(a).and_then(|s| s.stroke.clone());
+        let fill = Fill::Solid(swatch);
+        assert_eq!(
+            crate::app::fill_description_in(app.doc(), &fill),
+            "CutContour 100%"
+        );
+        assert_eq!(stroke.map(|s| s.color), Some(swatch));
+        // Added to one of the user's palettes, it keeps the name.
+        let i = app.new_palette("Cut").expect("palette");
+        assert!(app.add_colors_to_palette(i, &[swatch]));
+        assert_eq!(
+            app.palettes[i].colors,
+            vec![(CUT_CONTOUR.to_string(), swatch)]
+        );
+        // The separation of the exported PDF.
+        let pdf = tracedraw_io::pdf::document_to_pdf(app.doc());
+        let pdf = String::from_utf8_lossy(&pdf);
+        assert!(pdf.contains("/Separation /CutContour /DeviceCMYK"), "{pdf}");
+        assert!(!pdf.contains("/Separation /Spot"));
+    }
+
     #[test]
     fn registration_marks_go_around_the_selection_or_in_the_page() {
         let mut app = App::headless();

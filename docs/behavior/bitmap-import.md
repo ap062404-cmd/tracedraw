@@ -2,7 +2,29 @@
 
 File > Import (Ctrl+I) of a PNG, JPEG, BMP, GIF, TIFF or WebP file
 embeds the image as a bitmap object centred on the page and remembers
-the file (Image > Update from Link reads it again).
+the file (Image > Update from Link reads it again). PNG files of 8 or
+16 bits, grey or colour, with or without alpha or with a palette, and
+baseline or progressive JPEG files all come in
+(`bitmap_file::tests::every_common_png_and_jpeg_imports`, #2167).
+
+A picture whose Exif orientation says it was taken with the camera
+turned comes in upright, its width and height (and its resolution
+across and down) swapped for a quarter turn
+(`bitmap_file::tests::an_exif_orientation_stands_the_picture_upright`,
+#2167).
+
+A CMYK JPEG (four components) comes in as a CMYK picture with its inks,
+as a CMYK TIFF does, its pixels showing the inks through the colour
+management as the drawing's CMYK colours show, so exporting an object
+as a CMYK JPEG and importing the file gives the colour the object had.
+The channels are read as stored: inverted (255 is no ink) under an
+Adobe `APP14` marker with transform 0, as the CMYK export and most
+programs write them; Y, Cb, Cr of the inverted C, M, Y and an inverted
+K under transform 2 (YCCK); as they are without the marker. Before,
+the image library turned the file into RGB by itself, taking every
+file as inverted and leaving the colour management out, so the picture
+came in brighter than the same inks in the drawing (#2163,
+`bitmap_file::tests::a_cmyk_jpeg_imports_with_its_inks_as_the_drawing_shows_them`).
 
 ## The bitmap editor
 

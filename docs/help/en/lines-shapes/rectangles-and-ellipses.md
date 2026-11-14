@@ -77,9 +77,12 @@ and keeps its fill.
 
 The [[tool.three_point_ellipse]] tool draws an ellipse at an angle:
 
-1. Drag to draw the center line of the ellipse, at any angle (hold
-   <kbd>Ctrl</kbd> for steps of 15 degrees).
+1. Drag to draw the center line of the ellipse, at any angle.
 2. Move the pointer to set the height and click.
+
+For a circle around a point, press on the point and drag out with
+<kbd>Ctrl</kbd> held: the line you drag is the radius, and the circle is
+drawn when you let go, with no click for the height.
 
 ## The Corners panel {#corners}
 

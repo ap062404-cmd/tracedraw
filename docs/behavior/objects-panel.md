@@ -26,7 +26,17 @@ the right.
 - The active layer is where new objects go (drawn, pasted, duplicated,
   imported). Click a layer to make it active (the selection is cleared).
   Click an object to select it and make its layer active; Shift+click
-  adds it to the selection.
+  selects every object row from the row clicked before to this one,
+  Ctrl+Shift+click adds that range, and Ctrl+click (Cmd on a Mac) adds
+  one object or takes it out, as in a file list; locked objects stay out
+  (#2483,
+  `ui::objects_docker::tests::shift_click_selects_a_range_of_rows_and_ctrl_click_one_more`).
+- With several objects selected, the eye of one of them hides them all
+  when it is visible and shows them all when it is hidden, whatever each
+  was; they stay selected, and one undo step brings each back as it
+  was. The eye of an object outside the selection hides or shows only
+  it (#2571,
+  `ui::objects_docker::tests::the_eye_of_a_selected_object_hides_and_shows_the_whole_selection`).
 - When the selection changes (picked on the page, Select All, an undo),
   the list scrolls just enough to show the first selected object's row,
   if its layer and groups are open; a selection that stays the same
@@ -42,6 +52,15 @@ the right.
   again, one undo step; #1132), and can be clicked,
   marquee-selected, snapped to and selected with Select All or Tab from
   any of those pages while the layer is visible and unlocked.
+- Every new drawing has a master layer "Desktop" (#1161, #1775): objects
+  moved onto it (Move to Layer, or drag in the docker), beside the pages
+  or on them, show and are picked from every page, as the reference
+  program's desktop layer does. New objects still go to the page's own
+  layer. It is always behind the pages (the in-front choice for all
+  pages leaves it), is not counted when master layers are numbered
+  (`Layer::desktop`), and in `.cdr` files goes on the master page's
+  desktop layer
+  (`ui::objects_docker::tests::a_new_drawing_has_a_desktop_shared_by_every_page`).
 - Double-click a layer to rename it; double-click an object to name it
   (Rename Object; an empty name goes back to the description).
 - Double-click the page node, or pick Rename in its context menu, to
@@ -60,13 +79,19 @@ the right.
   layers (a tick) and Move to the Current Page: it becomes the page's
   top layer with its objects, which then show on that page only; then
   Delete Layer. Each is one undo step (#1477).
-- An object's context menu: Rename; Move to Layer, a list of every
+- An object's context menu is the drawing's own object menu for it,
+  whatever tool is on (#2601): the object is selected first unless it is
+  part of the selection (then the menu is for the whole selection), and a
+  locked object gets the drawing's locked-object menu. Above the drawing's
+  commands come the panel's own: Rename; Move to Layer, a list of every
   page's layers and the master layers under their page's name: the
   object (with the rest of the selection when it is selected) goes to
   the top of that layer, keeping its place on the page, in one undo
   step, and stays selected; a layer of another page makes that page the
   current one. So an object of a master layer is moved onto one page's
-  layer, or a page's object onto the master page (#1477). Delete.
+  layer, or a page's object onto the master page (#1477)
+  (`objects_docker::drag_tests::a_right_click_on_an_object_row_opens_the_drawings_object_menu`,
+  `objects_docker::drag_tests::an_object_rows_menu_is_the_full_object_menu_with_rename_and_move`).
 - A layer's object row dragged along the list (live test of 0.41): while
   the button is held a line marks where it goes; let go on the upper
   half of another object's row it goes in front of that object, on the

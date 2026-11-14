@@ -11,7 +11,9 @@ more, depending on what is selected. It is open at first, beside
 ## With objects selected {#selection}
 
 The top of the panel names the selected object (and how many more are
-selected) and gives its position and size. Under it, a row of buttons opens
+selected) and gives its position and size; for one closed object (a
+rectangle, ellipse, polygon or closed curve) also its **Area**, holes
+taken out, in the drawing unit squared. Under it, a row of buttons opens
 and closes each section the object has:
 
 - **QR code**, for a QR code: its content and look; see

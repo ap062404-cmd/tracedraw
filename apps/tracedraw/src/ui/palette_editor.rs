@@ -22,6 +22,10 @@ use crate::ui::tips::RichTip;
 use egui::Context;
 use tracedraw_core::Color;
 
+/// The palette index the editor gives the document palette, which is
+/// the drawing's and not one of [`App::palettes`] (#2321).
+pub const DOCUMENT: usize = usize::MAX;
+
 /// How many changes the editor's Undo keeps.
 const UNDO_DEPTH: usize = 100;
 
@@ -58,6 +62,9 @@ pub struct PaletteEditorState {
     last_edit: Option<Edit>,
     /// A swatch being dragged to another place.
     pub dragging: Option<usize>,
+    /// The selected colour is scrolled into view once, when the editor
+    /// opens on it.
+    pub reveal: bool,
 }
 
 impl PaletteEditorState {
@@ -65,6 +72,19 @@ impl PaletteEditorState {
     pub fn on(i: usize) -> Self {
         PaletteEditorState {
             palette: i,
+            ..Default::default()
+        }
+    }
+
+    /// The editor on palette `i` with its colour `color` selected, in
+    /// view, its name, value and spot ink ready to edit: a double click
+    /// on a palette swatch, as in the reference program (#2580).
+    pub fn on_color(i: usize, color: usize) -> Self {
+        PaletteEditorState {
+            palette: i,
+            selected: vec![color],
+            anchor: Some(color),
+            reveal: true,
             ..Default::default()
         }
     }
@@ -249,8 +269,26 @@ pub fn move_entries<T>(colors: &mut [T], which: &[usize], up: bool) -> Vec<usize
 impl App {
     /// Open the Palette Editor on palette `i`.
     pub fn open_palette_editor(&mut self, i: usize) {
-        if i < self.palettes.len() {
+        if i < self.palettes.len() || (i == DOCUMENT && self.has_document()) {
             self.dialog = crate::ui::dialogs::Dialog::PaletteEditor(PaletteEditorState::on(i));
+        }
+    }
+
+    /// [`Self::open_palette_editor`] with the palette's colour `color`
+    /// selected (#2580).
+    pub fn open_palette_editor_at(&mut self, i: usize, color: usize) {
+        let len = if i == DOCUMENT {
+            self.has_document().then(|| self.doc().palette.len())
+        } else {
+            self.palettes.get(i).map(|p| p.colors.len())
+        };
+        match len {
+            Some(n) if color < n => {
+                self.dialog = crate::ui::dialogs::Dialog::PaletteEditor(
+                    PaletteEditorState::on_color(i, color),
+                );
+            }
+            _ => self.open_palette_editor(i),
         }
     }
 
@@ -309,6 +347,9 @@ impl App {
     /// OK or Apply: the editor's copy goes to its palette (its name too,
     /// as Rename gives it). Says whether anything changed.
     pub fn apply_palette_draft(&mut self, d: &Draft) -> bool {
+        if d.of == DOCUMENT {
+            return self.apply_document_palette_draft(d);
+        }
         let Some(p) = self.palettes.get(d.of) else {
             return false;
         };
@@ -325,8 +366,66 @@ impl App {
         changed
     }
 
+    /// OK or Apply on the document palette: its colours go to the drawing
+    /// as one undo step (Edit > Undo takes them back), its name to the
+    /// settings as Rename gives it. The colours carry no names of their
+    /// own; a spot colour goes by its ink's (#2321).
+    fn apply_document_palette_draft(&mut self, d: &Draft) -> bool {
+        if !self.has_document() {
+            return false;
+        }
+        let mut changed = false;
+        let colors: Vec<Color> = d.colors.iter().map(|(_, c)| *c).collect();
+        if colors != self.doc().palette {
+            self.run(tracedraw_core::Command::SetDocumentPalette { colors });
+            self.doc_palette_current = None;
+            changed = true;
+        }
+        let name = d.name.trim();
+        if !name.is_empty() && name != self.document_palette_name() {
+            self.rename_palette(crate::settings::DOCUMENT_PALETTE, name);
+            self.settings.save();
+            changed = true;
+        }
+        changed
+    }
+
+    /// Whether the editor may change palette `i`: the document palette of
+    /// an open drawing, or a palette of the user's that is not locked.
+    pub(crate) fn editor_takes_colors(&self, i: usize) -> bool {
+        if i == DOCUMENT {
+            self.has_document()
+        } else {
+            self.palette_takes_colors(i)
+        }
+    }
+
+    /// The name the editor shows for palette `i`.
+    pub(crate) fn editor_palette_name(&self, i: usize) -> String {
+        if i == DOCUMENT {
+            self.document_palette_name()
+        } else {
+            self.palette_name(i)
+        }
+    }
+
     /// The editor's copy of palette `i`.
     pub(crate) fn palette_draft(&self, i: usize) -> Option<Draft> {
+        if i == DOCUMENT {
+            if !self.has_document() {
+                return None;
+            }
+            return Some(Draft {
+                of: DOCUMENT,
+                name: self.document_palette_name(),
+                colors: self
+                    .doc()
+                    .palette
+                    .iter()
+                    .map(|c| (crate::ui::palette::name_of(self, *c), *c))
+                    .collect(),
+            });
+        }
         let p = self.palettes.get(i)?;
         Some(Draft {
             of: i,
@@ -342,19 +441,28 @@ const SIDE: f32 = 18.0;
 const GAP: f32 = 2.0;
 
 pub fn dialog(app: &mut App, ctx: &Context, st: &mut PaletteEditorState, close: &mut bool) {
-    if st.palette >= app.palettes.len() {
+    let document = st.palette == DOCUMENT;
+    if (document && !app.has_document()) || (!document && st.palette >= app.palettes.len()) {
         *close = true;
         return;
     }
     if st.draft.as_ref().is_none_or(|d| d.of != st.palette) {
+        // Opened on a colour (a double click on a swatch, #2580), the
+        // editor keeps it selected; another palette chosen starts with
+        // none.
+        let opening = st.draft.is_none();
         st.draft = app.palette_draft(st.palette);
-        st.selected.clear();
-        st.anchor = None;
+        let n = st.draft.as_ref().map_or(0, |d| d.colors.len());
+        if !opening || st.selected.iter().any(|&i| i >= n) {
+            st.selected.clear();
+            st.anchor = None;
+            st.reveal = false;
+        }
         st.undo.clear();
         st.last_edit = None;
         st.dragging = None;
     }
-    let read_only = !app.palette_takes_colors(st.palette);
+    let read_only = !app.editor_takes_colors(st.palette);
     let builtin = app.palettes.get(st.palette).is_some_and(|p| p.builtin);
     let dirty = st.draft != app.palette_draft(st.palette);
     let mut apply = false;
@@ -362,16 +470,21 @@ pub fn dialog(app: &mut App, ctx: &Context, st: &mut PaletteEditorState, close: 
     crate::ui::dialogs::window(ctx, tr("menu.window.palette_editor")).show(ctx, |ui| {
         ui.horizontal(|ui| {
             ui.label(tr("dialog.palette"));
-            let names: Vec<String> = (0..app.palettes.len())
-                .map(|i| app.palette_name(i))
+            // The document palette first, with a drawing open (#2321).
+            let names: Vec<(usize, String)> = app
+                .has_document()
+                .then_some(DOCUMENT)
+                .into_iter()
+                .chain(0..app.palettes.len())
+                .map(|i| (i, app.editor_palette_name(i)))
                 .collect();
             ui.add_enabled_ui(!dirty, |ui| {
                 crate::ui::keynav::ComboBox::from_id_salt("pal_sel")
-                    .selected_text(names.get(st.palette).cloned().unwrap_or_default())
+                    .selected_text(app.editor_palette_name(st.palette))
                     .show_ui(ui, |ui| {
-                        for (i, n) in names.iter().enumerate() {
-                            if ui.selectable_label(st.palette == i, n).clicked() {
-                                st.palette = i;
+                        for (i, n) in &names {
+                            if ui.selectable_label(st.palette == *i, n).clicked() {
+                                st.palette = *i;
                             }
                         }
                     })
@@ -427,7 +540,7 @@ pub fn dialog(app: &mut App, ctx: &Context, st: &mut PaletteEditorState, close: 
             });
         }
         swatch_grid(ui, st, read_only);
-        selected_row(ui, st, read_only);
+        selected_row(ui, st, read_only, document);
         // Delete with the keyboard while no field takes the key.
         let delete_key = !read_only
             && ui.memory(|m| m.focused().is_none())
@@ -529,7 +642,33 @@ pub fn dialog(app: &mut App, ctx: &Context, st: &mut PaletteEditorState, close: 
     }
     // The save dialog, a download, or the system's save picker on
     // Android (#1402); the palette keeps the file it was saved as.
-    if save_as && !read_only {
+    if save_as && !read_only && document {
+        // The document palette saved as a palette file of its own; the
+        // drawing keeps its palette.
+        let name = app.document_palette_name();
+        let pal = crate::palette::Palette {
+            name: name.clone(),
+            key: "",
+            colors: st
+                .draft
+                .as_ref()
+                .map(|d| d.colors.clone())
+                .unwrap_or_default(),
+            builtin: false,
+            path: None,
+        };
+        crate::files::Dialog::new()
+            .add_filter(
+                crate::palette::filter_label(&tr("file.palettes"), &["tdpal", "gpl"]),
+                &["tdpal", "gpl"],
+            )
+            .set_file_name(format!("{name}.tdpal"))
+            .save_file(app, move |app, p| {
+                if let Err(e) = crate::palette::save_palette(&pal, &p) {
+                    app.status = e.to_string();
+                }
+            });
+    } else if save_as && !read_only {
         let index = st.palette;
         let name = app.palette_name(index);
         crate::files::Dialog::new()
@@ -585,7 +724,13 @@ fn swatch_grid(ui: &mut egui::Ui, st: &mut PaletteEditorState, read_only: bool) 
                 let resp = ui.interact(rect, ui.id().with(("pal_swatch", i)), sense);
                 ui.painter()
                     .rect_filled(rect, 2.0, crate::canvas::to_color32(*c));
+                if matches!(c, Color::Spot { .. }) {
+                    crate::ui::palette::spot_mark(ui.painter(), rect, *c);
+                }
                 if st.selected.contains(&i) {
+                    if st.reveal {
+                        ui.scroll_to_rect(rect, Some(egui::Align::Center));
+                    }
                     ui.painter().rect_stroke(
                         rect,
                         2.0,
@@ -612,6 +757,7 @@ fn swatch_grid(ui: &mut egui::Ui, st: &mut PaletteEditorState, read_only: bool) 
                 }
             }
         });
+    st.reveal = false;
     if let Some(i) = clicked {
         click(
             &mut st.selected,
@@ -652,7 +798,7 @@ fn swatch_grid(ui: &mut egui::Ui, st: &mut PaletteEditorState, read_only: bool) 
 
 /// The selected colour's name, value and spot ink; with several, how
 /// many.
-fn selected_row(ui: &mut egui::Ui, st: &mut PaletteEditorState, read_only: bool) {
+fn selected_row(ui: &mut egui::Ui, st: &mut PaletteEditorState, read_only: bool, document: bool) {
     match st.selected.as_slice() {
         [] => {}
         [i] => {
@@ -662,27 +808,38 @@ fn selected_row(ui: &mut egui::Ui, st: &mut PaletteEditorState, read_only: bool)
             };
             ui.horizontal(|ui| {
                 let mut new_name = name.clone();
+                // The document palette keeps no names of its own and its
+                // spot colours are the drawing's inks: there a name is
+                // shown only, and a spot colour is changed with its ink
+                // (#2321).
+                let was_spot = matches!(c, Color::Spot { .. });
+                let names = !read_only && !document;
                 let renamed = ui
-                    .add_enabled(!read_only, egui::TextEdit::singleline(&mut new_name))
+                    .add_enabled(names, egui::TextEdit::singleline(&mut new_name))
                     .rich_tip(crate::ui::tips::pair(
                         "dialog.color_name",
                         "dialog.color_name_desc",
                     ))
                     .changed();
-                let was_spot = matches!(c, Color::Spot { .. });
                 let mut edited = c;
-                let changed = crate::ui::tips::tip_over(
-                    ui,
-                    crate::ui::tips::pair("dialog.color_value", "dialog.color_value_desc"),
-                    |ui| crate::ui::color_picker::color_button(ui, &mut edited),
-                );
+                let value_editable = !(document && was_spot);
+                let changed = ui
+                    .add_enabled_ui(value_editable, |ui| {
+                        crate::ui::tips::tip_over(
+                            ui,
+                            crate::ui::tips::pair("dialog.color_value", "dialog.color_value_desc"),
+                            |ui| crate::ui::color_picker::color_button(ui, &mut edited),
+                        )
+                    })
+                    .inner
+                    && value_editable;
                 // A spot colour: a named ink with this colour as its
                 // process stand-in, printed on a plate of its own. A
                 // spot colour given another colour stays one.
                 let mut spot = was_spot;
                 let toggled = ui
                     .add_enabled(
-                        !read_only,
+                        names,
                         egui::Checkbox::new(&mut spot, tr("dialog.spot_color")),
                     )
                     .rich_tip(crate::ui::tips::pair(
@@ -869,6 +1026,65 @@ mod tests {
             .find(|r| !r.document && r.index == i)
             .expect("bar");
         assert_eq!(row.colors.len(), 3);
+    }
+
+    /// The document palette is in the editor's list, first: its colours
+    /// are edited on a copy that Apply gives the drawing as one undo step,
+    /// and Edit Palette on its bar opens it there (#2321).
+    #[test]
+    fn the_document_palette_is_edited_in_the_editor() {
+        let ctx = crate::theme::ui_context();
+        let mut app = App::headless();
+        app.show_welcome = false;
+        assert!(app.has_document());
+        let blue = Color::rgb8(0, 0, 255);
+        let green = Color::rgb8(0, 160, 0);
+        app.add_to_document_palette(red());
+        app.add_to_document_palette(blue);
+        app.add_to_document_palette(green);
+        app.open_palette_editor(DOCUMENT);
+        frame(&ctx, &mut app, Vec::new());
+        let d = state(&mut app).draft.clone().expect("the document palette");
+        assert_eq!(d.of, DOCUMENT);
+        assert_eq!(d.name, app.document_palette_name());
+        assert_eq!(
+            d.colors.iter().map(|(_, c)| *c).collect::<Vec<_>>(),
+            [red(), blue, green]
+        );
+        assert!(app.editor_takes_colors(DOCUMENT));
+        // Blue out, green up, a grey added: nothing changes before Apply.
+        state(&mut app).selected = vec![1];
+        state(&mut app).delete_selected();
+        state(&mut app).selected = vec![1];
+        assert!(state(&mut app).move_selected(true));
+        state(&mut app).add_color(Color::rgb8(128, 128, 128));
+        frame(&ctx, &mut app, Vec::new());
+        assert_eq!(app.doc().palette, [red(), blue, green]);
+        let steps = app.engine.history_labels().0.len();
+        let d = state(&mut app).draft.clone().expect("draft");
+        assert!(app.apply_palette_draft(&d));
+        assert_eq!(
+            app.doc().palette,
+            [green, red(), Color::rgb8(128, 128, 128)]
+        );
+        assert_eq!(app.engine.history_labels().0.len(), steps + 1);
+        // Applied again unchanged: no step.
+        assert!(!app.apply_palette_draft(&d));
+        app.undo();
+        assert_eq!(app.doc().palette, [red(), blue, green]);
+        // A new name goes to the document palette's bar and menu.
+        let mut named = d.clone();
+        named.name = "Job colours".into();
+        assert!(app.apply_palette_draft(&named));
+        assert_eq!(app.document_palette_name(), "Job colours");
+        // With no drawing open the editor does not offer it.
+        app.dialog = Dialog::None;
+        while app.has_document() {
+            app.close_active_document();
+        }
+        app.open_palette_editor(DOCUMENT);
+        assert!(matches!(app.dialog, Dialog::None));
+        assert!(app.palette_draft(DOCUMENT).is_none());
     }
 
     /// The editor's own buttons: Move Up and Down, a drag, a rename, and

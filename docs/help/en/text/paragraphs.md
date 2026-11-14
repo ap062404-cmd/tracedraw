@@ -72,7 +72,13 @@ A drop cap is a large first letter that spans several lines.
 
 The letter is scaled so its top meets the top of the first line and it sits
 on the baseline of the last line it spans; the lines beside it are shortened
-to make room.
+to make room, as wide as the letter's ink (an italic letter leans out of
+its width), an accent on the letter drops with it, and the lines stay
+shortened down to the end of the tail of a g, y or j.
+
+The letter is still a character of the text: click it with the Text tool,
+or drag over it, to select it and change its colour, font or size as for
+any other letter.
 
 ![The Drop Cap dialog box](../../img/text-paragraphs-drop-cap.png)
 

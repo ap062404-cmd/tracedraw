@@ -202,7 +202,7 @@ impl App {
     pub fn draw_drop_hint(&self, ctx: &egui::Context) {
         let hovered: Vec<Option<PathBuf>> =
             ctx.input(|i| i.raw.hovered_files.iter().map(|f| f.path.clone()).collect());
-        if hovered.is_empty() {
+        if hovered.is_empty() || !drag_held() {
             return;
         }
         let on = self.drop_on(drop_pointer(ctx));
@@ -266,6 +266,30 @@ fn drop_pointer(ctx: &egui::Context) -> Option<egui::Pos2> {
         }
     }
     ctx.input(|i| i.pointer.hover_pos())
+}
+
+/// Whether the drag that brought the hovered files is still going on.
+/// On Windows the files a drag left without a drop could stay listed as
+/// hovered, and the drop frame then covered the window until TraceDraw
+/// was closed (#2350). A file drag is made with a mouse button held, so
+/// with none held it is over and the frame goes. Elsewhere the windowing
+/// layer's leave is trusted.
+fn drag_held() -> bool {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+            GetAsyncKeyState, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON,
+        };
+        // SAFETY: GetAsyncKeyState only reads the key's state; the high
+        // bit (a negative value) says the key is down now.
+        [VK_LBUTTON, VK_RBUTTON, VK_MBUTTON]
+            .into_iter()
+            .any(|k| unsafe { GetAsyncKeyState(i32::from(k)) } < 0)
+    }
+    #[cfg(not(windows))]
+    {
+        true
+    }
 }
 
 #[cfg(test)]

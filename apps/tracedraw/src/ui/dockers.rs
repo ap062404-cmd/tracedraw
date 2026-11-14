@@ -32,10 +32,31 @@ pub fn tab_close_rect(bg: egui::Rect) -> egui::Rect {
 /// The width of a docker tab column.
 pub const STRIP_W: f32 = 27.0;
 
+/// The fill of a docker tab: the docker in front takes the theme's
+/// colour for the tab in front, the light blue of the document tab in
+/// front on the light themes (the High Contrast theme's highlight
+/// there). It was the frame colour of windows, a grey hardly apart from
+/// the other tabs (#2316).
+pub(crate) fn tab_fill(active: bool, hovered: bool) -> egui::Color32 {
+    use crate::theme::{Theme, Tokens};
+    if active {
+        if crate::theme::theme() == Theme::HighContrast {
+            Tokens::window_border()
+        } else {
+            Tokens::tab_active()
+        }
+    } else if hovered {
+        Tokens::icon_off()
+    } else {
+        Tokens::tab()
+    }
+}
+
 /// A docker tab column: the open dockers of the column at `place` as
 /// vertical tabs (an icon on top, the name running downwards), grey, the
-/// open one darker, then the button that adds a docker. A tab dragged
-/// moves its docker (see [`drag_overlay`]).
+/// open one in the colour of the tab in front ([`tab_fill`]), then the
+/// button that adds a docker. A tab dragged moves its docker (see
+/// [`drag_overlay`]).
 pub fn tab_strip(app: &mut App, ui: &mut Ui, place: DockerPlace) {
     let full = ui.max_rect();
     // The title bar's part and the line along the docker.
@@ -84,13 +105,7 @@ pub fn tab_strip(app: &mut App, ui: &mut Ui, place: DockerPlace) {
             } else {
                 egui::Rect::from_min_max(egui::pos2(r.min.x + 1.0, r.min.y), r.max)
             };
-            let fill = if active {
-                crate::theme::Tokens::window_border()
-            } else if resp.hovered() {
-                crate::theme::Tokens::icon_off()
-            } else {
-                crate::theme::Tokens::tab()
-            };
+            let fill = tab_fill(active, resp.hovered());
             ui.painter().rect_filled(bg, 0.0, fill);
             let close = tab_close_rect(bg);
             let over_close = resp.hover_pos().is_some_and(|p| close.contains(p));
@@ -940,26 +955,7 @@ fn fill_winding_row(app: &mut App, ui: &mut Ui) {
 /// outline: `Some(true)` all of them, `Some(false)` none, `None` mixed or
 /// nothing selected.
 pub fn overprint_state(app: &App, fill: bool) -> Option<bool> {
-    let targets = app.paint_targets();
-    let on = targets
-        .iter()
-        .filter(|s| {
-            if fill {
-                s.overprint_fill
-            } else {
-                s.overprint_outline
-            }
-        })
-        .count();
-    if targets.is_empty() {
-        None
-    } else if on == targets.len() {
-        Some(true)
-    } else if on == 0 {
-        Some(false)
-    } else {
-        None
-    }
+    app.selection_overprint(fill)
 }
 
 /// The Overprint fill or Overprint outline checkbox of the docker (#1200),
@@ -1104,6 +1100,31 @@ pub(crate) fn shadow_summary(sh: &tracedraw_core::Shadow) -> String {
     )
 }
 
+/// The area a closed object covers on the page, mm²: rectangles,
+/// ellipses and pies, polygons and stars, and closed curves, holes taken
+/// out as its fill rule has them; `None` for anything else (open curves,
+/// text, pictures, tables, groups) (#2599).
+pub(crate) fn selection_area_mm2(s: &tracedraw_core::Shape) -> Option<f64> {
+    use tracedraw_core::ShapeKind as K;
+    let closed = match &s.kind {
+        K::Rect { .. } | K::Polygon { .. } => true,
+        K::Ellipse { .. } | K::Path { .. } => !s.kind.is_open_curve(),
+        _ => false,
+    };
+    if !closed {
+        return None;
+    }
+    // A whole ellipse is drawn with four curves a little off the true
+    // ellipse; its area is the true one, as a measure should be.
+    if let K::Ellipse { rect, arc: None } = &s.kind {
+        let a = std::f64::consts::PI * rect.width() * rect.height() / 4.0
+            * s.transform.determinant().abs();
+        return a.is_finite().then_some(a);
+    }
+    let a = tracedraw_core::shaping::filled_area(&s.page_path(), s.fill_rule);
+    a.is_finite().then_some(a)
+}
+
 fn properties(app: &mut App, ui: &mut Ui) {
     let cc = app.current_colors;
     ui.data_mut(|d| d.insert_temp(current_colors_id(), cc));
@@ -1163,6 +1184,26 @@ fn properties(app: &mut App, ui: &mut Ui) {
         .monospace()
         .size(11.0),
     );
+    // One closed object: the area it covers, in the document's unit
+    // squared (#2599).
+    if let Some(area) = shapes
+        .first()
+        .filter(|_| shapes.len() == 1)
+        .and_then(selection_area_mm2)
+    {
+        let k = app.units.world_from_mm(1.0);
+        ui.label(
+            egui::RichText::new(format!(
+                "{} {:.2} {}\u{b2}",
+                tr("docker.area"),
+                area * k * k,
+                app.units.short()
+            ))
+            .monospace()
+            .size(11.0),
+        )
+        .rich_tip(crate::ui::tips::keyed("docker.area"));
+    }
 
     ui.separator();
     // A jump from elsewhere (F11 to the fill, the outline from the status
@@ -1241,8 +1282,17 @@ fn properties(app: &mut App, ui: &mut Ui) {
                 ui.painter(),
                 egui::Rect::from_center_size(rect.center(), egui::vec2(18.0, 18.0)),
             );
-            if resp.rich_tip(tr(key)).clicked() {
-                toggle_section(app, id);
+            // A click shows the section alone, so the docker's content
+            // is what was picked at the top; with Ctrl or Shift it opens
+            // or closes beside the others, as the headers do (#2200).
+            let tip = crate::ui::tips::pair(key, "docker.section_pick_hint");
+            #[cfg(test)]
+            ui.ctx()
+                .data_mut(|d| d.insert_temp(section_button_id(id), rect));
+            if resp.rich_tip(tip).clicked() {
+                let beside = ui.input(|i| i.modifiers.command || i.modifiers.shift);
+                let shown: Vec<&str> = sections.iter().map(|(id, _, _)| *id).collect();
+                pick_section(app, id, &shown, beside);
             }
         }
     });
@@ -1884,6 +1934,52 @@ fn toggle_section(app: &mut App, id: &str) {
         closed.retain(|c| c != id);
     } else {
         closed.push(id.to_string());
+    }
+}
+
+/// Where the button of section `id` was drawn last (for tests).
+#[cfg(test)]
+fn section_button_id(id: &str) -> egui::Id {
+    egui::Id::new(("properties_section_button", id.to_string()))
+}
+
+/// Every section the Properties docker can show, whatever is selected.
+const PROPERTIES_SECTIONS: [&str; 9] = [
+    "qr",
+    "outline",
+    "fill",
+    "transparency",
+    "corners",
+    "effects",
+    "shadow",
+    "character",
+    "summary",
+];
+
+/// A click on a section's button at the top of the Properties docker
+/// (#2200). The docker then shows that section alone: every other one
+/// is closed (those of other kinds of object too, so the docker stays
+/// on the section picked when the selection changes) and only their
+/// header bars remain. A click on the button of the only open section
+/// of `shown` (the sections the selection has) opens them all again.
+/// With `beside` (Ctrl or Shift held) the section opens or closes on its
+/// own, as a click on its header does.
+fn pick_section(app: &mut App, id: &str, shown: &[&str], beside: bool) {
+    if beside {
+        toggle_section(app, id);
+        return;
+    }
+    let closed = &mut app.settings.properties_closed;
+    let is_open = |closed: &[String], s: &str| !closed.iter().any(|c| c == s);
+    let alone = is_open(closed, id) && shown.iter().all(|s| *s == id || !is_open(closed, s));
+    closed.retain(|c| !PROPERTIES_SECTIONS.contains(&c.as_str()));
+    if !alone {
+        closed.extend(
+            PROPERTIES_SECTIONS
+                .iter()
+                .filter(|s| **s != id)
+                .map(|s| s.to_string()),
+        );
     }
 }
 
@@ -2755,10 +2851,10 @@ pub(crate) fn pattern_editor(
             tile, front, back, ..
         } => {
             crate::ui::keynav::ComboBox::from_label(tr("docker.tile"))
-                .selected_text(tile.name())
+                .selected_text(pattern_tile_name(*tile))
                 .show_ui(ui, |ui| {
                     for t in PatternTile::ALL {
-                        if ui.selectable_label(*tile == t, t.name()).clicked() {
+                        if ui.selectable_label(*tile == t, pattern_tile_name(t)).clicked() {
                             *tile = t;
                             changed = true;
                         }
@@ -3065,6 +3161,25 @@ pub(crate) fn texture_editor(ui: &mut Ui, t: &mut Texture) -> bool {
         }
     });
     changed
+}
+
+/// The i18n key of a built-in two-colour pattern tile's name.
+pub fn pattern_tile_key(t: PatternTile) -> &'static str {
+    match t {
+        PatternTile::Checker => "pattern_tile.checker",
+        PatternTile::Dots => "pattern_tile.dots",
+        PatternTile::Stripes => "pattern_tile.stripes",
+        PatternTile::DiagonalStripes => "pattern_tile.diagonal_stripes",
+        PatternTile::Grid => "pattern_tile.grid",
+        PatternTile::Bricks => "pattern_tile.bricks",
+        PatternTile::Crosshatch => "pattern_tile.crosshatch",
+        PatternTile::Waves => "pattern_tile.waves",
+    }
+}
+
+/// A built-in two-colour pattern tile's name in the interface language.
+pub fn pattern_tile_name(t: PatternTile) -> String {
+    tr(pattern_tile_key(t))
 }
 
 /// The i18n key of a procedural pattern's name.
@@ -3883,6 +3998,28 @@ fn undo_docker(app: &mut App, ui: &mut Ui) {
 pub(crate) mod tests {
     use super::*;
 
+    /// The built-in two-colour pattern names follow the interface
+    /// language (#2509): every language has each of them, and in
+    /// Portuguese none stays in English.
+    #[test]
+    fn the_two_colour_pattern_names_are_translated() {
+        for code in ["en", "pt-BR", "de", "ja", "ar"] {
+            crate::i18n::with_thread_language(code, || {
+                for t in PatternTile::ALL {
+                    let name = pattern_tile_name(t);
+                    assert_ne!(name, pattern_tile_key(t), "{code}: {t:?}");
+                    assert!(!name.is_empty(), "{code}: {t:?}");
+                }
+            });
+        }
+        crate::i18n::with_thread_language("pt-BR", || {
+            for t in PatternTile::ALL {
+                assert_ne!(pattern_tile_name(t), t.name(), "{t:?}");
+            }
+            assert_eq!(pattern_tile_name(PatternTile::Bricks), "Tijolos");
+        });
+    }
+
     /// A docker dropped over a column joins it; just inside a side's only
     /// column (on the drawing's side) it makes a second column there;
     /// over the second column it joins that; near a window side with no
@@ -4092,6 +4229,44 @@ pub(crate) mod tests {
         // On the cross: closed.
         click(&mut app, cross);
         assert!(!app.open_dockers.contains(&first), "{:?}", app.open_dockers);
+    }
+
+    /// The docker in front has its tab marked in the colour of the tab in
+    /// front, as the document tabs are, in every theme: light blue on the
+    /// light themes. It was a grey close to the other tabs' (#2316).
+    #[test]
+    fn the_tab_of_the_docker_in_front_is_marked() {
+        let ctx = crate::theme::ui_context();
+        for theme in crate::theme::Theme::ALL {
+            crate::theme::set_theme(theme);
+            let on = tab_fill(true, false);
+            assert_ne!(on, tab_fill(false, false), "{theme:?}");
+            assert_ne!(on, tab_fill(false, true), "{theme:?}");
+            if theme != crate::theme::Theme::HighContrast {
+                assert_eq!(on, Tokens::tab_active(), "{theme:?}");
+            }
+            let mut app = App::headless();
+            let tab = app.open_dockers[0];
+            let place = app.docker_place(tab).unwrap_or(DockerPlace::Right);
+            app.set_docker_column(place, true, Some(tab));
+            let mut out = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(STRIP_W, 600.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| tab_strip(&mut app, ui, place),
+            );
+            out.textures_delta.clear();
+            let filled = out
+                .shapes
+                .iter()
+                .any(|c| matches!(&c.shape, egui::epaint::Shape::Rect(r) if r.fill == on));
+            assert!(filled, "{theme:?}: no tab in {on:?}");
+        }
+        crate::theme::set_theme(crate::theme::Theme::Light);
     }
 
     /// More docker tabs than the column's height: the mouse wheel over
@@ -5437,6 +5612,123 @@ pub(crate) mod tests {
         }
     }
 
+    /// #2200: a click on a section's button at the top shows that
+    /// section alone, a second click on it all of them again; with Ctrl
+    /// or Shift the section opens or closes beside the others. The
+    /// sections of other kinds of object are closed too, so text selected
+    /// next still shows the section picked.
+    #[test]
+    fn a_section_button_shows_its_section_alone() {
+        let ctx = crate::theme::ui_context();
+        let mut app = App::headless();
+        app.settings.autocorrect.enabled = false;
+        let id = app
+            .new_shape(ShapeKind::Rect {
+                rect: tracedraw_core::geometry::Rect::new(10.0, 10.0, 60.0, 40.0),
+                radius: 0.0,
+                corners: None,
+            })
+            .expect("rect");
+        app.select(vec![id]);
+        app.show_dockers = true;
+        app.docker_tab = DockerTab::Properties;
+        // What a rectangle shows.
+        let shown = [
+            "outline",
+            "fill",
+            "transparency",
+            "corners",
+            "effects",
+            "summary",
+        ];
+        let open = |app: &App| -> Vec<&'static str> {
+            PROPERTIES_SECTIONS
+                .into_iter()
+                .filter(|s| !app.settings.properties_closed.iter().any(|c| c == s))
+                .collect()
+        };
+        assert_eq!(open(&app).len(), PROPERTIES_SECTIONS.len());
+        // Fill alone; the button's tip says so.
+        pick_section(&mut app, "fill", &shown, false);
+        assert_eq!(open(&app), ["fill"]);
+        crate::ui::tips::start_recording();
+        draw(&ctx, &mut app);
+        let tips = crate::ui::tips::recorded();
+        assert!(
+            tips.contains(&crate::ui::tips::pair(
+                "docker.fill",
+                "docker.section_pick_hint"
+            )),
+            "{tips:?}"
+        );
+        // Another button: that section alone.
+        pick_section(&mut app, "summary", &shown, false);
+        assert_eq!(open(&app), ["summary"]);
+        // With Ctrl or Shift: beside the others, and closed again.
+        pick_section(&mut app, "outline", &shown, true);
+        assert_eq!(open(&app), ["outline", "summary"]);
+        pick_section(&mut app, "outline", &shown, true);
+        assert_eq!(open(&app), ["summary"]);
+        // The button of the only open section: all of them again.
+        pick_section(&mut app, "summary", &shown, false);
+        assert_eq!(open(&app).len(), PROPERTIES_SECTIONS.len());
+        assert!(app.settings.properties_closed.is_empty());
+        // A section the selection does not have, open from before, does
+        // not count: Fill is the only one open of those shown.
+        app.settings.properties_closed = shown
+            .iter()
+            .filter(|s| **s != "fill")
+            .map(|s| s.to_string())
+            .collect();
+        assert!(open(&app).contains(&"character"));
+        pick_section(&mut app, "fill", &shown, false);
+        assert!(app.settings.properties_closed.is_empty());
+        // The headers still open and close one section.
+        toggle_section(&mut app, "fill");
+        assert_eq!(app.settings.properties_closed, ["fill"]);
+        draw(&ctx, &mut app);
+
+        // The buttons themselves: a click, then a click with Ctrl held.
+        app.settings.properties_closed.clear();
+        draw(&ctx, &mut app);
+        let click = |app: &mut App, id: &str, modifiers: egui::Modifiers| {
+            let rect: egui::Rect = ctx
+                .data(|d| d.get_temp(section_button_id(id)))
+                .expect("the button is drawn");
+            let at = rect.center();
+            for pressed in [true, false] {
+                let input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1400.0, 900.0),
+                    )),
+                    events: vec![
+                        egui::Event::ModifiersChanged(modifiers),
+                        egui::Event::PointerMoved(at),
+                        egui::Event::PointerButton {
+                            pos: at,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers,
+                        },
+                    ],
+                    ..Default::default()
+                };
+                let mut out = ctx.run_ui(input, |ui| crate::ui::root(app, ui));
+                out.textures_delta.clear();
+            }
+            draw(&ctx, app);
+        };
+        click(&mut app, "transparency", egui::Modifiers::NONE);
+        assert_eq!(open(&app), ["transparency"], "a click");
+        click(&mut app, "fill", egui::Modifiers::COMMAND);
+        assert_eq!(open(&app), ["fill", "transparency"], "a click with Ctrl");
+        click(&mut app, "fill", egui::Modifiers::NONE);
+        assert_eq!(open(&app), ["fill"]);
+        click(&mut app, "fill", egui::Modifiers::NONE);
+        assert!(app.settings.properties_closed.is_empty(), "all again");
+    }
+
     /// The Properties sections come open; a button or a header closes and
     /// opens one (kept in the preferences), and a jump to the fill or the
     /// outline opens it again.
@@ -5640,5 +5932,43 @@ pub(crate) mod tests {
         );
         // 100 px of finger: egui's drag-to-scroll has no tap distance.
         assert!(offset() > 50.0, "the contents scrolled up: {}", offset());
+    }
+
+    /// #2599: the area of one closed object, holes out; none for an open
+    /// curve or a text.
+    #[test]
+    fn the_area_of_one_closed_object() {
+        use tracedraw_core::geometry::Rect;
+        let rect = tracedraw_core::Shape::new(
+            tracedraw_core::ShapeId(1),
+            ShapeKind::Rect {
+                rect: Rect::new(0.0, 0.0, 20.0, 10.0),
+                radius: 0.0,
+                corners: None,
+            },
+        );
+        let a = selection_area_mm2(&rect).expect("closed");
+        assert!((a - 200.0).abs() < 1e-6, "{a}");
+        let circle = tracedraw_core::Shape::new(
+            tracedraw_core::ShapeId(2),
+            ShapeKind::Ellipse {
+                rect: Rect::new(0.0, 0.0, 20.0, 20.0),
+                arc: None,
+            },
+        );
+        let a = selection_area_mm2(&circle).expect("closed");
+        assert!((a - std::f64::consts::PI * 100.0).abs() < 1e-9, "{a}");
+        let mut line = tracedraw_core::geometry::BezPath::new();
+        line.move_to((0.0, 0.0));
+        line.line_to((10.0, 10.0));
+        line.line_to((20.0, 0.0));
+        let open = tracedraw_core::Shape::new(
+            tracedraw_core::ShapeId(3),
+            ShapeKind::Path {
+                path: line,
+                closed: false,
+            },
+        );
+        assert_eq!(selection_area_mm2(&open), None);
     }
 }

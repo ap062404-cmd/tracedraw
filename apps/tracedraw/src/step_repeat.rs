@@ -266,7 +266,17 @@ impl App {
         } else {
             sr.dy
         };
-        Some(Vec2::new(dx, dy))
+        // An axis turned off moves the copies none that way; Left and Up
+        // turn the step round (#2572). The page's y runs down.
+        let along = |on: bool, back: bool, d: f64| match (on, back) {
+            (false, _) => 0.0,
+            (true, true) => -d,
+            (true, false) => d,
+        };
+        Some(Vec2::new(
+            along(sr.use_x, sr.left, dx),
+            along(sr.use_y, sr.up, dy),
+        ))
     }
 
     /// The preview of the copies an Apply would make, worked out again
@@ -662,5 +672,50 @@ mod tests {
             assert!(c.x0 >= 50.0 - 1e-9 && c.x1 <= 150.0 + 1e-9, "{c:?}");
             assert!(c.y0 >= 100.0 - 1e-9 && c.y1 <= 200.0 + 1e-9, "{c:?}");
         }
+    }
+
+    /// #2572: an axis turned off adds nothing that way, so the copies go
+    /// along the other one only; Left and Up send them the other way.
+    #[test]
+    fn copies_go_along_one_axis_either_way() {
+        let (mut app, _) = app_with_rect();
+        let sr = &mut app.step_repeat;
+        sr.copies = 3;
+        sr.mode_x = 1;
+        sr.dx = 5.0;
+        sr.mode_y = 1;
+        sr.dy = 2.0;
+        // Both on, as before: across by 25 and down by 12.
+        assert_eq!(app.step_and_repeat_step(), Some(Vec2::new(25.0, 12.0)));
+        // Across only, to the left.
+        app.step_repeat.use_y = false;
+        app.step_repeat.left = true;
+        assert_eq!(app.step_and_repeat_step(), Some(Vec2::new(-25.0, 0.0)));
+        // Up only.
+        app.step_repeat.use_x = false;
+        app.step_repeat.use_y = true;
+        app.step_repeat.up = true;
+        assert_eq!(app.step_and_repeat_step(), Some(Vec2::new(0.0, -12.0)));
+        let before = shape_count(&app);
+        app.step_and_repeat_apply();
+        assert_eq!(shape_count(&app), before + 3);
+        let tops: Vec<f64> = app
+            .selected_shapes()
+            .iter()
+            .map(|s| tracedraw_core::geometry::Shape::bounding_box(&s.page_path()).y0)
+            .collect();
+        assert_eq!(tops.len(), 3);
+        for (k, y) in tops.iter().enumerate() {
+            assert!(
+                (y - (10.0 - 12.0 * (k + 1) as f64)).abs() < 1e-9,
+                "{tops:?}"
+            );
+        }
+        let xs: Vec<f64> = app
+            .selected_shapes()
+            .iter()
+            .map(|s| tracedraw_core::geometry::Shape::bounding_box(&s.page_path()).x0)
+            .collect();
+        assert!(xs.iter().all(|x| (x - 10.0).abs() < 1e-9), "{xs:?}");
     }
 }

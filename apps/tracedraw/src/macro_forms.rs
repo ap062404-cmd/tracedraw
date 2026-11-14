@@ -338,6 +338,11 @@ impl LiveForm {
 #[derive(Debug, Default)]
 pub struct Forms {
     pub list: Vec<LiveForm>,
+    /// Forms unloaded while the code that unloaded them still runs: the
+    /// rest of that code reads and sets their controls as before, as in
+    /// VBA (`Unload Me` in `UserForm_Activate`, then the controls set,
+    /// #2165). They are off screen and get no events.
+    unloaded: Vec<LiveForm>,
     next_id: u32,
 }
 
@@ -354,6 +359,17 @@ fn rgb_of(v: &Value) -> Option<(u8, u8, u8)> {
 fn ole(c: Option<(u8, u8, u8)>, default: (u8, u8, u8)) -> Value {
     let (r, g, b) = c.unwrap_or(default);
     json!(r as i64 | (g as i64) << 8 | (b as i64) << 16)
+}
+
+/// The picture a control's Picture gets: the file of a
+/// `LoadPicture(path)`, when it reads; nothing for `Nothing` or a file
+/// that does not.
+fn picture_of(v: &Value) -> Option<Vec<u8>> {
+    let path = v.get("picture")?.as_str()?;
+    if crate::files::WEB {
+        return None;
+    }
+    std::fs::read(path).ok().filter(|b| !b.is_empty())
 }
 
 fn text_of(v: &Value) -> String {
@@ -427,7 +443,19 @@ impl Forms {
     }
 
     pub fn remove(&mut self, id: u32) {
-        self.list.retain(|f| f.id != id);
+        if let Some(i) = self.list.iter().position(|f| f.id == id) {
+            let mut f = self.list.remove(i);
+            f.visible = false;
+            self.unloaded.push(f);
+        }
+    }
+
+    /// Form `id`, also one unloaded (see [`Forms::unloaded`]).
+    fn loaded_or_not(&mut self, id: u32) -> Option<&mut LiveForm> {
+        let Forms { list, unloaded, .. } = self;
+        list.iter_mut()
+            .chain(unloaded.iter_mut())
+            .find(|f| f.id == id)
     }
 
     /// Any form on screen.
@@ -442,7 +470,12 @@ impl Forms {
 
     /// Property `prop` of control `ctl` of form `id` ("" for the form).
     pub fn get_prop(&self, id: u32, ctl: &str, prop: &str) -> Result<Value, String> {
-        let form = self.get(id).ok_or("the form was unloaded")?;
+        let form = self
+            .list
+            .iter()
+            .chain(&self.unloaded)
+            .find(|f| f.id == id)
+            .ok_or("the form was unloaded")?;
         let p = prop.to_ascii_lowercase();
         if ctl.is_empty() {
             return Ok(match p.as_str() {
@@ -522,6 +555,10 @@ impl Forms {
             "selected" => json!(c.selected),
             "kind" => json!(kind_name(c.kind)),
             "specialeffect" | "borderstyle" | "textalign" | "autosize" | "wordwrap" => json!(0),
+            // A drop-down list as wide as its box, eight rows (#2165).
+            "listwidth" => json!(0),
+            "listrows" => json!(8),
+            "dropbuttonstyle" => json!(1),
             _ => return Err(format!("{} has no property {prop}", c.name)),
         })
     }
@@ -535,7 +572,7 @@ impl Forms {
         prop: &str,
         v: &Value,
     ) -> Result<SetOutcome, String> {
-        let form = self.get_mut(id).ok_or("the form was unloaded")?;
+        let form = self.loaded_or_not(id).ok_or("the form was unloaded")?;
         let p = prop.to_ascii_lowercase();
         let mut out = SetOutcome::default();
         if ctl.is_empty() {
@@ -664,10 +701,13 @@ impl Forms {
                 c.list_index = -1;
             }
             "seltext" => c.text = text_of(v),
+            // LoadPicture(path) (the glue sends its path), or none.
+            "picture" => c.picture = picture_of(v),
             // Accepted and not drawn.
             "specialeffect" | "borderstyle" | "textalign" | "autosize" | "wordwrap" | "tabstop"
             | "selstart" | "sellength" | "boundcolumn" | "textcolumn" | "columnwidths"
-            | "columnheads" | "matchentry" | "showdropbuttonwhen" | "picture" | "mousepointer" => {}
+            | "columnheads" | "matchentry" | "showdropbuttonwhen" | "mousepointer"
+            | "listwidth" | "listrows" | "dropbuttonstyle" => {}
             _ => return Err(format!("{} has no property {prop}", c.name)),
         }
         Ok(out)
@@ -682,7 +722,7 @@ impl Forms {
         method: &str,
         args: &[Value],
     ) -> Result<Value, String> {
-        let form = self.get_mut(id).ok_or("the form was unloaded")?;
+        let form = self.loaded_or_not(id).ok_or("the form was unloaded")?;
         let m = method.to_ascii_lowercase();
         if m == "setfocus" {
             form.focus = Some(ctl.to_string());

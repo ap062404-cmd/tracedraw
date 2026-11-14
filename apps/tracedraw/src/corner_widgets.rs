@@ -3,8 +3,9 @@
 //! it, live, with the arc's middle under the pointer. With nodes chosen
 //! only their corners show a widget and round; with none, every corner
 //! rounds together. Open curves round their inner corners too. A corner
-//! already rounded (an arc tangent to two straight sides) keeps a widget
-//! on its arc, so its radius can change again (#872). Corners round on
+//! already rounded (an arc tangent to its two sides, straight or curved,
+//! #2223) keeps a widget on its arc, so its radius can change again
+//! (#872). Corners round on
 //! the page, so on a stretched curve a new rounding is round; a corner
 //! rounded before the stretch keeps its stretched arc and its widget,
 //! and rounds in the curve's own space until it is sharp again (#1000).
@@ -42,6 +43,94 @@ const MIN_ROUNDING_PX: f64 = 2.0;
 pub struct CornerCache {
     key: Option<(u64, Vec<ShapeId>)>,
     curves: Vec<(ShapeId, Affine, Vec<Spot>)>,
+    /// The corners last scalloped or chamfered, one per curve (#2336).
+    cuts: Vec<CutCorners>,
+}
+
+/// Corners the corner radius field or a widget scalloped or chamfered
+/// (#2336). A cut corner is no arc to find again, so the curve as it was
+/// before the cut is kept: while the curve is still what the cut made,
+/// a new distance, the other kind or a drag of the corner's ring cuts
+/// that curve again, instead of cutting the corners of the cut (each
+/// try added nodes, 120 and more on a rectangle), and its ring stays on
+/// the corner. Any other change of the curve ends it.
+#[derive(Debug, Clone, PartialEq)]
+struct CutCorners {
+    shape: ShapeId,
+    /// The curve before the cut, in its own space.
+    base: BezPath,
+    /// The curve the cut made, in its own space.
+    result: BezPath,
+    /// The sharp corners cut, in the curve's own space.
+    points: Vec<Point>,
+    /// The distance along the sides.
+    d: f64,
+    op: crate::corners::CornerOp,
+}
+
+/// How far into its corner, along the corner's middle, the middle of a
+/// cut `d` along the sides of a corner of angle `theta` lies: a scallop
+/// is an arc of radius `d` about the corner, a chamfer a straight line.
+fn cut_depth(op: crate::corners::CornerOp, d: f64, theta: f64) -> f64 {
+    match op {
+        crate::corners::CornerOp::Chamfer => d * (theta / 2.0).cos(),
+        _ => d,
+    }
+}
+
+/// The distance along the sides whose cut's middle lies `depth` into a
+/// corner of angle `theta` ([`cut_depth`] the other way).
+fn cut_for(op: crate::corners::CornerOp, depth: f64, theta: f64) -> f64 {
+    let c = (theta / 2.0).cos();
+    match op {
+        crate::corners::CornerOp::Chamfer if c > 1e-9 => depth / c,
+        _ => depth,
+    }
+}
+
+/// `base` with its corners at `only` (every corner with `None`)
+/// scalloped or chamfered `d` along the sides, `d` cut down until all
+/// `want` of them take it: the path and the distance, or `None` when no
+/// corner could be cut.
+fn cut_fitting(
+    base: &BezPath,
+    op: crate::corners::CornerOp,
+    d: f64,
+    only: Option<&[usize]>,
+    want: usize,
+) -> Option<(BezPath, f64)> {
+    let cut = |d: f64| match op {
+        crate::corners::CornerOp::Chamfer => CornerCut::Chamfer(d, d),
+        _ => CornerCut::Scallop(d),
+    };
+    if d.is_nan() || d <= 1e-9 {
+        return None;
+    }
+    let mut d = d;
+    let mut made = cut_corners(base, cut(d), only);
+    for _ in 0..60 {
+        if made.1 >= want || d < 1e-6 {
+            break;
+        }
+        d *= 0.9;
+        made = cut_corners(base, cut(d), only);
+    }
+    (made.1 > 0).then_some((made.0, d))
+}
+
+/// The element indices of the nodes of `path` and where they are.
+fn node_points(path: &BezPath) -> Vec<(usize, Point)> {
+    use tracedraw_core::geometry::PathEl;
+    path.elements()
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| match e {
+            PathEl::MoveTo(p) | PathEl::LineTo(p) => Some((i, *p)),
+            PathEl::QuadTo(_, p) => Some((i, *p)),
+            PathEl::CurveTo(_, _, p) => Some((i, *p)),
+            PathEl::ClosePath => None,
+        })
+        .collect()
 }
 
 /// A corner that takes a widget: a sharp one, or one already rounded
@@ -56,8 +145,12 @@ struct Spot {
     stretched: bool,
     corner: Corner,
     /// How far the rounded corner's arc lies into the corner (0 when
-    /// sharp).
+    /// sharp), as its radius puts it between straight sides: what a drag
+    /// starts from.
     depth: f64,
+    /// Where the arc's middle is, along the corner's middle: where the
+    /// widget shows. Curved sides put it nearer or further (#2223).
+    shown: f64,
     /// The nodes that choose it: the corner's, or every node of the arc.
     nodes: Vec<usize>,
     /// How far into the corner (mm on the page) the most rounding it
@@ -99,6 +192,9 @@ pub struct CornerDrag {
     pub max: f64,
     pub from: Point,
     pub begun: bool,
+    /// The sharp corners the drag rounds or cuts, in the curve's own
+    /// space: what a scallop or chamfer remembers (#2336).
+    pub points: Vec<Point>,
 }
 
 /// A selected curve's corners on the page, for the property bar's corner
@@ -107,6 +203,8 @@ struct PageCorners {
     shape: ShapeId,
     /// From the curve's own space to the page.
     to_page: Affine,
+    /// The curve in its own space.
+    own: BezPath,
     page: BezPath,
     closed: bool,
     sharp: Vec<Corner>,
@@ -129,6 +227,45 @@ pub fn radius_for(d: f64, theta: f64) -> f64 {
 }
 
 impl App {
+    /// The cut remembered for curve `id` (#2336) while the curve is still
+    /// `path`, in its own space, as the cut made it.
+    fn cut_of(&self, id: ShapeId, path: &BezPath) -> Option<CutCorners> {
+        self.corner_cache
+            .borrow()
+            .cuts
+            .iter()
+            .find(|c| c.shape == id && c.result == *path)
+            .cloned()
+    }
+
+    /// Remember the cut of curve `id` (`None`: forget it).
+    fn remember_cut(&self, id: ShapeId, cut: Option<CutCorners>) {
+        let mut cache = self.corner_cache.borrow_mut();
+        cache.cuts.retain(|c| c.shape != id);
+        cache.cuts.extend(cut);
+        // A few curves at a time are cut and edited; the oldest goes.
+        if cache.cuts.len() > 64 {
+            cache.cuts.remove(0);
+        }
+        cache.key = None;
+    }
+
+    /// The bar's corner kind changed to `op` (#2336): corners the field or
+    /// a ring scalloped or chamfered, still as they were cut, are cut
+    /// again the new way at the same distance. False when there were none.
+    pub fn set_corner_op(&mut self, op: crate::corners::CornerOp) -> bool {
+        let before = self.corner_bar_op;
+        self.corner_bar_op = op;
+        if before == op {
+            return false;
+        }
+        let d = self
+            .page_corners()
+            .iter()
+            .find_map(|c| self.cut_of(c.shape, &c.own).map(|cut| cut.d));
+        d.is_some_and(|d| self.set_corner_rounding(d))
+    }
+
     /// The corner widgets to show now, in screen space; none while one is
     /// dragged, and none at all unless Options > Nodes and Handles turns
     /// them on (#884).
@@ -172,7 +309,7 @@ impl App {
                 let c = &spot.corner;
                 let to_page = *t * spot.space.inverse();
                 // A rounded corner's widget sits off the middle of its arc.
-                let mid = c.at + c.inside * spot.depth;
+                let mid = c.at + c.inside * spot.shown;
                 let node = self.view.to_screen(to_page * mid);
                 let toward = self.view.to_screen(to_page * (mid + c.inside));
                 let d = toward - node;
@@ -196,14 +333,12 @@ impl App {
     /// Work the corners of the selected curves out again when the drawing
     /// or the selection changed since the last time.
     fn refresh_corner_cache(&self) {
-        let targets: Vec<ShapeId> = self
-            .selection
-            .iter()
-            .map(|id| self.node_target(*id))
-            .collect();
+        // Not the objects that show their frame only (#2213).
+        let targets: Vec<ShapeId> = self.node_targets();
         let key = (self.engine.revision(), targets);
         let mut cache = self.corner_cache.borrow_mut();
         if cache.key.as_ref() != Some(&key) {
+            let cuts = cache.cuts.clone();
             cache.curves = key
                 .1
                 .iter()
@@ -238,6 +373,7 @@ impl App {
                             stretched: false,
                             corner: c,
                             depth: 0.0,
+                            shown: 0.0,
                             nodes: vec![c.node],
                             reach: reach.get(i).copied().unwrap_or(f64::INFINITY),
                         })
@@ -260,10 +396,51 @@ impl App {
                                 theta: f.theta,
                             },
                             depth,
+                            shown: f.middle,
                             nodes: f.nodes,
                             reach: f64::INFINITY,
                         })
                     }));
+                    // Corners scalloped or chamfered and not changed since
+                    // (#2336): one ring on each corner cut, in the middle
+                    // of its cut, for the nodes of the cut; the corners the
+                    // cut made have none.
+                    if let Some(cut) = cuts.iter().find(|c| c.shape == *id && c.result == *path) {
+                        let at: Vec<Point> = cut.points.iter().map(|p| t * *p).collect();
+                        let reach = cut.d * 1.05 + 1e-6;
+                        let near = |q: Point| at.iter().any(|p| (q - *p).hypot() <= reach);
+                        spots.retain(|s| !near(t * s.space.inverse() * s.corner.at));
+                        let nodes_page: Vec<(usize, Point)> = node_points(path)
+                            .into_iter()
+                            .map(|(i, q)| (i, t * q))
+                            .collect();
+                        for k in corners(&(t * cut.base.clone())) {
+                            if !at
+                                .iter()
+                                .any(|p| (k.at - *p).hypot() < SAME_CORNER_MM * 10.0)
+                            {
+                                continue;
+                            }
+                            let nodes: Vec<usize> = nodes_page
+                                .iter()
+                                .filter(|(_, q)| (*q - k.at).hypot() <= reach)
+                                .map(|(i, _)| *i)
+                                .collect();
+                            let Some(first) = nodes.first().copied() else {
+                                continue;
+                            };
+                            let depth = cut_depth(cut.op, cut.d, k.theta);
+                            spots.push(Spot {
+                                space: t,
+                                stretched: false,
+                                corner: Corner { node: first, ..k },
+                                depth,
+                                shown: depth,
+                                nodes,
+                                reach: f64::INFINITY,
+                            });
+                        }
+                    }
                     Some((*id, t, spots))
                 })
                 .collect();
@@ -333,6 +510,40 @@ impl App {
         if t.determinant().abs() < 1e-12 || w.space.determinant().abs() < 1e-12 {
             return false;
         }
+        // The ring of a corner scalloped or chamfered and not changed
+        // since (#2336): the drag cuts the curve as it was before the cut
+        // again, at the corners cut.
+        if let Some(cut) = self.cut_of(w.shape, path) {
+            let at: Vec<Point> = cut.points.iter().map(|q| t * *q).collect();
+            let is_cut = |q: Point| at.iter().any(|a| (q - *a).hypot() < SAME_CORNER_MM * 10.0);
+            if !w.stretched && is_cut(w.space * t.inverse() * w.corner.at) {
+                let base = t * cut.base.clone();
+                let only: Vec<usize> = corners(&base)
+                    .into_iter()
+                    .filter(|k| is_cut(k.at))
+                    .map(|k| k.node)
+                    .collect();
+                let Some(max) = max_fillet(&base, Some(&only)) else {
+                    return false;
+                };
+                self.drag = Drag::CornerWidget(Box::new(CornerDrag {
+                    shape: w.shape,
+                    space: t,
+                    path: base,
+                    closed: *closed,
+                    only: Some(only),
+                    corner: w.corner,
+                    depth: w.depth,
+                    max,
+                    from: p,
+                    begun: false,
+                    points: cut.points,
+                }));
+                self.node_selection.clear();
+                self.segment_spot = None;
+                return true;
+            }
+        }
         // On the page, or in the curve's own space for a corner rounded
         // before the curve was stretched (#1000).
         let path = &(w.space * path.clone());
@@ -397,6 +608,12 @@ impl App {
         let Some(max) = max_fillet(&base, only.as_deref()) else {
             return false;
         };
+        let to_own = w.space.inverse();
+        let points: Vec<Point> = corners(&base)
+            .into_iter()
+            .filter(|k| only.as_ref().is_none_or(|o| o.contains(&k.node)))
+            .map(|k| to_own * k.at)
+            .collect();
         self.drag = Drag::CornerWidget(Box::new(CornerDrag {
             shape: w.shape,
             space: w.space,
@@ -408,6 +625,7 @@ impl App {
             max,
             from: w.space * t.inverse() * p,
             begun: false,
+            points,
         }));
         // The cut renumbers the nodes.
         self.node_selection.clear();
@@ -432,25 +650,56 @@ impl App {
         let lp = d.space * t.inverse() * p;
         // A rounded corner's arc starts where it was (#872).
         let along: f64 = d.depth + (lp - d.from).dot(d.corner.inside);
-        let r = radius_for(along, d.corner.theta).min(d.max * 0.999);
-        let path = if r > 1e-6 {
-            cut_corners(&d.path, CornerCut::Fillet(r), d.only.as_deref()).0
+        // The bar's corner kind: rounded, or scalloped or chamfered as the
+        // field cuts them, the cut's middle under the pointer (#2336).
+        use crate::corners::CornerOp;
+        let op = self.corner_bar_op;
+        let (path, r, cut) = if op == CornerOp::Fillet {
+            let r = radius_for(along, d.corner.theta).min(d.max * 0.999);
+            let path = if r > 1e-6 {
+                cut_corners(&d.path, CornerCut::Fillet(r), d.only.as_deref()).0
+            } else {
+                d.path.clone()
+            };
+            (path, r, None)
         } else {
-            d.path.clone()
+            let want = d.only.as_ref().map_or(d.points.len(), |o| o.len());
+            let dd = cut_for(op, along, d.corner.theta);
+            match cut_fitting(&d.path, op, dd, d.only.as_deref(), want) {
+                Some((path, used)) => (path, used, Some(used)),
+                None => (d.path.clone(), 0.0, None),
+            }
         };
-        let path = d.space.inverse() * path;
+        let to_own = d.space.inverse();
+        let path = to_own * path;
         let cmd = Command::SetShapeKind {
             shape: d.shape,
             kind: ShapeKind::Path {
-                path,
+                path: path.clone(),
                 closed: d.closed,
             },
+        };
+        let label = match op {
+            CornerOp::Fillet => "Fillet",
+            CornerOp::Scallop => "Scallop",
+            CornerOp::Chamfer => "Chamfer",
         };
         let _ = if d.begun {
             self.engine.amend(&cmd)
         } else {
-            self.engine.run_with_label(&cmd, "Fillet")
+            self.engine.run_with_label(&cmd, label)
         };
+        self.remember_cut(
+            d.shape,
+            cut.map(|used| CutCorners {
+                shape: d.shape,
+                base: to_own * d.path.clone(),
+                result: path,
+                points: d.points.clone(),
+                d: used,
+                op,
+            }),
+        );
         let u = self.units;
         let digits = self.settings.precision.min(10) as usize;
         self.status = crate::i18n::trf(
@@ -473,7 +722,8 @@ impl App {
             return Vec::new();
         }
         let mut out = Vec::new();
-        for id in self.selection.iter().map(|id| self.node_target(*id)) {
+        // Not the objects that show their frame only (#2213).
+        for id in self.node_targets() {
             let Some(s) = self.doc().find_shape(id) else {
                 continue;
             };
@@ -497,6 +747,7 @@ impl App {
             out.push(PageCorners {
                 shape: id,
                 to_page: t,
+                own: path.clone(),
                 page,
                 closed: *closed,
                 sharp,
@@ -556,6 +807,24 @@ impl App {
         if !self.settings.nodes.corner_widgets || self.tool != Tool::Shape {
             return None;
         }
+        // Corners scalloped or chamfered and not changed since show the
+        // distance they were cut at (#2336).
+        // Cheap, as the bar asks every frame: no corners are worked out.
+        let cut: Vec<f64> = if self.corner_cache.borrow().cuts.is_empty() {
+            Vec::new()
+        } else {
+            self.node_targets()
+                .into_iter()
+                .filter_map(|id| match &self.doc().find_shape(id)?.kind {
+                    ShapeKind::Path { path, .. } => self.cut_of(id, path).map(|cut| cut.d),
+                    _ => None,
+                })
+                .collect()
+        };
+        if let Some(first) = cut.first().copied() {
+            let mixed = cut.iter().any(|d| (d - first).abs() > 1e-6);
+            return Some((first, mixed));
+        }
         self.refresh_corner_cache();
         let cache = self.corner_cache.borrow();
         // The corners rounded on the page (a rounding made before a
@@ -606,27 +875,54 @@ impl App {
         let mut cmds = Vec::new();
         let mut kept: Vec<(ShapeId, Vec<Point>)> = Vec::new();
         let mut used: Option<f64> = None;
+        let mut cuts: Vec<(ShapeId, Option<CutCorners>)> = Vec::new();
         for c in &curves {
-            let targets = self.field_corners(c, chosen_only);
-            if targets.is_empty() {
+            // Corners scalloped or chamfered and not changed since are cut
+            // again from the curve as it was before the cut (#2336); their
+            // cuts are no corners to find.
+            let before = self.cut_of(c.shape, &c.own);
+            let (page, rounded, points) = match &before {
+                Some(cut) => {
+                    let page = c.to_page * cut.base.clone();
+                    let rounded = corners_and_fillets(&page).1;
+                    let points: Vec<Point> = cut.points.iter().map(|q| c.to_page * *q).collect();
+                    (page, rounded, points)
+                }
+                None => {
+                    let targets = self.field_corners(c, chosen_only);
+                    let points: Vec<Point> = targets.iter().map(|k| k.1).collect();
+                    (c.page.clone(), c.rounded.clone(), points)
+                }
+            };
+            if points.is_empty() {
                 continue;
             }
-            let points: Vec<Point> = targets.iter().map(|k| k.1).collect();
-            let near = |q: Point| points.iter().any(|p| (q - *p).hypot() < SAME_CORNER_MM);
+            let near = |q: Point| {
+                points
+                    .iter()
+                    .any(|p| (q - *p).hypot() < SAME_CORNER_MM * 10.0)
+            };
             // The rounded corners taken first go back to their sharp
             // corners, then the corners round again at the new radius.
-            let which: Vec<usize> = c
-                .rounded
+            let which: Vec<usize> = rounded
                 .iter()
                 .enumerate()
                 .filter(|(_, f)| near(f.corner))
                 .map(|(i, _)| i)
                 .collect();
             let base = if which.is_empty() {
-                c.page.clone()
+                page.clone()
             } else {
-                unround(&c.page, Some(&which)).0
+                unround(&page, Some(&which)).0
             };
+            // The curve before the cut, in its own space: kept as it was
+            // when it is cut again.
+            let own_base = match (&before, which.is_empty()) {
+                (Some(cut), true) => cut.base.clone(),
+                (None, true) => c.own.clone(),
+                _ => c.to_page.inverse() * base.clone(),
+            };
+            let mut cut_d = None;
             let only: Vec<usize> = corners(&base)
                 .into_iter()
                 .filter(|k| near(k.at))
@@ -646,24 +942,13 @@ impl App {
                 // cuts them: the distance along the sides, cut down until
                 // every chosen corner takes it.
                 (CornerOp::Scallop | CornerOp::Chamfer, _) if r > 1e-9 && !only.is_empty() => {
-                    let cut = |d: f64| match op {
-                        CornerOp::Chamfer => CornerCut::Chamfer(d, d),
-                        _ => CornerCut::Scallop(d),
-                    };
-                    let mut d = r;
-                    let mut made = cut_corners(&base, cut(d), Some(&only));
-                    for _ in 0..60 {
-                        if made.1 >= only.len() || d < 1e-6 {
-                            break;
+                    match cut_fitting(&base, op, r, Some(&only), only.len()) {
+                        Some((made, d)) => {
+                            used = Some(used.map_or(d, |u: f64| u.min(d)));
+                            cut_d = Some(d);
+                            made
                         }
-                        d *= 0.9;
-                        made = cut_corners(&base, cut(d), Some(&only));
-                    }
-                    if made.1 > 0 {
-                        used = Some(used.map_or(d, |u: f64| u.min(d)));
-                        made.0
-                    } else {
-                        base
+                        None => base,
                     }
                 }
                 _ => base,
@@ -671,7 +956,25 @@ impl App {
             if rounded == c.page {
                 continue;
             }
-            let path = c.to_page.inverse() * rounded;
+            // Back to the very curve the cut was made of, when nothing is
+            // cut or rounded any more.
+            let path = if before.is_some() && rounded == page {
+                own_base.clone()
+            } else {
+                c.to_page.inverse() * rounded
+            };
+            let to_own = c.to_page.inverse();
+            cuts.push((
+                c.shape,
+                cut_d.map(|d| CutCorners {
+                    shape: c.shape,
+                    base: own_base.clone(),
+                    result: path.clone(),
+                    points: points.iter().map(|q| to_own * *q).collect(),
+                    d,
+                    op,
+                }),
+            ));
             cmds.push(Command::SetShapeKind {
                 shape: c.shape,
                 kind: ShapeKind::Path {
@@ -695,6 +998,9 @@ impl App {
         if let Err(e) = self.engine.run_batch(label, &cmds) {
             self.status = e.to_string();
             return false;
+        }
+        for (id, cut) in cuts {
+            self.remember_cut(id, cut);
         }
         // The rounding renumbers the nodes: the corners chosen before are
         // found again by their sharp corners, which stay where they were.
@@ -767,5 +1073,531 @@ pub fn draw(app: &App, painter: &egui::Painter, color: egui::Color32) {
             color
         };
         painter.circle_filled(w.at, 1.5, dot);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tracedraw_core::geometry::Shape as _;
+
+    fn shapes() -> Vec<(&'static str, BezPath)> {
+        let mut out = Vec::new();
+        let mut lens = BezPath::new();
+        lens.move_to((20.0, 40.0));
+        lens.curve_to((30.0, 52.0), (50.0, 52.0), (60.0, 40.0));
+        lens.curve_to((50.0, 28.0), (30.0, 28.0), (20.0, 40.0));
+        lens.close_path();
+        out.push(("lens", lens));
+        let mut heart = BezPath::new();
+        heart.move_to((40.0, 20.0));
+        heart.curve_to((10.0, 40.0), (25.0, 65.0), (40.0, 50.0));
+        heart.curve_to((55.0, 65.0), (70.0, 40.0), (40.0, 20.0));
+        heart.close_path();
+        out.push(("heart", heart));
+        let mut half = BezPath::new();
+        half.move_to((20.0, 20.0));
+        half.line_to((60.0, 20.0));
+        half.curve_to((60.0, 46.0), (20.0, 46.0), (20.0, 20.0));
+        half.close_path();
+        out.push(("half disc", half));
+        let mut drop = BezPath::new();
+        drop.move_to((20.0, 20.0));
+        drop.curve_to((28.0, 30.0), (32.0, 40.0), (35.0, 60.0));
+        drop.curve_to((38.0, 40.0), (42.0, 30.0), (50.0, 20.0));
+        drop.line_to((20.0, 20.0));
+        drop.close_path();
+        out.push(("drop", drop));
+        out
+    }
+
+    /// A corner between curved sides rounds, keeps its widget once it is
+    /// rounded, rounds further from the radius it has and goes back to
+    /// sharp, as a corner between straight sides does (#2223). Before,
+    /// its widget was gone after the first drag, however short, and the
+    /// corner could not be rounded any more.
+    #[test]
+    fn corners_between_curves_keep_their_widgets_and_round_again() {
+        for (name, path) in shapes() {
+            let sharp = corners(&path);
+            for i in 0..sharp.len() {
+                let mut app = App::headless();
+                let id = app
+                    .new_shape(ShapeKind::Path {
+                        path: path.clone(),
+                        closed: true,
+                    })
+                    .expect("a curve");
+                app.select(vec![id]);
+                app.tool = Tool::Shape;
+                app.settings.nodes.corner_widgets = true;
+                let path_of = |app: &App| match &app.doc().find_shape(id).expect("curve").kind {
+                    ShapeKind::Path { path, .. } => path.clone(),
+                    _ => panic!("a curve"),
+                };
+                let widgets = app.corner_widgets();
+                assert_eq!(widgets.len(), sharp.len(), "{name}");
+                let w = widgets[i];
+                let at = w.corner.at;
+                // The widget of the corner at `at`, dragged `by` mm into
+                // it; the radius the drag gave.
+                let pull = |app: &mut App, by: f64| -> f64 {
+                    let w = app
+                        .corner_widgets()
+                        .into_iter()
+                        .find(|w| (w.corner.at - at).hypot() < 1e-6)
+                        .unwrap_or_else(|| panic!("{name} corner {i}: no widget"));
+                    let p = app.view.to_page(w.at);
+                    assert!(app.start_corner_drag(w, p, false), "{name} corner {i}");
+                    let Drag::CornerWidget(d) = app.drag.clone() else {
+                        panic!("{name} corner {i}: no drag");
+                    };
+                    app.corner_drag_to(*d, p + w.corner.inside * by);
+                    app.drag = Drag::None;
+                    fillets(&path_of(app))
+                        .iter()
+                        .find(|f| (f.corner - at).hypot() < 1e-6)
+                        .map_or(0.0, |f| f.radius)
+                };
+                // A short drag: a small rounding, and the widget stays.
+                let first = pull(&mut app, 0.2);
+                assert!(first > 0.01, "{name} corner {i}: {first}");
+                assert_eq!(app.corner_widgets().len(), sharp.len(), "{name} corner {i}");
+                assert_eq!(corners(&path_of(&app)).len(), sharp.len() - 1, "{name}");
+                // Dragged again, it rounds further from there.
+                let second = pull(&mut app, 0.2);
+                assert!(second > first * 1.5, "{name} corner {i}: {first} {second}");
+                assert_eq!(app.corner_widgets().len(), sharp.len(), "{name} corner {i}");
+                // The property bar's field reads it and sets it.
+                app.node_selection.clear();
+                assert!(app.set_corner_rounding(first), "{name} corner {i}");
+                let radii: Vec<f64> = fillets(&path_of(&app)).iter().map(|f| f.radius).collect();
+                assert_eq!(radii.len(), sharp.len(), "{name} corner {i}: {radii:?}");
+                assert!(
+                    radii.iter().all(|r| (r - first).abs() < 1e-6),
+                    "{name} corner {i}: {first} {radii:?}"
+                );
+                // Clear Rounding gives the sharp curve back.
+                assert!(app.set_corner_rounding(0.0), "{name} corner {i}");
+                let back = path_of(&app);
+                assert_eq!(corners(&back).len(), sharp.len(), "{name} corner {i}");
+                assert!(fillets(&back).is_empty(), "{name} corner {i}");
+                assert!(
+                    (back.area() - path.area()).abs() < 1e-6,
+                    "{name} corner {i}"
+                );
+            }
+        }
+    }
+
+    /// A rectangle turned into a curve, its corners scalloped or chamfered
+    /// with the property bar's field or the rings (#2336): a new distance,
+    /// typed or scrolled, cuts the rectangle again, so the curve keeps the
+    /// nodes of one cut (it grew to 120 and more as each try cut the cuts);
+    /// the field shows the distance; the other kind cuts the same corners
+    /// the new way; a ring stays on each corner and dragging it cuts the
+    /// bar's kind, never a rounding; Clear Rounding gives the rectangle
+    /// back.
+    #[test]
+    fn scalloped_and_chamfered_corners_stay_editable() {
+        use crate::corners::CornerOp;
+        use tracedraw_core::geometry::PathEl;
+        let mut rect = BezPath::new();
+        rect.move_to((20.0, 20.0));
+        rect.line_to((80.0, 20.0));
+        rect.line_to((80.0, 60.0));
+        rect.line_to((20.0, 60.0));
+        rect.close_path();
+        let mut app = App::headless();
+        let id = app
+            .new_shape(ShapeKind::Path {
+                path: rect.clone(),
+                closed: true,
+            })
+            .expect("a curve");
+        app.select(vec![id]);
+        app.tool = Tool::Shape;
+        app.settings.nodes.corner_widgets = true;
+        let path_of = |app: &App| match &app.doc().find_shape(id).expect("curve").kind {
+            ShapeKind::Path { path, .. } => path.clone(),
+            _ => panic!("a curve"),
+        };
+        let nodes = |app: &App| node_points(&path_of(app)).len();
+        let has = |app: &App, x: f64, y: f64| {
+            node_points(&path_of(app))
+                .iter()
+                .any(|(_, p)| (p.x - x).abs() < 1e-6 && (p.y - y).abs() < 1e-6)
+        };
+        let arcs = |app: &App| {
+            path_of(app)
+                .elements()
+                .iter()
+                .filter(|e| matches!(e, PathEl::CurveTo(..)))
+                .count()
+        };
+        for op in [CornerOp::Scallop, CornerOp::Chamfer] {
+            app.set_corner_op(op);
+            assert!(app.set_corner_rounding(3.0), "{op:?}");
+            let once = nodes(&app);
+            assert!(has(&app, 23.0, 20.0) && has(&app, 20.0, 23.0), "{op:?}");
+            assert_eq!(app.corner_rounding(), Some((3.0, false)), "{op:?}");
+            // Typed and scrolled values, each cutting the rectangle again.
+            for d in [4.0, 5.0, 6.0, 5.5, 2.0, 7.0] {
+                assert!(app.set_corner_rounding(d), "{op:?} {d}");
+                assert_eq!(nodes(&app), once, "{op:?} {d}: nodes multiplied");
+                assert!(
+                    has(&app, 20.0 + d, 20.0) && has(&app, 80.0, 60.0 - d),
+                    "{op:?} {d}"
+                );
+                assert_eq!(app.corner_rounding(), Some((d, false)), "{op:?} {d}");
+            }
+            // One ring on each corner cut.
+            assert_eq!(app.corner_widgets().len(), 4, "{op:?}");
+            // Clear Rounding gives the rectangle back.
+            assert!(app.set_corner_rounding(0.0), "{op:?}");
+            assert_eq!(path_of(&app), rect, "{op:?}");
+        }
+        // Switching the kind cuts the same corners the other way.
+        app.set_corner_op(CornerOp::Scallop);
+        assert!(app.set_corner_rounding(4.0));
+        let scalloped = nodes(&app);
+        assert!(arcs(&app) >= 4);
+        assert!(app.set_corner_op(CornerOp::Chamfer));
+        assert_eq!(arcs(&app), 0, "straight cuts");
+        assert!(has(&app, 24.0, 20.0) && has(&app, 20.0, 24.0));
+        assert!(app.set_corner_op(CornerOp::Scallop));
+        assert_eq!(nodes(&app), scalloped);
+        assert!(app.set_corner_rounding(0.0));
+        assert_eq!(path_of(&app), rect);
+        // A ring dragged with Scalloped chosen scallops, and dragged again
+        // cuts the rectangle again from where its cut is.
+        let pull = |app: &mut App, at: Point, by: f64| {
+            let w = app
+                .corner_widgets()
+                .into_iter()
+                .find(|w| (w.corner.at - at).hypot() < 1e-6)
+                .expect("a ring on the corner");
+            let p = app.view.to_page(w.at);
+            assert!(app.start_corner_drag(w, p, true));
+            let Drag::CornerWidget(d) = app.drag.clone() else {
+                panic!("no drag");
+            };
+            app.corner_drag_to(*d, p + w.corner.inside * by);
+            app.drag = Drag::None;
+        };
+        let corner = Point::new(20.0, 20.0);
+        pull(&mut app, corner, 3.0);
+        assert!(fillets(&path_of(&app)).is_empty(), "no rounding");
+        assert!(arcs(&app) >= 4, "scallops");
+        assert_eq!(app.engine.history_labels().0.last(), Some(&"Scallop"));
+        let (first, _) = app.corner_rounding().expect("a distance");
+        assert!(first > 2.0, "{first}");
+        let once = nodes(&app);
+        assert_eq!(app.corner_widgets().len(), 4);
+        pull(&mut app, corner, 2.0);
+        let (second, _) = app.corner_rounding().expect("a distance");
+        assert!((second - first - 2.0).abs() < 0.1, "{first} {second}");
+        assert_eq!(nodes(&app), once, "nodes multiplied");
+        // Chamfered, the same.
+        app.corner_bar_op = CornerOp::Chamfer;
+        pull(&mut app, corner, -1.0);
+        assert_eq!(arcs(&app), 0, "chamfers");
+        assert_eq!(app.engine.history_labels().0.last(), Some(&"Chamfer"));
+        assert_eq!(app.corner_widgets().len(), 4);
+        // Any other change of the curve ends it: the cut is then a curve
+        // like any other.
+        app.undo();
+        app.undo();
+        app.undo();
+        assert_eq!(path_of(&app), rect);
+        assert_eq!(app.corner_widgets().len(), 4);
+    }
+
+    fn disc(x: f64, y: f64, r: f64) -> BezPath {
+        tracedraw_core::geometry::ellipse_path(tracedraw_core::geometry::Rect::new(
+            x - r,
+            y - r,
+            x + r,
+            y + r,
+        ))
+    }
+
+    /// The Shape tool on a shape cut out of three discs whose corners the
+    /// Corners panel rounded (#2222): every rounded corner has its ring,
+    /// and only they do. The shaping commands leave a disc its own
+    /// nodes, and a piece of a disc between two of them read as a
+    /// rounded corner, so the shape showed rings along its round sides,
+    /// with a rounding radius of the disc's. Each ring rounds its corner
+    /// further,
+    /// and Clear Rounding gives the sharp shape back.
+    #[test]
+    fn a_shape_cut_out_of_discs_keeps_one_ring_per_rounded_corner() {
+        use tracedraw_core::shaping::{overlay, Op};
+        let a = disc(60.0, 60.0, 30.0);
+        let b = disc(95.0, 65.0, 30.0);
+        let c = disc(72.0, 27.0, 30.0);
+        let cut = overlay(&overlay(&a, &b, Op::Trim), &c, Op::Trim);
+        let sharp = corners(&cut);
+        assert_eq!(sharp.len(), 3, "{sharp:?}");
+        let mut app = App::headless();
+        let id = app
+            .new_shape(ShapeKind::Path {
+                path: cut.clone(),
+                closed: true,
+            })
+            .expect("a curve");
+        app.select(vec![id]);
+        app.settings.nodes.corner_widgets = true;
+        let path_of = |app: &App| match &app.doc().find_shape(id).expect("curve").kind {
+            ShapeKind::Path { path, .. } => path.clone(),
+            _ => panic!("a curve"),
+        };
+        // Sharp: a ring in each corner, none along the round sides.
+        app.tool = Tool::Shape;
+        assert!(fillets(&cut).is_empty(), "{:?}", fillets(&cut));
+        assert_eq!(app.corner_widgets().len(), 3);
+        assert_eq!(app.corner_rounding(), Some((0.0, false)));
+        // The Corners panel rounds them.
+        app.tool = Tool::Pick;
+        app.corners.radius = 3.0;
+        assert_eq!(app.apply_corners(), 3);
+        // Back in the Shape tool: the three rounded corners, each with
+        // its ring, read at the radius they were given.
+        app.tool = Tool::Shape;
+        let rounded = fillets(&path_of(&app));
+        assert_eq!(rounded.len(), 3, "{rounded:?}");
+        for f in &rounded {
+            assert!((f.radius - 3.0).abs() < 1e-6, "{rounded:?}");
+            assert!(
+                sharp.iter().any(|c| (c.at - f.corner).hypot() < 1e-6),
+                "{rounded:?}"
+            );
+        }
+        let widgets = app.corner_widgets();
+        assert_eq!(widgets.len(), 3);
+        let radius = app.corner_rounding().expect("corners");
+        assert!((radius.0 - 3.0).abs() < 1e-6 && !radius.1, "{radius:?}");
+        // Each ring rounds its corner further.
+        for w in widgets {
+            let at = w.corner.at;
+            let w = app
+                .corner_widgets()
+                .into_iter()
+                .find(|w| (w.corner.at - at).hypot() < 1e-6)
+                .expect("the corner's ring");
+            let p = app.view.to_page(w.at);
+            assert!(app.start_corner_drag(w, p, false));
+            let Drag::CornerWidget(d) = app.drag.clone() else {
+                panic!("no drag");
+            };
+            app.corner_drag_to(*d, p + w.corner.inside * 0.5);
+            app.drag = Drag::None;
+            let now = fillets(&path_of(&app));
+            assert_eq!(now.len(), 3, "{now:?}");
+            let r = now
+                .iter()
+                .find(|f| (f.corner - at).hypot() < 1e-6)
+                .map_or(0.0, |f| f.radius);
+            assert!(r > 3.2, "{r}");
+            assert_eq!(app.corner_widgets().len(), 3);
+        }
+        // Clear Rounding: the sharp shape again.
+        app.node_selection.clear();
+        assert!(app.set_corner_rounding(0.0));
+        let back = path_of(&app);
+        assert!(fillets(&back).is_empty());
+        assert_eq!(corners(&back).len(), 3);
+        assert!((back.area() - cut.area()).abs() < 1e-6);
+    }
+
+    /// A corner with a smooth node close beside it shows its ring and
+    /// rounds as far as its sides go (#2224, #2225, #2226): a disc with
+    /// a bite taken out one degree past its top node has half a
+    /// millimetre of curve between the corner and the node. The corner
+    /// counted as too short to round and had no ring to grab; its
+    /// rounding stopped at the node, half a millimetre, and left a
+    /// sliver of a segment before it.
+    #[test]
+    fn a_corner_beside_a_smooth_node_shows_its_ring_and_rounds() {
+        use tracedraw_core::shaping::{overlay, Op};
+        let turn = 89f64.to_radians();
+        let at = Point::new(60.0 + 30.0 * turn.cos(), 60.0 + 30.0 * turn.sin());
+        let bitten = overlay(
+            &disc(60.0, 60.0, 30.0),
+            &disc(at.x + 30.0, at.y, 30.0),
+            Op::Trim,
+        );
+        let sharp = corners(&bitten);
+        assert_eq!(sharp.len(), 2, "{sharp:?}");
+        let mut app = App::headless();
+        let id = app
+            .new_shape(ShapeKind::Path {
+                path: bitten.clone(),
+                closed: true,
+            })
+            .expect("a curve");
+        app.select(vec![id]);
+        app.tool = Tool::Shape;
+        app.settings.nodes.corner_widgets = true;
+        // Seen at 4 px to the millimetre, about the whole page.
+        app.view.zoom = 4.0;
+        let path_of = |app: &App| match &app.doc().find_shape(id).expect("curve").kind {
+            ShapeKind::Path { path, .. } => path.clone(),
+            _ => panic!("a curve"),
+        };
+        let ring = |app: &App| {
+            app.corner_widgets()
+                .into_iter()
+                .find(|w| (w.corner.at - at).hypot() < 1e-3)
+        };
+        assert_eq!(app.corner_widgets().len(), 2);
+        let w = ring(&app).expect("the ring of the corner beside the node");
+        // Dragged 2 mm into the corner: a rounding of millimetres, not
+        // of the half millimetre before the node.
+        let p = app.view.to_page(w.at);
+        assert!(app.start_corner_drag(w, p, false));
+        let Drag::CornerWidget(d) = app.drag.clone() else {
+            panic!("no drag");
+        };
+        assert!(d.max > 5.0, "{}", d.max);
+        app.corner_drag_to(*d, p + w.corner.inside * 2.0);
+        app.drag = Drag::None;
+        let now = path_of(&app);
+        let rounded = fillets(&now);
+        assert_eq!(rounded.len(), 1, "{rounded:?}");
+        assert!(rounded[0].radius > 2.0, "{rounded:?}");
+        assert!((rounded[0].corner - at).hypot() < 0.05, "{rounded:?}");
+        // No sliver of a segment is left beside the arc.
+        let shortest = now
+            .segments()
+            .map(|s| tracedraw_core::geometry::ParamCurveArclen::arclen(&s, 1e-6))
+            .fold(f64::INFINITY, f64::min);
+        assert!(shortest > 0.05, "{shortest}");
+        // The ring stays, and dragged back out the corner is sharp
+        // again, where it was.
+        assert_eq!(app.corner_widgets().len(), 2);
+        let w = ring(&app).unwrap_or_else(|| {
+            app.corner_widgets()
+                .into_iter()
+                .find(|w| (w.corner.at - at).hypot() < 0.05)
+                .expect("the rounded corner's ring")
+        });
+        let p = app.view.to_page(w.at);
+        assert!(app.start_corner_drag(w, p, false));
+        let Drag::CornerWidget(d) = app.drag.clone() else {
+            panic!("no drag");
+        };
+        app.corner_drag_to(*d, p - w.corner.inside * 20.0);
+        app.drag = Drag::None;
+        let back = path_of(&app);
+        assert!(fillets(&back).is_empty());
+        assert_eq!(corners(&back).len(), 2);
+        assert!(
+            (back.area() - bitten.area()).abs() < 0.05,
+            "{} {}",
+            back.area(),
+            bitten.area()
+        );
+    }
+
+    /// A ring dragged as far as its corner rounds stays (#2211): the
+    /// corner keeps its ring at the largest rounding it takes, and the
+    /// ring dragged back out makes it sharp again.
+    #[test]
+    fn a_corner_rounded_as_far_as_it_goes_keeps_its_ring() {
+        use tracedraw_core::shaping::{overlay, Op};
+        let mut all = shapes();
+        let a = disc(60.0, 60.0, 30.0);
+        let b = disc(95.0, 65.0, 30.0);
+        let c = disc(72.0, 27.0, 30.0);
+        all.push(("lens of two discs", overlay(&a, &b, Op::Intersect)));
+        all.push(("disc with a bite", overlay(&a, &b, Op::Trim)));
+        all.push((
+            "disc with two bites",
+            overlay(&overlay(&a, &b, Op::Trim), &c, Op::Trim),
+        ));
+        all.push(("two discs welded", overlay(&a, &b, Op::Weld)));
+        let mut failures = Vec::new();
+        for (name, path) in all {
+            let sharp = corners(&path);
+            for i in 0..sharp.len() {
+                let mut app = App::headless();
+                let id = app
+                    .new_shape(ShapeKind::Path {
+                        path: path.clone(),
+                        closed: true,
+                    })
+                    .expect("a curve");
+                app.select(vec![id]);
+                app.tool = Tool::Shape;
+                app.settings.nodes.corner_widgets = true;
+                let path_of = |app: &App| match &app.doc().find_shape(id).expect("curve").kind {
+                    ShapeKind::Path { path, .. } => path.clone(),
+                    _ => panic!("a curve"),
+                };
+                let at = sharp[i].at;
+                let pull = |app: &mut App, by: f64| -> bool {
+                    let Some(w) = app
+                        .corner_widgets()
+                        .into_iter()
+                        // A side cut down to next to nothing reads its
+                        // corner back less exactly.
+                        .filter(|w| (w.corner.at - at).hypot() < 5.0)
+                        .min_by(|a, b| {
+                            (a.corner.at - at)
+                                .hypot()
+                                .total_cmp(&(b.corner.at - at).hypot())
+                        })
+                    else {
+                        return false;
+                    };
+                    let p = app.view.to_page(w.at);
+                    if !app.start_corner_drag(w, p, false) {
+                        return false;
+                    }
+                    let Drag::CornerWidget(d) = app.drag.clone() else {
+                        return false;
+                    };
+                    app.corner_drag_to(*d, p + w.corner.inside * by);
+                    app.drag = Drag::None;
+                    true
+                };
+                if app.corner_widgets().len() != sharp.len() {
+                    failures.push(format!("{name} corner {i}: rings before"));
+                    continue;
+                }
+                // Far past what it takes: the largest rounding.
+                if !pull(&mut app, 1000.0) {
+                    failures.push(format!("{name} corner {i}: no ring to drag"));
+                    continue;
+                }
+                let rounded = fillets(&path_of(&app));
+                if rounded.len() != 1 {
+                    failures.push(format!(
+                        "{name} corner {i}: {} rounded corners at the largest rounding",
+                        rounded.len()
+                    ));
+                    continue;
+                }
+                if app.corner_widgets().len() != sharp.len() {
+                    failures.push(format!(
+                        "{name} corner {i}: {} rings of {} at the largest rounding",
+                        app.corner_widgets().len(),
+                        sharp.len()
+                    ));
+                    continue;
+                }
+                // And back out: sharp again.
+                if !pull(&mut app, -2000.0) {
+                    failures.push(format!("{name} corner {i}: no ring to drag back"));
+                    continue;
+                }
+                let back = path_of(&app);
+                if !fillets(&back).is_empty() || corners(&back).len() != sharp.len() {
+                    failures.push(format!("{name} corner {i}: not sharp again"));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 }

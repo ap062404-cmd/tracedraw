@@ -233,4 +233,103 @@ mod tests {
         assert_eq!(Shaping::from_id("trim"), Shaping::Trim);
         assert_eq!(Shaping::from_id("no.such.key"), Shaping::Weld);
     }
+
+    /// A group of `a` (bottom) and `b` (top), selected alone.
+    fn grouped(app: &mut App, a: ShapeId, b: ShapeId) -> ShapeId {
+        app.select(vec![a, b]);
+        app.group_selection();
+        let g = app.selection[0];
+        app.select(vec![g]);
+        g
+    }
+
+    /// #2306: Weld, Trim and Intersect on one selected group act on the
+    /// group's objects, as in CorelDRAW (the bottom one the target), in
+    /// one undo step, instead of waiting for a target.
+    #[test]
+    fn the_operations_act_on_a_selected_group() {
+        let mut app = App::headless();
+        let a = rect(&mut app, 0.0, 0.0, 20.0, 20.0);
+        let b = rect(&mut app, 10.0, 10.0, 30.0, 30.0);
+        let g = grouped(&mut app, a, b);
+        for op in [Shaping::Weld, Shaping::Trim, Shaping::Intersect] {
+            assert!(app.shaping_ready(op), "{op:?} offered for a group");
+        }
+
+        app.shaping(Shaping::Weld);
+        assert!(app.pending_shaping.is_none(), "no target to pick");
+        assert_eq!(count(&app), 1);
+        let welded = app
+            .doc()
+            .shape_on_page(app.selection[0])
+            .expect("weld")
+            .bounds();
+        assert!((welded.width() - 30.0).abs() < 1e-6, "{welded:?}");
+        app.undo();
+        assert_eq!(count(&app), 1);
+        assert!(
+            matches!(
+                app.doc().find_shape(g).map(|s| &s.kind),
+                Some(ShapeKind::Group { .. })
+            ),
+            "one undo brings the group back"
+        );
+
+        // Trim: the bottom object is cut by the top one, which stays.
+        app.select(vec![g]);
+        app.shaping(Shaping::Trim);
+        assert!(app.pending_shaping.is_none());
+        assert!(app.doc().find_shape(g).is_none());
+        assert!(app.doc().find_shape(a).is_none(), "the target was cut");
+        assert!(app.doc().find_shape(b).is_some(), "the cutter stays");
+        assert_eq!(count(&app), 2);
+        app.undo();
+        assert!(app.doc().find_shape(g).is_some());
+
+        // Intersect: the overlap, 10 x 10, beside both objects.
+        app.select(vec![g]);
+        app.shaping(Shaping::Intersect);
+        assert_eq!(count(&app), 3);
+        let r = app
+            .doc()
+            .shape_on_page(app.selection[0])
+            .expect("result")
+            .bounds();
+        assert!((r.width() - 10.0).abs() < 1e-6 && (r.height() - 10.0).abs() < 1e-6);
+        app.undo();
+        assert!(app.doc().find_shape(g).is_some());
+        assert_eq!(count(&app), 1);
+    }
+
+    /// Objects of a group that do not overlap: Intersect makes nothing
+    /// and the group stays as it was, selected, with no undo step.
+    #[test]
+    fn a_group_with_nothing_to_intersect_stays() {
+        let mut app = App::headless();
+        let a = rect(&mut app, 0.0, 0.0, 10.0, 10.0);
+        let b = rect(&mut app, 50.0, 50.0, 60.0, 60.0);
+        let g = grouped(&mut app, a, b);
+        let label = app.engine.undo_label();
+        app.shaping(Shaping::Intersect);
+        assert_eq!(app.selection, vec![g]);
+        assert!(matches!(
+            app.doc().find_shape(g).map(|s| &s.kind),
+            Some(ShapeKind::Group { .. })
+        ));
+        assert_eq!(count(&app), 1);
+        assert_eq!(app.engine.undo_label(), label);
+    }
+
+    /// The Shaping docker still picks a target for one selected group:
+    /// the group acts on the object clicked, as before.
+    #[test]
+    fn the_docker_still_picks_a_target_for_a_group() {
+        let mut app = App::headless();
+        let a = rect(&mut app, 0.0, 0.0, 20.0, 20.0);
+        let b = rect(&mut app, 10.0, 10.0, 30.0, 30.0);
+        let _ = rect(&mut app, 5.0, 5.0, 25.0, 25.0);
+        grouped(&mut app, a, b);
+        app.begin_shaping(Shaping::Weld, false, false);
+        assert!(app.pending_shaping.is_some());
+    }
 }

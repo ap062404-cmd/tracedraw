@@ -23,6 +23,7 @@ impl App {
             || self.pending_merge_frame
             || self.pending_copy_effect.is_some()
             || self.pending_copy_envelope
+            || self.pending_copy_fill
             || self.pending_clone_effect.is_some()
             || self.pending_blend_path
             || self.pending_text_path
@@ -37,6 +38,7 @@ impl App {
             self.pending_merge_frame = false;
             self.pending_copy_effect = None;
             self.pending_copy_envelope = false;
+            self.pending_copy_fill = false;
             self.pending_clone_effect = None;
             self.pending_blend_path = false;
             self.pending_text_path = false;
@@ -94,6 +96,22 @@ impl App {
         } else if let Some(kind) = self.pending_copy_effect.take() {
             if let Some(t) = target {
                 self.copy_effect_from(t, kind);
+            }
+        } else if self.pending_copy_fill {
+            self.pending_copy_fill = false;
+            if let Some(t) = target {
+                // The fill the object clicked shows, inside a group or
+                // clip frame too, as Copy Properties From reads it.
+                let src = match self.leaf_of(t, p) {
+                    Some(leaf) => Some(leaf),
+                    None => self
+                        .doc()
+                        .find_shape(t)
+                        .map(crate::copy_props::properties_source),
+                };
+                if let Some(src) = src {
+                    self.copy_fill_from_shape(t, &src);
+                }
             }
         } else if self.pending_copy_envelope {
             self.pending_copy_envelope = false;
@@ -199,9 +217,19 @@ impl App {
             }
             Tool::BlockShadow => {
                 if response.drag_started_by(PointerButton::Primary) {
-                    if let Some(id) = self.hit_test(p) {
-                        self.select(vec![id]);
-                        self.drag = Drag::ContourDrag { start: p };
+                    // The press point, not where the drag was noticed.
+                    let press = response
+                        .ctx
+                        .input(|i| i.pointer.press_origin())
+                        .map(|o| self.view.to_page(o))
+                        .unwrap_or(p);
+                    if let Some(id) = self.shadow_drag_target(press) {
+                        // A press on one of several selected objects
+                        // keeps them all: each takes the shadow (#2218).
+                        if !self.selection.contains(&id) {
+                            self.select(vec![id]);
+                        }
+                        self.drag = Drag::ContourDrag { start: press };
                     }
                 }
                 if response.dragged_by(PointerButton::Primary) {
@@ -210,6 +238,39 @@ impl App {
                         let color = self.block_shadow_color;
                         let gap = self.block_shadow_gap;
                         self.push_effect(Effect::BlockShadow { offset, color, gap }, true);
+                    }
+                }
+            }
+            Tool::InnerShadow => {
+                // As the Block Shadow tool: a drag from an object sets
+                // how far its inner shadow is cast (#2473).
+                if response.drag_started_by(PointerButton::Primary) {
+                    let press = response
+                        .ctx
+                        .input(|i| i.pointer.press_origin())
+                        .map(|o| self.view.to_page(o))
+                        .unwrap_or(p);
+                    if let Some(id) = self.shadow_drag_target(press) {
+                        if !self.selection.contains(&id) {
+                            self.select(vec![id]);
+                        }
+                        self.drag = Drag::ContourDrag { start: press };
+                    }
+                }
+                if response.dragged_by(PointerButton::Primary) {
+                    if let Drag::ContourDrag { start } = self.drag {
+                        let offset = p - start;
+                        let st = self.selected_inner_shadow().unwrap_or(self.inner_shadow);
+                        self.push_effect(
+                            Effect::InnerShadow {
+                                offset,
+                                color: st.color,
+                                opacity: st.opacity,
+                                blur: st.blur,
+                                merge: st.merge,
+                            },
+                            true,
+                        );
                     }
                 }
             }
@@ -536,9 +597,18 @@ impl App {
     pub fn effect_node_input(&mut self, response: &Response, p: Point) -> bool {
         if response.clicked_by(PointerButton::Primary) {
             if let Some(hit) = self.effect_node_at(p) {
-                // A handle keeps its node selected.
+                // A handle keeps its node selected. Shift+click on a
+                // mesh node adds it to (or takes it out of) the chosen
+                // nodes, as in CorelDRAW (discussion #2387).
                 if !crate::mesh_tool::is_mesh_handle(hit.1) {
-                    self.selected_effect_node = Some(hit);
+                    let shift = response.ctx.input(|i| i.modifiers.shift);
+                    match crate::mesh_tool::mesh_node_of(hit.1) {
+                        Some(k) if shift => self.toggle_mesh_node(hit.0, k),
+                        _ => {
+                            self.selected_effect_node = Some(hit);
+                            self.mesh_more_nodes = None;
+                        }
+                    }
                 }
                 return true;
             }
@@ -589,7 +659,24 @@ impl App {
                 self.effect_node_grab = at - from;
                 self.effect_node_drag = Some((id, index));
                 if !crate::mesh_tool::is_mesh_handle(index) {
-                    self.selected_effect_node = Some((id, index));
+                    // A drag on one of several chosen mesh nodes moves
+                    // them all; on another node, that node alone.
+                    let group = crate::mesh_tool::mesh_node_of(index).and_then(|k| {
+                        self.selected_mesh_nodes()
+                            .filter(|(sid, nodes)| *sid == id && nodes.contains(&k))
+                            .map(|(_, nodes)| (k, nodes))
+                    });
+                    match group {
+                        Some((k, mut nodes)) => {
+                            nodes.retain(|&n| n != k);
+                            nodes.insert(0, k);
+                            self.choose_mesh_nodes(id, &nodes);
+                        }
+                        None => {
+                            self.selected_effect_node = Some((id, index));
+                            self.mesh_more_nodes = None;
+                        }
+                    }
                 }
                 self.effect_node_stepped = false;
                 self.drag = Drag::Node { last: from };
@@ -634,6 +721,21 @@ impl App {
             let mut effects = s.effects.clone();
             let mut fill = s.fill.clone();
             move_effect_node(&mut effects, &mut fill, index, ld);
+            // The other chosen mesh nodes go along (discussion #2387).
+            if let Some(k) = crate::mesh_tool::mesh_node_of(index) {
+                if let Some((sid, nodes)) = self.selected_mesh_nodes() {
+                    if sid == id && nodes.first() == Some(&k) {
+                        for &n in &nodes[1..] {
+                            move_effect_node(
+                                &mut effects,
+                                &mut fill,
+                                crate::mesh_tool::MESH_NODE_BASE + n,
+                                ld,
+                            );
+                        }
+                    }
+                }
+            }
             let mut cmds = Vec::new();
             if effects != s.effects {
                 cmds.push(Command::SetEffects { shape: id, effects });

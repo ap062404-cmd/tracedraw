@@ -298,6 +298,8 @@ pub struct MacroState {
     pub other_source: String,
     /// A warning dialog before a run: (project, module, macro).
     pub confirm: Option<(usize, String, String)>,
+    /// The web addresses macros opened, in tests (see [`Request::Open`]).
+    pub opened: Vec<String>,
 }
 
 /// A message or input box on screen.
@@ -785,6 +787,15 @@ impl App {
                         title,
                         text: default,
                     })
+                }
+                // A page the macro opens (ShellExecute, #2165); tests
+                // keep the address instead of starting a browser.
+                Request::Open(url) => {
+                    if cfg!(test) {
+                        self.macros.opened.push(url);
+                    } else {
+                        self.open_url(&url);
+                    }
                 }
             }
         }
@@ -1574,6 +1585,292 @@ mod tests {
         assert!(app.scripts_output.iter().any(|l| l == "closed"));
     }
 
+    /// What a published tiling macro reads and sets (#1255, #2165): the
+    /// page's paper by name, a paper set by name, and an outline set with
+    /// `OutlineStyles`, `ArrowHeads` and named arguments; it stopped with
+    /// error 438 on `Paper`, then with "Sub or Function not defined" on
+    /// `OutlineStyles`.
+    #[test]
+    fn a_tiling_macro_reads_the_paper_and_sets_outlines_by_style() {
+        let code = "Sub Go()\r\n\
+            ActiveDocument.Unit = cdrMillimeter\r\n\
+            Debug.Print \"paper \" & ActiveDocument.ActivePage.Paper\r\n\
+            Dim r As Shape\r\n\
+            Set r = ActiveLayer.CreateRectangle(0#, 30#, 40#, 0#)\r\n\
+            r.Outline.SetProperties 0.5, OutlineStyles(0), CreateCMYKColor(0, 0, 0, 100), ArrowHeads(0), ArrowHeads(0), cdrFalse, cdrFalse, cdrOutlineRoundLineCaps, cdrOutlineRoundLineJoin, 0#, 100, MiterLimit:=5#\r\n\
+            Dim d As Shape\r\n\
+            Set d = ActiveLayer.CreateLineSegment(0#, 0#, 50#, 0#)\r\n\
+            d.Outline.SetProperties 0.3, OutlineStyles(1)\r\n\
+            Debug.Print \"styles \" & OutlineStyles.Count\r\n\
+            ActivePage.Paper = \"A5\"\r\n\
+            Debug.Print \"now \" & ActivePage.Paper & \" \" & ActivePage.SizeWidth\r\n\
+            ActivePage.SizeWidth = 123\r\n\
+            Debug.Print \"custom [\" & ActivePage.Paper & \"]\"\r\n\
+            End Sub\r\n";
+        let mut app = app_with(project("Tiling", code, Vec::new()));
+        app.run_macro(0, "Main", "Go");
+        drive(&mut app, |_| {});
+        assert!(app.macros.error.is_none(), "{:?}", app.macros.error);
+        let out = &app.scripts_output;
+        assert!(out.iter().any(|l| l == "paper A4"), "{out:?}");
+        assert!(out.iter().any(|l| l == "now A5 148"), "{out:?}");
+        assert!(out.iter().any(|l| l == "custom []"), "{out:?}");
+        assert!(out.iter().any(|l| l.starts_with("styles ")), "{out:?}");
+        let strokes: Vec<tracedraw_core::Stroke> = app
+            .doc()
+            .all_layers()
+            .flat_map(|l| l.shapes.iter())
+            .filter_map(|s| s.stroke.clone())
+            .collect();
+        let rect = strokes
+            .iter()
+            .find(|s| (s.width - 0.5).abs() < 1e-9)
+            .expect("the rectangle's outline");
+        assert!(rect.dash.is_empty());
+        assert_eq!(rect.cap, tracedraw_core::style::LineCap::Round);
+        assert_eq!(rect.join, tracedraw_core::style::LineJoin::Round);
+        let line = strokes
+            .iter()
+            .find(|s| (s.width - 0.3).abs() < 1e-9)
+            .expect("the line's outline");
+        assert!(!line.dash.is_empty(), "style 1 is dashed");
+    }
+
+    /// Copy and Paste in a macro (#2165): the tiling macro of the same
+    /// collection copies the crop marks of one side, pastes them and
+    /// moves what was pasted (the selection) to the other side. It
+    /// stopped with error 438, "Object doesn't support this property or
+    /// method: Copy". The macro's clipboard is its own.
+    #[test]
+    fn a_macro_copies_and_pastes_shapes() {
+        let code = "Sub Go()\r\n\
+            ActiveDocument.Unit = cdrMillimeter\r\n\
+            Dim a As Shape, b As Shape, g As Shape, r As ShapeRange\r\n\
+            Set a = ActiveLayer.CreateLineSegment(0#, 0#, 5#, 0#)\r\n\
+            Set b = ActiveLayer.CreateLineSegment(0#, 10#, 5#, 10#)\r\n\
+            Set g = ActiveDocument.CreateShapeRangeFromArray(a, b).Group\r\n\
+            g.Copy\r\n\
+            ActiveLayer.Paste\r\n\
+            Set r = ActiveSelectionRange\r\n\
+            Debug.Print \"pasted \" & r.Count & \" \" & (r.Item(1).StaticID <> g.StaticID) & \" \" & r.LeftX\r\n\
+            r.Move -20#, 0#\r\n\
+            Debug.Print \"moved \" & r.LeftX & \" kept \" & g.LeftX\r\n\
+            g.Cut\r\n\
+            Set r = ActiveLayer.Paste\r\n\
+            Debug.Print \"cut \" & ActiveLayer.Shapes.Count & \" \" & r.Count\r\n\
+            End Sub\r\n";
+        let mut app = app_with(project("Clip", code, Vec::new()));
+        app.run_macro(0, "Main", "Go");
+        drive(&mut app, |_| {});
+        assert!(app.macros.error.is_none(), "{:?}", app.macros.error);
+        let out = &app.scripts_output;
+        for want in ["pasted 1 True 0", "moved -20 kept 0", "cut 2 1"] {
+            assert!(out.iter().any(|l| l == want), "{want}: {out:?}");
+        }
+        // The app's clipboard is not touched.
+        assert!(app.clipboard.is_none());
+    }
+
+    /// What the macros of a published collection use that stopped them
+    /// (#2165): `FontList` (For Each over the installed families),
+    /// `ActiveVirtualLayer`, `InsertPagesEx` (its argument named `Page`
+    /// hid the page class: "not a constructor"), `LogCreateShapeRange`,
+    /// and `ShellExecute` declared from the Windows library, which they
+    /// call to open their maker's page when a form closes: a web address
+    /// is opened, anything else is not and returns 2.
+    #[test]
+    fn collection_macros_find_fonts_pages_and_open_their_pages() {
+        let code = "Private Declare PtrSafe Function OpenIt Lib \"shell32.dll\" Alias \"ShellExecuteA\" (ByVal hwnd As Long, ByVal op As String, ByVal file As String, ByVal params As String, ByVal dir As String, ByVal show As Long) As Long\r\n\
+            Sub Go()\r\n\
+            Dim v As Variant, n As Long\r\n\
+            For Each v In FontList\r\n\
+            n = n + 1\r\n\
+            Next v\r\n\
+            Debug.Print \"fonts \" & (n = FontList.Count)\r\n\
+            ActiveDocument.Unit = cdrMillimeter\r\n\
+            Dim s As Shape, sr As New ShapeRange\r\n\
+            Set s = ActiveVirtualLayer.CreateRectangle(0#, 10#, 10#, 0#)\r\n\
+            sr.Add s\r\n\
+            Set sr = ActiveDocument.LogCreateShapeRange(sr)\r\n\
+            Debug.Print \"made \" & sr.Count\r\n\
+            Dim p As Page\r\n\
+            Set p = ActiveDocument.InsertPagesEx(1, False, ActivePage.Index, 100#, 50#)\r\n\
+            Debug.Print \"pages \" & ActiveDocument.Pages.Count & \" \" & p.SizeWidth & \"x\" & p.SizeHeight\r\n\
+            Debug.Print \"web \" & (OpenIt(0, vbNullString, \"http://example.com/page\", \"\", \"\", 1) > 32)\r\n\
+            Debug.Print \"file \" & OpenIt(0, \"open\", \"C:\\Windows\\notepad.exe\", \"\", \"\", 1)\r\n\
+            End Sub\r\n";
+        let mut app = app_with(project("Collection", code, Vec::new()));
+        app.run_macro(0, "Main", "Go");
+        drive(&mut app, |_| {});
+        assert!(app.macros.error.is_none(), "{:?}", app.macros.error);
+        let out = &app.scripts_output;
+        for want in [
+            "fonts True",
+            "made 1",
+            "pages 2 100x50",
+            "web True",
+            "file 2",
+        ] {
+            assert!(out.iter().any(|l| l == want), "{want}: {out:?}");
+        }
+        assert_eq!(
+            app.macros.opened,
+            vec!["http://example.com/page".to_string()]
+        );
+    }
+
+    /// Forms of the same collection (#2165): one whose Initialize sets its
+    /// controls through the form's own name (`Crop.ctlLength = 5`, its
+    /// default property; making the form there made it again, without
+    /// end) and sets the drop-down's `ListWidth`, and one that unloads
+    /// itself in Activate and then goes on setting a control (error 5
+    /// "the form was unloaded").
+    #[test]
+    fn a_form_names_itself_in_initialize_and_unloads_itself_in_activate() {
+        let mut crop = vp::Form {
+            name: "Crop".into(),
+            caption: "Crop".into(),
+            width: 200.0,
+            height: 100.0,
+            enabled: true,
+            ..Default::default()
+        };
+        crop.controls = vec![
+            vp::Control::new(vp::ControlKind::TextBox, "ctlLength"),
+            vp::Control::new(vp::ControlKind::ComboBox, "ctlUnits"),
+        ];
+        let mut gone = vp::Form {
+            name: "Gone".into(),
+            caption: "Gone".into(),
+            width: 200.0,
+            height: 100.0,
+            enabled: true,
+            ..Default::default()
+        };
+        gone.controls = vec![vp::Control::new(vp::ControlKind::TextBox, "tbPages")];
+        let mut p = project(
+            "Forms",
+            "Sub Go()\r\nCrop.Show\r\nGone.Show\r\nDebug.Print \"done\"\r\nEnd Sub\r\n",
+            vec![crop, gone],
+        );
+        p.modules[1].source = "Private Sub UserForm_Initialize()\r\n\
+            Crop.ctlUnits.AddItem \"mm\"\r\n\
+            Crop.ctlUnits.ListWidth = 34\r\n\
+            Crop.ctlLength = 5\r\n\
+            Debug.Print \"length \" & ctlLength.Text & \" \" & ctlUnits.ListCount\r\n\
+            End Sub\r\n"
+            .into();
+        p.modules[2].source = "Private Sub UserForm_Activate()\r\n\
+            Unload Me\r\n\
+            tbPages.Value = 1\r\n\
+            Debug.Print \"after \" & tbPages.Value\r\n\
+            End Sub\r\n"
+            .into();
+        let mut app = app_with(p);
+        app.run_macro(0, "Main", "Go");
+        drive(&mut app, |app| {
+            let Some(run) = &app.macros.run else { return };
+            let open: Vec<u32> = run
+                .forms
+                .lock()
+                .unwrap()
+                .list
+                .iter()
+                .filter(|f| f.visible)
+                .map(|f| f.id)
+                .collect();
+            for id in open {
+                app.macro_form_event(id, "", "QueryClose", vec![serde_json::json!(0)]);
+            }
+        });
+        assert!(app.macros.error.is_none(), "{:?}", app.macros.error);
+        let out = &app.scripts_output;
+        for want in ["length 5 1", "after 1", "done"] {
+            assert!(out.iter().any(|l| l == want), "{want}: {out:?}");
+        }
+    }
+
+    /// A form that downloads its picture with URLDownloadToCacheFile and
+    /// shows it with LoadPicture (QRCodeInserter of #2165 stopped with
+    /// error 445 on the Windows function): the file comes into a file of
+    /// the app's own, its path back into the macro's buffer, and the
+    /// image control shows it.
+    #[test]
+    fn a_form_downloads_its_picture_and_shows_it() {
+        let dir = std::env::temp_dir().join(format!("td-download-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("qr code.png");
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            3,
+            3,
+            image::Rgba([0, 0, 0, 255]),
+        ))
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+        std::fs::write(&src, &png).unwrap();
+        let url = format!(
+            "file://{}",
+            src.to_string_lossy().replace('\\', "/").replace(' ', "%20")
+        );
+        let mut qr = vp::Form {
+            name: "QR".into(),
+            caption: "QR".into(),
+            width: 200.0,
+            height: 100.0,
+            enabled: true,
+            ..Default::default()
+        };
+        qr.controls = vec![vp::Control::new(vp::ControlKind::Image, "imgQR")];
+        let code = "Private Declare PtrSafe Function URLDownloadToCacheFile Lib \"urlmon\" Alias \"URLDownloadToCacheFileA\" (ByVal lpUnkcaller As Long, ByVal szURL As String, ByVal szFileName As String, ByVal dwBufLength As Long, ByVal dwReserved As Long, ByVal IBindStatusCallback As Long) As Long\r\n\
+             Public Function DownloadFile(URL As String) As String\r\n\
+             Dim szFileName As String\r\n\
+             szFileName = Space$(300)\r\n\
+             If URLDownloadToCacheFile(0, URL, szFileName, Len(szFileName), 0, 0) = 0 Then\r\n\
+             DownloadFile = Trim(szFileName)\r\n\
+             End If\r\n\
+             End Function\r\n\
+             Sub Go()\r\n\
+             Debug.Print \"missing [\" & DownloadFile(\"file:///no/such/file.png\") & \"]\"\r\n\
+             QR.Show\r\n\
+             End Sub\r\n";
+        let mut p = project("Forms", code, vec![qr]);
+        p.modules[1].source = format!(
+            "Private Sub UserForm_Initialize()\r\n\
+             Dim f As String\r\n\
+             f = Main.DownloadFile(\"{url}\")\r\n\
+             Debug.Print \"got \" & (Dir(f) <> \"\")\r\n\
+             imgQR.Picture = LoadPicture(f)\r\n\
+             End Sub\r\n"
+        );
+        let mut app = app_with(p);
+        app.run_macro(0, "Main", "Go");
+        let mut shown = None;
+        drive(&mut app, |app| {
+            let Some(run) = &app.macros.run else { return };
+            let open: Vec<(u32, Option<Vec<u8>>)> = run
+                .forms
+                .lock()
+                .unwrap()
+                .list
+                .iter()
+                .filter(|f| f.visible)
+                .map(|f| (f.id, f.control("imgQR").and_then(|c| c.picture.clone())))
+                .collect();
+            for (id, pic) in open {
+                shown = pic;
+                app.macro_form_event(id, "", "QueryClose", vec![serde_json::json!(0)]);
+            }
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(app.macros.error.is_none(), "{:?}", app.macros.error);
+        let out = &app.scripts_output;
+        for want in ["missing []", "got True"] {
+            assert!(out.iter().any(|l| l == want), "{want}: {out:?}");
+        }
+        assert_eq!(shown.as_deref(), Some(&png[..]));
+    }
+
     #[test]
     fn errors_name_the_line_and_stop_ends_a_loop() {
         let code = "Sub Bad()\r\nDim a As Long\r\na = 1 / 0\r\nEnd Sub\r\nSub Forever()\r\nDim i As Long\r\nDo\r\ni = i + 1\r\nLoop\r\nEnd Sub\r\n";
@@ -1624,7 +1921,8 @@ mod tests {
     /// `.gms` in `TRACEDRAW_MACRO_FILES` (separated by ':') is compiled
     /// and listed; the macros named in `TRACEDRAW_MACRO_RUN`
     /// ("Module.Macro,...") run on a sample drawing, answering each box
-    /// with its first button or default text and closing each form.
+    /// with its first button or default text and closing each form
+    /// (after a click on the button `TRACEDRAW_MACRO_CLICK` names, once).
     #[test]
     #[ignore]
     fn projects_from_the_environment() {
@@ -1678,6 +1976,7 @@ mod tests {
                 app.select_all();
                 app.run_macro(i, &m, &n);
                 let mut shown = Vec::new();
+                let mut click = std::env::var("TRACEDRAW_MACRO_CLICK").ok();
                 drive(&mut app, |app| {
                     match app.macros.prompt.take() {
                         Some(Prompt::MsgBox {
@@ -1713,13 +2012,22 @@ mod tests {
                         .collect();
                     for (id, caption) in visible {
                         shown.push(format!("form {caption}"));
+                        // The button `TRACEDRAW_MACRO_CLICK` names is
+                        // clicked once before the form closes.
+                        if let Some(b) = click.take() {
+                            shown.push(format!("click {b}"));
+                            app.macro_form_event(id, &b, "Click", Vec::new());
+                            std::thread::sleep(std::time::Duration::from_millis(300));
+                            continue;
+                        }
                         app.macro_form_event(id, "", "QueryClose", vec![serde_json::json!(0)]);
                         std::thread::sleep(std::time::Duration::from_millis(100));
                     }
                 });
                 let err = app.macros.error.take();
+                let objects: usize = app.doc().all_layers().map(|l| l.shapes.len()).sum();
                 println!(
-                    "   run {m}.{n}: {} {:?} out={:?}",
+                    "   run {m}.{n}: {} {:?} objects={objects} out={:?}",
                     match &err {
                         None => "ok".to_string(),
                         Some((e, _)) => format!(
@@ -1733,5 +2041,63 @@ mod tests {
                 app.scripts_output.clear();
             }
         }
+    }
+
+    /// The crop-marks form of the same collection (#2165): it reads the
+    /// object's box through the variables it hands `GetBoundingBox` (with
+    /// the outline), draws each mark with `CreateLineSegment`, gathers
+    /// the marks from `ActiveSelectionRange` (CorelDRAW selects what it
+    /// makes) and groups them. The marks were drawn around the page's
+    /// corner and the object itself was grouped with them.
+    #[test]
+    fn a_crop_marks_macro_marks_the_corners_of_the_object() {
+        let code = "Sub Go()\r\n\
+            Dim xPos As Double, yPos As Double, xWidth As Double, yHeight As Double\r\n\
+            Dim s As Shape, sr As ShapeRange, crop As Shape, cropRange As New ShapeRange\r\n\
+            ActiveDocument.Unit = cdrMillimeter\r\n\
+            Set s = ActiveLayer.CreateRectangle(50#, 80#, 90#, 60#)\r\n\
+            s.Outline.SetProperties 1#\r\n\
+            Set sr = ActiveSelectionRange\r\n\
+            Debug.Print \"selected \" & sr.Count\r\n\
+            For Each s In sr\r\n\
+            s.GetBoundingBox xPos, yPos, xWidth, yHeight, True\r\n\
+            Debug.Print \"box \" & xPos & \" \" & yPos & \" \" & xWidth & \" \" & yHeight\r\n\
+            Set crop = ActiveLayer.CreateLineSegment(xPos - 8, yPos, xPos - 3, yPos)\r\n\
+            crop.Outline.SetProperties 0.2\r\n\
+            cropRange.AddRange ActiveSelectionRange\r\n\
+            Set crop = ActiveLayer.CreateLineSegment(xPos + xWidth, yPos + yHeight + 3, xPos + xWidth, yPos + yHeight + 8)\r\n\
+            crop.Outline.SetProperties 0.2\r\n\
+            cropRange.AddRange ActiveSelectionRange\r\n\
+            Next s\r\n\
+            Debug.Print \"marks \" & cropRange.Count\r\n\
+            cropRange.Group\r\n\
+            End Sub\r\n";
+        let mut app = app_with(project("Crop", code, Vec::new()));
+        app.run_macro(0, "Main", "Go");
+        drive(&mut app, |_| {});
+        assert!(app.macros.error.is_none(), "{:?}", app.macros.error);
+        let out = &app.scripts_output;
+        for want in ["selected 1", "box 49.5 59.5 41 21", "marks 2"] {
+            assert!(out.iter().any(|l| l == want), "{want}: {out:?}");
+        }
+        let top: Vec<&tracedraw_core::document::Shape> = app
+            .doc()
+            .all_layers()
+            .flat_map(|l| l.shapes.iter())
+            .collect();
+        assert_eq!(top.len(), 2, "the rectangle and the group of marks");
+        let group = top
+            .iter()
+            .find(|s| matches!(s.kind, tracedraw_core::document::ShapeKind::Group { .. }))
+            .expect("the marks are grouped");
+        let b = group.bounds();
+        assert!(
+            (b.x0 - 41.5).abs() < 1e-6 && (b.x1 - 90.5).abs() < 1e-6,
+            "{b:?}"
+        );
+        assert!(
+            (b.y0 - 59.5).abs() < 1e-6 && (b.y1 - 88.5).abs() < 1e-6,
+            "{b:?}"
+        );
     }
 }

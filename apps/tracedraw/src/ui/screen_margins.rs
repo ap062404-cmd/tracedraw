@@ -46,8 +46,22 @@ impl Default for ScreenMargins {
     }
 }
 
-/// The largest margin or corner radius taken, dp.
-pub const MAX_DP: f32 = 200.0;
+/// The largest margin taken on a side, dp: more than a rounded corner or
+/// a camera cutout the system does not report needs (a corner of 50 dp
+/// reaches 15 dp into its sides, a cutout is about 30 dp deep). It was
+/// 200 dp: 90 dp at the left of a 360 dp phone left the Options dialog
+/// cut off, and two such margins took the whole screen away (#2174).
+pub const MAX_DP: f32 = 32.0;
+
+/// The largest radius of the interface's inner corners, dp (the screens'
+/// own corners go up to about 50 dp).
+pub const MAX_RADIUS_DP: f32 = 64.0;
+
+/// The most of the window's width (or height) the user's margins of two
+/// facing sides take together: a small window (a phone on its side, a
+/// split screen) keeps four fifths of each side for the interface
+/// whatever the margins say (#2174).
+pub const MAX_SHARE: f32 = 0.2;
 
 impl ScreenMargins {
     /// The four margins, clamped to `0..=MAX_DP` (a hand-edited settings
@@ -62,6 +76,19 @@ fn clamp_dp(v: f32) -> f32 {
         v.clamp(0.0, MAX_DP)
     } else {
         0.0
+    }
+}
+
+/// The margins `a` and `b` of two facing sides, made smaller in the same
+/// proportion when together they are more than `room` (points). A `room`
+/// that is not known (zero, or not a number) limits nothing.
+pub fn fit_pair(a: f32, b: f32, room: f32) -> (f32, f32) {
+    let sum = a + b;
+    if room.is_finite() && room > 0.0 && sum > room {
+        let k = room / sum;
+        (a * k, b * k)
+    } else {
+        (a, b)
     }
 }
 
@@ -108,12 +135,16 @@ pub fn corner_reach(r: f32) -> f32 {
 /// The safe area insets, in interface points: the system's (pixels over
 /// `pixels_per_point`) when followed, the larger of its bars or cutout
 /// and its corners' reach on each side, plus the user's margins (dp over
-/// the interface `zoom`, a dp being one system point).
+/// the interface `zoom`, a dp being one system point). The user's
+/// margins of two facing sides take at most [`MAX_SHARE`] of the
+/// `window`'s side between them (its size in interface points; zero
+/// when not known); the system's own room is never cut.
 pub fn insets(
     margins: &ScreenMargins,
     system: Option<SystemInsets>,
     pixels_per_point: f32,
     zoom: f32,
+    window: egui::Vec2,
 ) -> egui::epaint::MarginF32 {
     let ppp = if pixels_per_point > 0.0 {
         pixels_per_point
@@ -132,12 +163,14 @@ pub fn insets(
         ]
         .map(|px| px / ppp);
     }
-    let [t, b, l, r] = margins.sides();
+    let [t, b, l, r] = margins.sides().map(|dp| dp / zoom);
+    let (t, b) = fit_pair(t, b, window.y * MAX_SHARE);
+    let (l, r) = fit_pair(l, r, window.x * MAX_SHARE);
     egui::epaint::MarginF32 {
-        top: sys[0] + t / zoom,
-        bottom: sys[1] + b / zoom,
-        left: sys[2] + l / zoom,
-        right: sys[3] + r / zoom,
+        top: sys[0] + t,
+        bottom: sys[1] + b,
+        left: sys[2] + l,
+        right: sys[3] + r,
     }
 }
 
@@ -198,13 +231,19 @@ pub fn set(
 ) {
     let zoom = ctx.zoom_factor();
     let native = raw.viewport().native_pixels_per_point.unwrap_or(1.0);
-    let m = insets(margins, system, native * zoom, zoom);
+    let window = raw.screen_rect.map(|r| r.size()).unwrap_or_default();
+    let m = insets(margins, system, native * zoom, zoom, window);
     raw.safe_area_insets = Some(egui::SafeAreaInsets(m));
 }
 
 /// The interface's inner corner radius, interface points.
 fn corner_points(ctx: &egui::Context, margins: &ScreenMargins) -> f32 {
-    clamp_dp(margins.corner_radius) / ctx.zoom_factor().max(0.01)
+    let radius = if margins.corner_radius.is_finite() {
+        margins.corner_radius.clamp(0.0, MAX_RADIUS_DP)
+    } else {
+        0.0
+    };
+    radius / ctx.zoom_factor().max(0.01)
 }
 
 /// The layer the frame around the safe area is painted on: above the
@@ -330,7 +369,7 @@ pub fn options_section(ui: &mut egui::Ui, m: &mut ScreenMargins) {
             ui.add_sized(
                 [70.0, 22.0],
                 crate::ui::field::NumField::new(&mut m.corner_radius)
-                    .range(0.0..=MAX_DP)
+                    .range(0.0..=MAX_RADIUS_DP)
                     .speed(0.5)
                     .max_decimals(0),
             )
@@ -411,6 +450,75 @@ mod tests {
         assert_eq!(parse_system("1 -2 3 4"), None);
     }
 
+    /// A window large enough for any margins.
+    const BIG: egui::Vec2 = egui::vec2(4000.0, 4000.0);
+
+    /// The frame's input for `m` on a window of `size` points.
+    fn frame_insets(m: &ScreenMargins, size: egui::Vec2) -> egui::epaint::MarginF32 {
+        let ctx = egui::Context::default();
+        let mut raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+            ..Default::default()
+        };
+        set(&ctx, m, None, &mut raw);
+        raw.safe_area_insets.expect("insets").0
+    }
+
+    /// The margins are limited (#2174): no side takes more than 32 dp,
+    /// set in the options or read from a settings file, and on a small
+    /// window the margins of two facing sides together take at most a
+    /// fifth of its side, so the interface cannot be squeezed away. Up
+    /// to 0.43 a side took 200 dp: 90 dp at the left of a 360 dp phone
+    /// left the Options dialog cut off, and two sides the whole screen.
+    #[test]
+    fn margins_cannot_take_the_screen_away() {
+        let all = |dp: f32| ScreenMargins {
+            follow_system: false,
+            ..margins(dp, dp, dp, dp)
+        };
+        let phone = egui::vec2(360.0, 800.0);
+        let m = frame_insets(&all(200.0), phone);
+        assert_eq!((m.top, m.bottom, m.left, m.right), (32.0, 32.0, 32.0, 32.0));
+        let m = frame_insets(&margins(0.0, 0.0, 90.0, 0.0), phone);
+        assert_eq!(m.left, 32.0, "the report's 90 dp at the left");
+        // Margins within the limit stay as set.
+        let m = frame_insets(&all(20.0), phone);
+        assert_eq!((m.top, m.bottom, m.left, m.right), (20.0, 20.0, 20.0, 20.0));
+        // The phone on its side in a split screen, 200 points high: top
+        // and bottom share a fifth of it.
+        let low = egui::vec2(800.0, 200.0);
+        let m = frame_insets(&all(32.0), low);
+        assert_eq!((m.top, m.bottom), (20.0, 20.0));
+        assert_eq!((m.left, m.right), (32.0, 32.0));
+        // Unequal sides shrink in proportion, and those that fit stay.
+        let m = frame_insets(&margins(30.0, 10.0, 0.0, 0.0), low);
+        assert_eq!((m.top, m.bottom), (30.0, 10.0));
+        let m = frame_insets(&margins(32.0, 8.0, 0.0, 0.0), egui::vec2(800.0, 100.0));
+        assert_eq!((m.top, m.bottom), (16.0, 4.0));
+        // The system's own room (its bars, the cutout) is never cut, and
+        // a window whose size is not known limits nothing but the 32 dp.
+        let system = SystemInsets {
+            top: 300.0,
+            ..SystemInsets::default()
+        };
+        let follow = ScreenMargins {
+            follow_system: true,
+            ..all(32.0)
+        };
+        let m = insets(&follow, Some(system), 1.0, 1.0, low);
+        assert_eq!((m.top, m.bottom), (320.0, 20.0));
+        let m = insets(&all(200.0), None, 1.0, 1.0, egui::Vec2::ZERO);
+        assert_eq!((m.top, m.left), (32.0, 32.0));
+        assert_eq!(fit_pair(3.0, 1.0, f32::NAN), (3.0, 1.0));
+        // The corner radius has a limit of its own.
+        let ctx = egui::Context::default();
+        let round = ScreenMargins {
+            corner_radius: 500.0,
+            ..ScreenMargins::default()
+        };
+        assert_eq!(corner_points(&ctx, &round), MAX_RADIUS_DP);
+    }
+
     /// The system's pixels become interface points, a rounded corner
     /// keeps both sides it joins clear of its arc, and the user's dp
     /// margins come on top at the interface zoom.
@@ -424,24 +532,24 @@ mod tests {
             corners: [0.0, 0.0, 100.0, 100.0],
         };
         // 2.5 pixels per point, interface at 100 %.
-        let m = insets(&margins(0.0, 0.0, 0.0, 0.0), Some(system), 2.5, 1.0);
+        let m = insets(&margins(0.0, 0.0, 0.0, 0.0), Some(system), 2.5, 1.0, BIG);
         assert!((m.top - 40.0).abs() < 1e-3, "{m:?}");
         let reach = corner_reach(100.0) / 2.5;
         assert!((m.bottom - reach).abs() < 1e-3, "{m:?}");
         assert!((m.left - reach).abs() < 1e-3 && (m.right - reach).abs() < 1e-3);
         // 10 dp more at the top, with the interface at 125 %.
-        let m = insets(&margins(10.0, 0.0, 0.0, 0.0), Some(system), 2.5, 1.25);
+        let m = insets(&margins(10.0, 0.0, 0.0, 0.0), Some(system), 2.5, 1.25, BIG);
         assert!((m.top - (40.0 + 8.0)).abs() < 1e-3, "{m:?}");
         // Not following the system: the user's margins only.
         let own = ScreenMargins {
             follow_system: false,
             ..margins(4.0, 6.0, 8.0, 12.0)
         };
-        let m = insets(&own, Some(system), 2.5, 2.0);
+        let m = insets(&own, Some(system), 2.5, 2.0, BIG);
         assert_eq!((m.top, m.bottom, m.left, m.right), (2.0, 3.0, 4.0, 6.0));
         // Nonsense from a settings file is held in range.
         let wild = margins(f32::NAN, -5.0, 1e9, 0.0);
-        let m = insets(&wild, None, 1.0, 1.0);
+        let m = insets(&wild, None, 1.0, 1.0, BIG);
         assert_eq!((m.top, m.bottom, m.left, m.right), (0.0, 0.0, MAX_DP, 0.0));
     }
 

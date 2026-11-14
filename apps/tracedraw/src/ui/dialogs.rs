@@ -101,6 +101,17 @@ pub struct ExportState {
     /// becomes Options > Global > File Formats' setting on OK only, so
     /// Cancel leaves the setting as it was.
     pub dont_show: bool,
+    /// PLT: the drawing's size in the file against the page's (1 =
+    /// 100 %), the plotter's origin at the page's middle (else its
+    /// bottom left corner), plotter units per inch, HPGL/2 pen colours
+    /// and widths (else plain HP-GL), one pen for every outline and how
+    /// closely curves are followed, mm (#2652).
+    pub plt_scale: f64,
+    pub plt_centre: bool,
+    pub plt_units: f64,
+    pub plt_hpgl2: bool,
+    pub plt_one_pen: bool,
+    pub plt_resolution: f64,
 }
 
 impl Default for ExportState {
@@ -134,6 +145,12 @@ impl Default for ExportState {
             color_mode: 0,
             target: None,
             dont_show: false,
+            plt_scale: 1.0,
+            plt_centre: false,
+            plt_units: 1016.0,
+            plt_hpgl2: true,
+            plt_one_pen: false,
+            plt_resolution: 0.02,
         }
     }
 }
@@ -206,26 +223,50 @@ pub fn export_size_in_unit(w_mm: f64, h_mm: f64, st: &ExportState) -> (f64, f64)
 }
 
 /// A size typed in a bitmap size field: `typed` (in `st`'s unit) for the
-/// side that is `side_mm` long on the page. In pixels it sets the
-/// resolution, as before; in a length it sets the scale, the resolution
-/// staying. Either way the other side follows (#617).
+/// side that is `side_mm` long on the page. It sets the scale of the
+/// artwork, the resolution staying: in pixels the scale that gives that
+/// many pixels at the resolution, in a length the printed size. The
+/// other side follows (#617). Pixels set the resolution before, so a
+/// size typed changed the resolution (#2640).
 pub fn set_export_size(st: &mut ExportState, side_mm: f64, typed: f64) {
     if !(side_mm > 0.0 && side_mm.is_finite() && typed > 0.0 && typed.is_finite()) {
         return;
     }
     let unit = EXPORT_SIZE_UNITS[st.size_unit.min(EXPORT_SIZE_UNITS.len() - 1)].1;
-    if unit > 0.0 {
-        // Not past what the highest resolution can draw.
-        let most = (2400.0 / st.dpi.max(MIN_EXPORT_DPI)).min(*EXPORT_SCALE_RANGE.end());
-        let least = EXPORT_SCALE_RANGE.start().min(most);
-        st.scale = (typed * unit / side_mm).clamp(least, most);
+    let dpi = st.dpi.max(MIN_EXPORT_DPI);
+    let scale = if unit > 0.0 {
+        typed * unit / side_mm
     } else {
         let px = typed.round().clamp(1.0, 200_000.0) as u32;
-        let scale = st.scale_or_one();
-        if let Some(dpi) = dpi_for_pixels(side_mm * scale, px) {
-            st.dpi = dpi;
-        }
+        let Some(render) = dpi_for_pixels(side_mm, px) else {
+            return;
+        };
+        render / dpi
+    };
+    // Not past what the highest resolution can draw.
+    let most = (2400.0 / dpi).min(*EXPORT_SCALE_RANGE.end());
+    let least = EXPORT_SCALE_RANGE.start().min(most);
+    st.scale = scale.clamp(least, most);
+}
+
+/// A resolution typed or picked in the Export dialog. The size stays as
+/// shown: in pixels the scale makes up for it, so as many pixels come
+/// out, recorded at the new resolution; in a length the printed size
+/// stays and the pixels follow the resolution (#2640: a resolution
+/// changed the pixel size).
+pub fn set_export_dpi(st: &mut ExportState, dpi: f64) {
+    if !(dpi.is_finite() && dpi > 0.0) {
+        return;
     }
+    let dpi = dpi.clamp(MIN_EXPORT_DPI, 2400.0);
+    let unit = EXPORT_SIZE_UNITS[st.size_unit.min(EXPORT_SIZE_UNITS.len() - 1)].1;
+    if unit <= 0.0 {
+        let render = st.render_dpi();
+        let most = (2400.0 / dpi).min(*EXPORT_SCALE_RANGE.end());
+        let least = EXPORT_SCALE_RANGE.start().min(most);
+        st.scale = (render / dpi).clamp(least, most);
+    }
+    st.dpi = dpi;
 }
 
 /// Where a `.cdr` file that does not open right is sent in.
@@ -274,6 +315,23 @@ impl ExportState {
     /// others write one file per page (#1382).
     pub fn one_file_for_all_pages(ext: &str) -> bool {
         matches!(ext, "pdf" | "ai" | "ps" | "prn" | "html")
+    }
+
+    /// The PLT export's choices (#2652), each within its range.
+    pub fn plt_options(&self) -> tracedraw_io::plt::PltOptions {
+        tracedraw_io::plt::PltOptions {
+            scale: self.plt_scale,
+            origin: if self.plt_centre {
+                tracedraw_io::plt::PltOrigin::PageCentre
+            } else {
+                tracedraw_io::plt::PltOrigin::BottomLeft
+            },
+            units_per_inch: self.plt_units,
+            hpgl2: self.plt_hpgl2,
+            one_pen: self.plt_one_pen,
+            curve_resolution: self.plt_resolution,
+        }
+        .sane()
     }
 
     /// The AI export writes the classic version 8 file (PostScript, one
@@ -443,6 +501,13 @@ pub struct PrintState {
     /// Every page stretched on the sheet about its middle (x, y; 1 for
     /// none) by Print Preview's Transform (#595).
     pub art_stretch: (f64, f64),
+    /// Every page turned on the sheet about its middle, degrees
+    /// counter-clockwise (0 for none), by Print Preview's Rotation.
+    pub art_rotation: f64,
+    /// A further turn of the page in each place of the sheet, by the
+    /// place's number: Print Preview's Rotation for the page chosen on
+    /// the sheet (#2587).
+    pub cell_rotation: Vec<f64>,
     /// The pages stretch to fill the sheet inside the margins (#591).
     pub stretch_fit: bool,
     /// The Custom sheet's size, mm (#591).
@@ -768,6 +833,8 @@ impl Default for PrintState {
             art_offset: (0.0, 0.0),
             margins: [0.0; 4],
             art_stretch: (1.0, 1.0),
+            art_rotation: 0.0,
+            cell_rotation: Vec::new(),
             stretch_fit: false,
             custom_sheet: Size::new(210.0, 297.0),
             sheet_name_typed: String::new(),
@@ -1098,6 +1165,8 @@ pub enum Dialog {
     BitmapPaletted(crate::bitmap_modes::PalettedSettings),
     /// Image > Remove Background (on this computer, no AI service).
     RemoveBackground(crate::ui::bitmap_dialogs::BgRemoveState),
+    /// Object-based imposition for arranging selected artwork on production sheets.
+    Imposition(Box<crate::ui::imposition_dialog::State>),
     /// The Shape tool's Align Nodes: on a common horizontal and/or
     /// vertical.
     NodeAlign {
@@ -1200,6 +1269,13 @@ pub enum Dialog {
     /// After a drawing opens: objects that could not be read, fonts that
     /// are not installed (Options > Global > Warnings).
     OpenNotes(OpenNotes),
+    /// Frames slow on the CPU with hardware acceleration off and a
+    /// graphics card idle: turn it on? (`ui::gpu_hint`, Options > Global
+    /// > Warnings.)
+    HardwareAccelerationHint {
+        card: String,
+        dont_show: bool,
+    },
     /// Take an item off the Shelf? (Options > Global > Warnings.)
     ConfirmShelfRemove {
         uid: u64,
@@ -1247,6 +1323,8 @@ pub enum Dialog {
     ColorManagement(Box<crate::ui::color_management::ColorManagementState>),
     /// Tools > Convert Colors (#972).
     ConvertColors(crate::ui::convert_colors::ConvertColorsState),
+    /// Tools > Recolor.
+    Recolor(crate::ui::recolor::RecolorState),
     FontManager(FontManagerState),
     /// Launch > TraceCut, Tools > TraceCut.
     TraceCut(Box<crate::tracecut::TraceCutState>),
@@ -1731,6 +1809,10 @@ pub fn show(app: &mut App, ctx: &Context) {
     if app.outline_preview && !matches!(app.dialog, Dialog::OutlinePen(_)) {
         app.end_outline_pen_preview();
     }
+    // And for the Recolor dialog's.
+    if app.recolor_preview && !matches!(app.dialog, Dialog::Recolor(_)) {
+        app.end_recolor_preview();
+    }
     // The Trace dialog's live preview goes with the dialog.
     if !matches!(app.dialog, Dialog::Trace(_)) && app.trace_live.is_active() {
         app.trace_live.clear();
@@ -1756,11 +1838,16 @@ pub fn show(app: &mut App, ctx: &Context) {
         } else {
             Vec::new()
         };
-        crate::ui::chrome::modal_blocker_except(ctx, &holes);
+        // Object Imposition is non-modal: canvas selection must remain available
+        // while the production dialog stays open.
+        if !matches!(dialog, Dialog::Imposition(_)) {
+            crate::ui::chrome::modal_blocker_except(ctx, &holes);
+        }
     }
     let mut close = false;
     match &mut dialog {
         Dialog::None => {}
+        Dialog::Imposition(st) => crate::ui::imposition_dialog::dialog(app, ctx, st, &mut close),
         Dialog::LineStyle(st) => crate::ui::line_style::dialog(app, ctx, st, &mut close),
         Dialog::BitmapBw(s) => crate::ui::bitmap_dialogs::bw_dialog(app, ctx, s, &mut close),
         Dialog::RemoveBackground(st) => {
@@ -2065,11 +2152,7 @@ pub fn show(app: &mut App, ctx: &Context) {
                     } else {
                         vec![app.page]
                     };
-                    let cmds: Vec<Command> = pages
-                        .into_iter()
-                        .map(|page| Command::ResizePage { page, size })
-                        .collect();
-                    let _ = app.engine.run_batch("Page Size", &cmds);
+                    app.resize_pages_about_centre(&pages, size, "Page Size");
                     app.fit_pending = true;
                 }
             });
@@ -2470,6 +2553,29 @@ pub fn show(app: &mut App, ctx: &Context) {
                 if i == 1 && notes.unread > 0 {
                     app.open_url(crate::ui::dialogs::CDR_ISSUE);
                 }
+                close = true;
+            }
+        }
+        Dialog::HardwareAccelerationHint { card, dont_show } => {
+            let (on, options, later) = (
+                tr("gpu_hint.turn_on"),
+                tr("menu.tools.options"),
+                tr("gpu_hint.not_now"),
+            );
+            if let Some(i) = crate::ui::chrome::message_box_check(
+                ctx,
+                crate::ui::chrome::MessageIcon::Info,
+                &trf("gpu_hint.text", &[("card", card)]),
+                &[&on, &options, &later],
+                &tr("notes.dont_show"),
+                dont_show,
+            ) {
+                let dont_show = *dont_show;
+                crate::ui::gpu_hint::answer(
+                    app,
+                    crate::ui::gpu_hint::Answer::from_button(i),
+                    dont_show,
+                );
                 close = true;
             }
         }
@@ -2986,6 +3092,7 @@ pub fn show(app: &mut App, ctx: &Context) {
         Dialog::Encode(st) => encode_dialog(app, ctx, st, &mut close),
         Dialog::BorderGrommet(st) => border_grommet_dialog(app, ctx, st, &mut close),
         Dialog::ConvertColors(st) => crate::ui::convert_colors::dialog(app, ctx, st, &mut close),
+        Dialog::Recolor(st) => crate::ui::recolor::dialog(app, ctx, st, &mut close),
         Dialog::ColorManagement(st) => {
             crate::ui::color_management::dialog(app, ctx, st, &mut close)
         }
@@ -3136,6 +3243,7 @@ pub fn show(app: &mut App, ctx: &Context) {
     if close {
         app.end_edit_fill_preview();
         app.end_outline_pen_preview();
+        app.end_recolor_preview();
     }
     // A closing dialog may have opened the next one (the next unsaved
     // drawing's question); keep that.
@@ -3842,11 +3950,7 @@ pub(crate) fn page_size_page(app: &mut App, ui: &mut Ui) {
         } else {
             app.doc().pages.iter().map(|p| p.id).collect()
         };
-        let cmds: Vec<Command> = pages
-            .into_iter()
-            .map(|page| Command::ResizePage { page, size })
-            .collect();
-        let _ = app.engine.run_batch("Page Size", &cmds);
+        app.resize_pages_about_centre(&pages, size, "Page Size");
         app.fit_pending = true;
     }
     ui.add_space(10.0);
@@ -3945,6 +4049,7 @@ fn export_preview_key(app: &App, st: &ExportState) -> u64 {
     st.scale_or_one().to_bits().hash(&mut h);
     st.webp_lossless.hash(&mut h);
     st.color_mode.hash(&mut h);
+    format!("{:?}", st.plt_options()).hash(&mut h);
     if st.selection_only {
         for id in &app.selection {
             id.raw().hash(&mut h);
@@ -4518,15 +4623,23 @@ fn export_dialog(app: &mut App, ctx: &Context, st: &mut ExportState, close: &mut
                 if raster {
                     ui.horizontal(|ui| {
                         ui.label(tr("dialog.resolution"));
-                        ui.add(
-                            crate::ui::field::NumField::new(&mut st.dpi)
-                                .range(MIN_EXPORT_DPI..=2400.0)
-                                .suffix(" dpi"),
-                        )
-                        .rich_tip(crate::ui::tips::pair(
-                            "dialog.resolution",
-                            "dialog.export_dpi_desc",
-                        ));
+                        // The size shown stays when the resolution
+                        // changes (#2640).
+                        let mut dpi = st.dpi;
+                        if ui
+                            .add(
+                                crate::ui::field::NumField::new(&mut dpi)
+                                    .range(MIN_EXPORT_DPI..=2400.0)
+                                    .suffix(" dpi"),
+                            )
+                            .rich_tip(crate::ui::tips::pair(
+                                "dialog.resolution",
+                                "dialog.export_dpi_desc",
+                            ))
+                            .changed()
+                        {
+                            set_export_dpi(st, dpi);
+                        }
                         for d in [72.0, 96.0, 150.0, 300.0] {
                             if ui
                                 .small_button(format!("{d:.0}"))
@@ -4535,7 +4648,7 @@ fn export_dialog(app: &mut App, ctx: &Context, st: &mut ExportState, close: &mut
                                 })
                                 .clicked()
                             {
-                                st.dpi = d;
+                                set_export_dpi(st, d);
                             }
                         }
                     });
@@ -4582,8 +4695,8 @@ fn export_dialog(app: &mut App, ctx: &Context, st: &mut ExportState, close: &mut
                         app.page_rect()
                     };
                     // The size in the chosen unit: typing either side sets
-                    // the resolution (pixels) or the scale (lengths) that
-                    // gives it, the other side following (#617).
+                    // the scale that gives it, the resolution staying, the
+                    // other side following (#617, #2640).
                     let (mut w, mut h) = export_size_in_unit(b.width(), b.height(), st);
                     let unit = st.size_unit.min(EXPORT_SIZE_UNITS.len() - 1);
                     let (decimals, step) = if unit == 0 { (0, 1.0) } else { (2, 0.1) };
@@ -4723,6 +4836,9 @@ fn export_dialog(app: &mut App, ctx: &Context, st: &mut ExportState, close: &mut
                             ));
                     });
                 }
+                if !scripted && EXPORT_FORMATS[st.format.min(EXPORT_FORMATS.len() - 1)].1 == "plt" {
+                    plt_export_fields(ui, st);
+                }
                 ui.checkbox(&mut st.selection_only, tr("dialog.selected_only"))
                     .rich_tip(crate::ui::tips::pair(
                         "dialog.selected_only",
@@ -4774,6 +4890,70 @@ fn export_dialog(app: &mut App, ctx: &Context, st: &mut ExportState, close: &mut
             export_dialog_ok(app, st);
         }
     });
+}
+
+/// The PLT export's choices in the Export dialog (#2652): the scale,
+/// the plotter's origin, its units, how closely curves are followed,
+/// HPGL/2 pen colours and widths, one pen for every outline.
+fn plt_export_fields(ui: &mut Ui, st: &mut ExportState) {
+    egui::Grid::new("exp_plt").num_columns(2).show(ui, |ui| {
+        ui.label(tr("dialog.plt_scale"));
+        let mut pct = st.plt_scale * 100.0;
+        if ui
+            .add(
+                crate::ui::field::NumField::new(&mut pct)
+                    .range(1.0..=10_000.0)
+                    .speed(1.0)
+                    .suffix(" %"),
+            )
+            .rich_tip(crate::ui::tips::keyed("dialog.plt_scale"))
+            .changed()
+        {
+            st.plt_scale = pct / 100.0;
+        }
+        ui.end_row();
+        ui.label(tr("dialog.plt_origin"));
+        let shown = if st.plt_centre {
+            tr("dialog.plt_origin_centre")
+        } else {
+            tr("dialog.plt_origin_corner")
+        };
+        crate::ui::keynav::ComboBox::from_id_salt("exp_plt_origin")
+            .selected_text(shown)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut st.plt_centre, false, tr("dialog.plt_origin_corner"));
+                ui.selectable_value(&mut st.plt_centre, true, tr("dialog.plt_origin_centre"));
+            })
+            .response
+            .rich_tip(crate::ui::tips::keyed("dialog.plt_origin"));
+        ui.end_row();
+        ui.label(tr("dialog.plt_units"));
+        ui.horizontal(|ui| {
+            ui.add(
+                crate::ui::field::NumField::new(&mut st.plt_units)
+                    .range(100.0..=100_000.0)
+                    .max_decimals(0)
+                    .speed(1.0),
+            )
+            .rich_tip(crate::ui::tips::keyed("dialog.plt_units"));
+            ui.label(tr("dialog.plt_per_inch"));
+        });
+        ui.end_row();
+        ui.label(tr("dialog.plt_resolution"));
+        ui.add(
+            crate::ui::field::NumField::new(&mut st.plt_resolution)
+                .range(0.001..=5.0)
+                .max_decimals(3)
+                .speed(0.01)
+                .suffix(" mm"),
+        )
+        .rich_tip(crate::ui::tips::keyed("dialog.plt_resolution"));
+        ui.end_row();
+    });
+    ui.checkbox(&mut st.plt_hpgl2, tr("dialog.plt_hpgl2"))
+        .rich_tip(crate::ui::tips::keyed("dialog.plt_hpgl2"));
+    ui.checkbox(&mut st.plt_one_pen, tr("dialog.plt_one_pen"))
+        .rich_tip(crate::ui::tips::keyed("dialog.plt_one_pen"));
 }
 
 /// OK in the Export dialog: "Do not show this dialog again" becomes the
@@ -6015,6 +6195,8 @@ pub(crate) fn print_tab_layout(app: &App, ui: &mut Ui, st: &mut PrintState) {
                 if !st.fit_to_page {
                     st.art_offset = (0.0, 0.0);
                     st.art_stretch = (1.0, 1.0);
+                    st.art_rotation = 0.0;
+                    st.cell_rotation.clear();
                 }
                 st.fit_to_page = true;
             }

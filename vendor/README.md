@@ -341,6 +341,48 @@ change marked `TraceDraw:` in a comment.
   leave tracking anew. Both decisions are in `src/alt_shortcuts.rs`,
   which depends on nothing in the crate; TraceDraw's tests include and
   run it (`winit_alt_shortcuts::tests`).
+- Change: on Windows a window's minimum and maximum size follow the
+  monitor's scaling (#2487). egui-winit gives every size bound in
+  physical pixels, worked out with the scaling of the monitor the window
+  is on at the time, and winit kept it in pixels: moved to a monitor of a
+  smaller scaling, the window could not take the size `WM_DPICHANGED`
+  worked out for it there, came out larger than asked, and, still being
+  dragged across the edge, went back and forth between the two monitors,
+  growing. `platform_impl/windows/window.rs` (`set_min_inner_size`,
+  `set_max_inner_size`, through `scaled_bound`) now keeps a bound given
+  in pixels in logical units at the window's scaling of the moment, so
+  `WM_GETMINMAXINFO` and `WM_DPICHANGED` read it at each monitor's own
+  scaling; a bound given in logical units is kept as it was. The
+  arithmetic is in `src/size_bounds.rs`, which depends on nothing in the
+  crate; TraceDraw's tests include and run it
+  (`winit_size_bounds::tests`). Not run on Windows here: the copy is
+  checked to build for `x86_64-pc-windows-gnu`.
+- Change: on Windows 11 a window whose scaling changed takes the
+  rectangle Windows suggests (#2487, as winit 0.31 does). Dragged from
+  one monitor to another of a different scaling, `WM_DPICHANGED` placed
+  the window with winit's own rectangle, made for Windows 10: it kept
+  the pointer's place across the title bar only and then moved the
+  window step by step onto the monitor of the new scaling, so the
+  window stopped following the pointer, jumped, and went back and forth
+  between the monitors (two monitors one above the other the worst).
+  `platform_impl/windows/event_loop.rs` now takes the suggested
+  rectangle as it is on Windows 11 and later (build 22000 on, read with
+  `RtlGetVersion` by `dark_mode.rs`); Windows 10 keeps winit's
+  rectangle. The decision is `size_bounds::takes_suggested_rect`,
+  tested with the file. Not run on Windows here.
+- Change: Android reports a mouse as a mouse (#2152, #2161). winit's
+  Android backend turned every pointer of a `MotionEvent` into a `Touch`
+  and dropped hover, scroll and button actions ("TODO mouse events"), so a
+  Bluetooth or USB mouse clicked like a finger with any button, its wheel
+  did nothing and nothing was hovered. In `platform_impl/android/mod.rs`
+  a motion event whose source is a mouse or whose first pointer's tool is
+  one is no longer made into touches: `src/android_mouse.rs` says what the
+  window is told (`CursorEntered`, `CursorMoved`, `MouseInput` for the
+  buttons that changed in the event's button state, `MouseWheel` in lines
+  from `AXIS_VSCROLL` and `AXIS_HSCROLL`, `CursorLeft` once a hover ended
+  and no press followed in the same batch of events). The file depends on
+  nothing in the crate, and TraceDraw's tests include and run it
+  (`winit_android_mouse::tests`).
 - Change: Android passes on the modifier keys of a hardware keyboard
   (#2052). winit's Android backend sent no `ModifiersChanged`, so with a
   Bluetooth or USB keyboard Shift, Ctrl and Alt never reached the app
@@ -349,6 +391,19 @@ change marked `TraceDraw:` in a comment.
   (`android_activity::input::MetaState`) gives the held modifiers
   (`modifiers_of`); when they differ from the last ones told, a
   `ModifiersChanged` is sent before the key's `KeyboardInput`.
+- Change: a bitmap cursor on Linux (#2557). TraceDraw hands its drawn
+  tool pointers to the system as bitmaps on Linux too
+  (`apps/tracedraw/src/ui/cursors.rs`), and egui-winit sets the bitmap
+  cursor again every frame. On X11 (`platform_impl/linux/x11/window.rs`,
+  `set_cursor`) the cursor already shown is not sent again. On Wayland
+  (`platform_impl/linux/wayland/window/state.rs`, `set_custom_cursor`,
+  `set_cursor_visible`) the same image (the same `Arc`) makes no new
+  buffer and no new commit of the cursor surface, and showing a cursor
+  already shown does nothing. The Wayland cursor buffer
+  (`platform_impl/linux/wayland/types/cursor.rs`) has sides padded to
+  whole multiples of 12 pixels, transparent beyond the image: without a
+  viewport the cursor surface takes the output's integer buffer scale,
+  and a buffer whose size it does not divide is a protocol error.
 - The published crate's `examples/` and `tests/` stay as downloaded (the
   manifest lists them); they build in no gate.
 - Drop the copy and the `[patch.crates-io]` entry when a winit release

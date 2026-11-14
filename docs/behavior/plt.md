@@ -40,3 +40,22 @@ use (more than 8 share pen 8), then `SPn;PUx,y;PDx,y,...;` per subpath.
 Filled objects without an outline are drawn with their fill colour as a
 0.25 mm pen; other fills are drawn as black outlines; bitmaps are
 skipped. Text is written as the outlines of its glyphs.
+
+## Export choices
+
+The Export dialog shows these for PLT (#2652: it had none, where
+CorelDRAW's HPGL export has a scale, the plotter's origin and units and
+pen settings). They are kept with the format's other choices and in
+export presets (`plt::PltOptions`, `ExportState::plt_options`).
+
+| Choice | Effect |
+|---|---|
+| Scale, 1 to 10 000 % (100) | the drawing and the pen widths at that size in the file |
+| Plotter origin: bottom left of page (default) or centre of page | the plotter's (0, 0); with the centre, `IP` runs from minus half the page to plus half |
+| Plotter units, 100 to 100 000 per inch (1016) | 1016 is HPGL's own 0.025 mm; some cutters count 1000 |
+| Curve resolution, 0.001 to 5 mm (0.02) | how far the straight strokes may stray from a curve |
+| HPGL/2 pen colours and widths (on) | off: no `PC` or `PW`, plain HP-GL as older plotters and most vinyl cutters read it |
+| One pen for every outline (off) | every outline with pen 1 (a cutter with one knife), no `SP2` and on |
+
+The defaults write the file exactly as before
+(`plt::tests::export_options_scale_centre_units_and_pens`).

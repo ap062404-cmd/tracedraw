@@ -12,6 +12,7 @@ uses. You can open more palettes, make your own and edit them.
 | Right-click a color | colors the outline of the selection |
 | Hold the right button on a color for a second (or right-click it, when right-click is set to open the menu), then **Delete Color** | takes that color out of a palette of yours or the document palette |
 | Double-click the palette outside the colors | opens the palette editor on that palette |
+| Double-click a color | fills the selection and opens the palette editor with that color selected, to rename it, change it or make it a spot color |
 | <kbd>Ctrl</kbd>+click a color | mixes a tenth of it into the selection's fill |
 | Click and hold a color | shows lighter, darker, duller and brighter shades of it to choose from |
 | Drag a color onto an object | fills the object, or colors its outline when dropped on the edge |

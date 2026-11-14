@@ -109,6 +109,7 @@ pub fn steps(tool: Tool) -> &'static [Option<Pic>] {
         Tool::Envelope => &[p!(envelope_frame), p!(envelope_bend), None],
         Tool::Extrude => &[p!(extrude_drag), p!(extrude_vp), None],
         Tool::BlockShadow => &[p!(block_shadow_drag), None],
+        Tool::InnerShadow => &[p!(inner_shadow_drag), None],
         Tool::Transparency => &[p!(transp_uniform), p!(transp_gradient), p!(transp_slider)],
         Tool::ColorEyedropper => &[p!(eyedrop_sample), p!(eyedrop_apply), None],
         Tool::AttributesEyedropper => &[p!(attrs_sample), p!(attrs_apply), None],
@@ -2610,6 +2611,26 @@ fn block_shadow_drag(k: &K) {
     k.shape(&v, Paint::Solid(RED));
     k.drag((80.0, 50.0), (110.0, 70.0));
     k.tool_cursor((112.0, 72.0), Tool::BlockShadow);
+}
+
+fn inner_shadow_drag(k: &K) {
+    let (x0, y0, x1, y1) = (40.0, 16.0, 104.0, 72.0);
+    k.fill(&[(x0, y0), (x1, y0), (x1, y1), (x0, y1)], Paint::Solid(RED));
+    // The shadow inside, along the edges facing away from the drag, fading
+    // in from the edge.
+    for i in 0..6 {
+        let d = 2.0 * (6 - i) as f32;
+        let a = 30 + 15 * i as u8;
+        let shade = Paint::Solid(Color32::from_black_alpha(a));
+        k.fill(&[(x0, y0), (x1, y0), (x1, y0 + d), (x0, y0 + d)], shade);
+        k.fill(
+            &[(x0, y0 + d), (x0 + d, y0 + d), (x0 + d, y1), (x0, y1)],
+            shade,
+        );
+    }
+    k.outline(&[(x0, y0), (x1, y0), (x1, y1), (x0, y1)], true, 1.0, INK);
+    k.drag((72.0, 44.0), (92.0, 58.0));
+    k.tool_cursor((94.0, 60.0), Tool::InnerShadow);
 }
 
 fn stripes(k: &K) {

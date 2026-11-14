@@ -82,7 +82,12 @@ move horizontal or vertical. One undo step for the drag, and the pointer
 is the move cursor over the line. A blend whose end lives only in the
 effect (no end object) has no line to drag
 (`effect_line_tests::the_blend_line_moves_the_whole_blend`).
-Not yet on the canvas: dropping colours on the squares.
+A colour dragged from a palette and dropped on the start or end square
+becomes the fill of that end's object, one undo step, the selection
+staying; the squares take it wherever they lie on the object, as the
+middle of a letter may be outside its outline (#965,
+`text_effect_tests::a_colour_dropped_on_a_blend_s_square_fills_that_end`).
+An end that lives only in the effect has no object to fill.
 
 The steps lie between the two objects in the stacking order: with the
 end object below the start one (a front object blended to one behind
@@ -90,6 +95,11 @@ it, the usual way to build depth), they are drawn below the start, the
 step nearest the end lowest; with the end above, above the start. The
 blend follows when either object is reordered
 (`blend_link::tests::the_steps_lie_between_the_two_objects`).
+The order is read inside groups and clip frames too, so the steps stay
+behind the front object after the blend is grouped, recoloured as a
+group or placed inside a frame
+(`blend_link::tests::a_grouped_blend_keeps_its_steps_behind_the_front_object`,
+#2023, #2120).
 
 ## Start and end objects
 
@@ -196,15 +206,23 @@ curve and the range the `.cdr` files' blends use, #1192;
   start; Counterclockwise: falling), `t'` of the colour acceleration of
   the way.
 - Rotation: each step turns about its own centre by `rotation * t'`.
-  With Loop its centre also leaves the straight way: the start's centre
-  `A` turned by `rotation * t'` about the middle `M` of the two centres
-  and the end's `B` turned by `rotation * (t' - 1)` about it, mixed `t'`
-  of the way (`(1 - t') R(rotation t') (A - M) + t' R(rotation (t' - 1))
-  (B - M) + M`), so the steps leave the start and reach the end along a
-  curve to the right of the way for a positive rotation: a half circle
-  at 180 degrees, a curl through the middle at 360 (#1192, the pictures
-  of the `.cdr` files; turned about the middle alone, the last steps
-  landed far from the end; `live::tests::a_looped_blend_curves_from_one_end_to_the_other`).
+  With Loop the whole blend turns instead about the middle `M` of the
+  two objects' centres: step `k` is the step of the straight blend from
+  the start to the end turned back by the whole rotation about `M`
+  (morphed `t` of the way, or `t'` with Apply to sizing), moved to `t'`
+  of that straight way and turned by `rotation * t'` about `M`. Its
+  centre runs on the curve `(1 - t') R(rotation t') (A - M) +
+  t' R(rotation (t' - 1)) (B - M) + M` from the start's centre `A` to the
+  end's `B`, to the right of the way for a positive rotation (a half
+  circle at 180 degrees, a curl through the middle at 360; #1192), and
+  the outlines between two different shapes twist and fold into the end
+  as the previews of the `.cdr` files do, the fan inside the start for a
+  positive object acceleration too. Each step turned about its own
+  centre and put on that curve gave smooth bands, and with an object
+  acceleration the steps packed by the start hardly turned (#1576,
+  `live::tests::a_looped_blend_turns_the_straight_blend_about_the_middle`).
+  Two copies of one outline stay copies: each step turns by
+  `rotation * (t' - t)`.
 - Along a path: step `k` is placed at arc length `t' * L` on the path,
   oriented to the tangent when "rotate all objects" is on.
 

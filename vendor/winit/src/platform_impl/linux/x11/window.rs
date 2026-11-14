@@ -1475,12 +1475,19 @@ impl UnownedWindow {
                 }
             },
             Cursor::Custom(RootCustomCursor { inner: PlatformCustomCursor::X(cursor) }) => {
+                let old_cursor = replace(
+                    &mut *self.selected_cursor.lock().unwrap(),
+                    SelectedCursor::Custom(cursor.clone()),
+                );
+
+                // TraceDraw: the cursor shown already is not sent again
+                // (egui-winit sets a bitmap cursor every frame, #2557).
                 #[allow(clippy::mutex_atomic)]
-                if *self.cursor_visible.lock().unwrap() {
+                if SelectedCursor::Custom(cursor.clone()) != old_cursor
+                    && *self.cursor_visible.lock().unwrap()
+                {
                     self.xconn.set_custom_cursor(self.xwindow, &cursor);
                 }
-
-                *self.selected_cursor.lock().unwrap() = SelectedCursor::Custom(cursor);
             },
             #[cfg(wayland_platform)]
             Cursor::Custom(RootCustomCursor { inner: PlatformCustomCursor::Wayland(_) }) => {

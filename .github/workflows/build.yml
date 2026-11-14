@@ -606,32 +606,10 @@ jobs:
       - name: Release notes
         shell: bash
         run: |
-          # The downloads first, with direct links: the release page lists
-          # only the first ten files by name and folds the rest, which hid
-          # the 64-bit Windows setup behind the 32-bit one (#1975).
-          tag="${RELEASE_TAG:-nightly}"
+          # The files are listed by the release page itself, below the
+          # notes; the notes hold the changes only.
           v="${RELEASE_TAG#v}"
-          [[ -n "$RELEASE_TAG" ]] || v="$(ls artifacts | sed -n 's/^tracedraw-\([0-9][^-]*\)-windows-x86_64-setup\.exe$/\1/p' | head -1)"
-          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}"
-          link() { [[ -e "artifacts/$2" ]] && printf '| %s | [%s](%s/%s) |\n' "$1" "$2" "$base" "$2"; true; }
-          {
-            echo "## Download"
-            echo
-            echo "| System | File |"
-            echo "|---|---|"
-            link "Windows 10 and 11, 64-bit (most computers)" "tracedraw-${v}-windows-x86_64-setup.exe"
-            link "Windows, 64-bit, portable" "tracedraw-${v}-windows-x86_64-portable.zip"
-            link "Windows 10, 32-bit" "tracedraw-${v}-windows-x86-setup.exe"
-            link "Windows 10, 32-bit, portable" "tracedraw-${v}-windows-x86-portable.zip"
-            link "macOS, Apple silicon" "tracedraw-${v}-macos-arm64.dmg"
-            link "macOS, Intel" "tracedraw-${v}-macos-x86_64.dmg"
-            link "Linux x86_64, AppImage" "tracedraw-${v}-linux-amd64.AppImage"
-            link "Linux x86_64, Debian and Ubuntu" "tracedraw_${v}_amd64.deb"
-            link "Linux arm64, AppImage" "tracedraw-${v}-linux-arm64.AppImage"
-            link "Linux arm64, Debian and Ubuntu" "tracedraw_${v}_arm64.deb"
-            link "Android (arm64)" "tracedraw-${v}-android-arm64-v8a-debug.apk"
-            echo
-          } > release-notes.md
+          : > release-notes.md
           if [[ -n "$RELEASE_TAG" ]]; then
             # The version's section of CHANGELOG.md ("## 0.3.0 (date)").
             echo "## Changes" >> release-notes.md

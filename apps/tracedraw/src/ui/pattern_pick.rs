@@ -234,7 +234,7 @@ pub fn pattern_name(p: &Pattern, index: usize) -> String {
                 ("h", &height_px.to_string()),
             ],
         ),
-        Pattern::TwoColor { tile, .. } => tile.name().to_string(),
+        Pattern::TwoColor { tile, .. } => crate::ui::dockers::pattern_tile_name(*tile),
     }
 }
 

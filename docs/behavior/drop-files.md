@@ -56,7 +56,11 @@ whole window; in the browser, which names no files while they are dragged,
 the place alone decides
 (`drop_files::tests::the_hint_says_what_a_drop_there_does`). A `.tdraw`
 over the drawing window is imported like a `.cdr`
-(`a_tdraw_dropped_on_a_drawing_is_imported_into_it`, #1142).
+(`a_tdraw_dropped_on_a_drawing_is_imported_into_it`, #1142). On Windows
+the frame shows only while a mouse button is held: a drag taken away
+without a drop could leave the files listed as hovered, and the frame
+then stayed over the window until TraceDraw was closed
+(`drop_files::drag_held`, #2350).
 
 ## Browser build
 

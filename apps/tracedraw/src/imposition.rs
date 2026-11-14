@@ -312,6 +312,14 @@ pub struct Options {
     /// marks: Print Preview's artwork position and Transform (#536, #595).
     pub page_offset: (f64, f64),
     pub page_stretch: (f64, f64),
+    /// Every page turned about its middle on the sheet, degrees
+    /// counter-clockwise (0 for none): Print Preview's Rotation.
+    pub page_rotation: f64,
+    /// A further turn of the page in each place of the sheet, degrees
+    /// counter-clockwise, by the place's number (0 the first, across the
+    /// rows; missing ones 0): Print Preview's Rotation for the page
+    /// chosen on the sheet, the same place on every sheet (#2587).
+    pub cell_rotation: Vec<f64>,
     /// On a fixed sheet the pages stretch to fill the room inside the
     /// margins, width and height each on its own (#591).
     pub stretch_fit: bool,
@@ -339,6 +347,8 @@ impl Default for Options {
             paper_margins: [0.0; 4],
             page_offset: (0.0, 0.0),
             page_stretch: (1.0, 1.0),
+            page_rotation: 0.0,
+            cell_rotation: Vec::new(),
             stretch_fit: false,
             booklet: Booklet::default(),
             marks: Marks::default(),
@@ -346,6 +356,15 @@ impl Default for Options {
             when: String::new(),
         }
     }
+}
+
+/// The start of the name of a page's clip frame on a sheet, before its
+/// place number (see [`cell_of`]).
+pub const CELL_NAME: &str = "cell ";
+
+/// The place on the sheet of a page's clip frame [`impose`] made.
+pub fn cell_of(s: &Shape) -> Option<usize> {
+    s.name.as_deref()?.strip_prefix(CELL_NAME)?.parse().ok()
 }
 
 /// Room around the pages for the marks, in mm (and the bleed beyond it).
@@ -507,6 +526,9 @@ pub fn plan(sizes: &[Size], o: &Options) -> Vec<SheetPlan> {
                 .iter()
                 .enumerate()
                 .map(|(n, page)| {
+                    let own = o.cell_rotation.get(n).map_or(0.0, |&t| ok(t, 0.0));
+                    let turn = (ok(o.page_rotation, 0.0) + own).to_radians();
+                    let (sin, cos) = turn.sin_cos();
                     let col = n as u32 % cols;
                     let col = if o.back_side { cols - 1 - col } else { col } as f64;
                     let row = (n as u32 / cols) as f64;
@@ -519,9 +541,19 @@ pub fn plan(sizes: &[Size], o: &Options) -> Vec<SheetPlan> {
                         + ox;
                     let cy = y_top - (row * step_y + inner_bleed + cell.height / 2.0) * sy + oy;
                     let (w, h) = (ps.width * sx * kx, ps.height * sy * ky);
-                    let trim = Rect::new(cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0);
-                    let transform = Affine::translate((trim.x0, trim.y0))
-                        * Affine::scale_non_uniform(sx * kx, sy * ky);
+                    // The page turned about its middle; its trim is the
+                    // box round the turned page.
+                    let (bw, bh) = (w * cos.abs() + h * sin.abs(), w * sin.abs() + h * cos.abs());
+                    let trim = Rect::new(cx - bw / 2.0, cy - bh / 2.0, cx + bw / 2.0, cy + bh / 2.0);
+                    let transform = if turn == 0.0 {
+                        Affine::translate((cx - w / 2.0, cy - h / 2.0))
+                            * Affine::scale_non_uniform(sx * kx, sy * ky)
+                    } else {
+                        Affine::translate((cx, cy))
+                            * Affine::rotate(turn)
+                            * Affine::translate((-w / 2.0, -h / 2.0))
+                            * Affine::scale_non_uniform(sx * kx, sy * ky)
+                    };
                     Cell {
                         page: *page,
                         transform,
@@ -806,6 +838,8 @@ pub fn page_marks(sizes: &[Size], names: &[String], o: &Options) -> Vec<Vec<Shap
         scale: 1.0,
         page_offset: (0.0, 0.0),
         page_stretch: (1.0, 1.0),
+        page_rotation: 0.0,
+        cell_rotation: Vec::new(),
         paper_margins: [0.0; 4],
         ..o.clone()
     };
@@ -855,7 +889,7 @@ pub fn impose(doc: &Document, o: &Options) -> Document {
     let total = plans.len();
     for (n, sheet) in plans.iter().enumerate() {
         let mut layer = Layer::new(out.ids_mut().layer(), "Sheet");
-        for cell in &sheet.cells {
+        for (ci, cell) in sheet.cells.iter().enumerate() {
             let Some(pi) = cell.page else {
                 continue;
             };
@@ -908,6 +942,8 @@ pub fn impose(doc: &Document, o: &Options) -> Document {
                 None,
             );
             clip.transform = cell.transform;
+            // Its place on the sheet, for Print Preview to choose it.
+            clip.name = Some(format!("{CELL_NAME}{ci}"));
             layer.shapes.push(clip);
         }
         layer.shapes.extend(marks(sheet, o, n, total, &names));
@@ -987,6 +1023,99 @@ mod tests {
             },
         );
         assert_eq!(fitted[0].size, Size::new(110.0, 110.0));
+    }
+
+    /// A page chosen on the sheet turns on its own (#2587): on a 2 x 2
+    /// sheet the top two pages upside down, the bottom two upright; the
+    /// same places turn on the next sheet, and each page's clip frame on
+    /// the imposed sheet names its place.
+    #[test]
+    fn a_place_on_the_sheet_turns_on_its_own() {
+        let page = Size::new(100.0, 140.0);
+        let o = Options {
+            layout: Layout::NUp { cols: 2, rows: 2 },
+            sheet: Some(Size::new(297.0, 420.0)),
+            cell_rotation: vec![180.0, 180.0],
+            ..Default::default()
+        };
+        let sheets = plan(&[page; 6], &o);
+        assert_eq!(sheets.len(), 2);
+        for sheet in &sheets {
+            for (n, c) in sheet
+                .cells
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| c.page.is_some())
+            {
+                // The page's origin: its top right corner when turned.
+                let at = c.transform * Point::new(0.0, 0.0);
+                let near = |a: f64, b: f64| (a - b).abs() < 1e-6;
+                if n < 2 {
+                    assert!(
+                        near(at.x, c.trim.x1) && near(at.y, c.trim.y1),
+                        "{n}: {at:?}"
+                    );
+                } else {
+                    assert!(
+                        near(at.x, c.trim.x0) && near(at.y, c.trim.y0),
+                        "{n}: {at:?}"
+                    );
+                }
+            }
+        }
+        let mut doc = Document::new("D", page);
+        for _ in 0..3 {
+            let mut p = doc.pages[0].clone();
+            p.id = doc.ids_mut().page();
+            doc.pages.push(p);
+        }
+        let sheet = impose(&doc, &o);
+        let places: Vec<Option<usize>> = sheet.pages[0].layers[0]
+            .shapes
+            .iter()
+            .filter(|s| matches!(s.kind, ShapeKind::ClipFrame { .. }))
+            .map(cell_of)
+            .collect();
+        assert_eq!(places, vec![Some(0), Some(1), Some(2), Some(3)]);
+    }
+
+    /// A turn of 90 degrees swaps the trim's width and height about the
+    /// same middle, and the page's corner lands where the turn puts it.
+    #[test]
+    fn pages_turn_about_their_middle() {
+        let page = Size::new(100.0, 50.0);
+        let base = Options {
+            sheet: Some(Size::new(210.0, 297.0)),
+            keep_size: true,
+            ..Default::default()
+        };
+        let before = plan(&[page], &base)[0].cells[0].clone();
+        let turned = plan(
+            &[page],
+            &Options {
+                page_rotation: 90.0,
+                ..base.clone()
+            },
+        )[0]
+        .cells[0]
+            .clone();
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        let (b, t) = (before.trim, turned.trim);
+        assert!(near(t.center().x, b.center().x) && near(t.center().y, b.center().y));
+        assert!(near(t.width(), b.height()) && near(t.height(), b.width()), "{t:?}");
+        // The page's lower right corner goes to the upper right.
+        let c = turned.transform * Point::new(page.width, 0.0);
+        assert!(near(c.x, t.x1) && near(c.y, t.y1), "{c:?} {t:?}");
+        let bad = plan(
+            &[page],
+            &Options {
+                page_rotation: f64::NAN,
+                ..base.clone()
+            },
+        )[0]
+        .cells[0]
+            .clone();
+        assert_eq!(bad.trim, before.trim);
     }
 
     /// Stretched to fill, the page takes the whole room inside the

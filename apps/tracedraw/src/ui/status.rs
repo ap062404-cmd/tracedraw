@@ -124,19 +124,22 @@ pub fn object_info(app: &App) -> String {
             let mut kind = match &s.kind {
                 ShapeKind::Path { .. } => tr("kind.curve"),
                 // A bitmap with its colour mode (#1254); a grayscale PNG
-                // is a grayscale picture (#1777).
+                // is a grayscale picture (#1777), an indexed one indexed
+                // (#2607), one marked Lab a Lab picture (#2605).
                 k @ ShapeKind::Bitmap { png, .. } => trf(
                     "status.bitmap_mode",
                     &[
                         ("k", &kind_name(k)),
                         (
                             "mode",
-                            &tr(if s.cmyk_bitmap {
-                                "convert_colors.cmyk"
-                            } else if crate::bitmap_fx::png_is_gray(png) {
-                                "convert_colors.gray"
-                            } else {
-                                "convert_colors.rgb"
+                            &tr(match crate::bitmap_fx::mode_of(s.cmyk_bitmap, png) {
+                                crate::bitmap_fx::ColorMode::Cmyk => "convert_colors.cmyk",
+                                crate::bitmap_fx::ColorMode::Grayscale => "convert_colors.gray",
+                                crate::bitmap_fx::ColorMode::Paletted => {
+                                    "dialog.convert_mode_paletted"
+                                }
+                                crate::bitmap_fx::ColorMode::Lab => "convert_colors.lab",
+                                crate::bitmap_fx::ColorMode::Rgb => "convert_colors.rgb",
                             }),
                         ),
                     ],
@@ -327,7 +330,11 @@ fn outline_text(app: &App, stroke: &Option<tracedraw_core::Stroke>) -> String {
                 let decimals = if u == crate::app::Units::Pixels { 2 } else { 3 };
                 format!("{:.*} {}", decimals, u.from_mm(s.width), u.short())
             };
-            format!("{}  {}", crate::app::color_description(s.color), width)
+            format!(
+                "{}  {}",
+                crate::app::color_description_in(app.doc(), s.color),
+                width
+            )
         }
     }
 }
@@ -415,12 +422,26 @@ pub fn status_bar(app: &mut App, ui: &mut Ui) {
     let several = shapes.len() > 1;
     let fill_mixed = several && !app.selection_fill_mix().is_empty();
     let stroke_mixed = several && !app.selection_stroke_mix().is_empty();
+    // The colours behind the swatches and whether each overprints, for the
+    // spot colour and overprint marks (#2455); a mixed selection has none.
+    let fill_marks = match &fill {
+        tracedraw_core::Fill::Solid(c) if doc && !fill_mixed => {
+            Some((*c, app.selection_overprint(true) == Some(true)))
+        }
+        _ => None,
+    };
+    let outline_marks = match &stroke {
+        Some(s) if doc && !stroke_mixed => {
+            Some((s.color, app.selection_overprint(false) == Some(true)))
+        }
+        _ => None,
+    };
     let (fill_text, fill_swatch, outline_label, outline_swatch) = if doc {
         (
             if fill_mixed {
                 tr("docker.mixed")
             } else {
-                crate::app::fill_description(&fill)
+                crate::app::fill_description_in(app.doc(), &fill)
             },
             if fill_mixed {
                 None
@@ -484,6 +505,11 @@ pub fn status_bar(app: &mut App, ui: &mut Ui) {
             .status_opens_options
             .as_ref()
             .is_some_and(|(s, _)| *s == app.status);
+    // A message (a file opened or saved, with its path) gives the tool
+    // hint its place back after a while (#1126).
+    if doc && !linked {
+        expire_status(app, ui.ctx());
+    }
     // Left field and object information.
     let (left, info) = if !doc {
         (tr("status.tool_hints"), tr("status.object_information"))
@@ -572,10 +598,11 @@ pub fn status_bar(app: &mut App, ui: &mut Ui) {
         Pos2::new(fill_x, row.min.y),
         Pos2::new(outline_x - 8.0, row.max.y),
     );
-    let fill_hit = Indicator {
+    let (fill_hit, fill_resp) = Indicator {
         id: "status_fill",
         icon: Tool::InteractiveFill,
         swatch: fill_swatch,
+        marks: fill_marks,
         text: &fill_text,
         tip: &tr("status.swatch_fill"),
     }
@@ -585,14 +612,20 @@ pub fn status_bar(app: &mut App, ui: &mut Ui) {
     if fill_hit && doc {
         app.open_edit_fill();
     }
+    // Dragging the fill onto an object copies it there, whatever it is:
+    // a colour, a fountain, a pattern. See docs/behavior/color-palettes.md.
+    if doc {
+        drag_fill(app, ui, &fill_resp, &fill, fill_swatch);
+    }
     let outline_part = Rect::from_min_max(
         Pos2::new(outline_x, row.min.y),
         Pos2::new(theme_btn.min.x - 8.0, row.max.y),
     );
-    let outline_hit = Indicator {
+    let (outline_hit, _) = Indicator {
         id: "status_outline",
         icon: Tool::OutlinePen,
         swatch: outline_swatch,
+        marks: outline_marks,
         text: &outline_label,
         tip: &tr("status.swatch_outline"),
     }
@@ -655,20 +688,71 @@ pub fn status_bar(app: &mut App, ui: &mut Ui) {
     }
 }
 
+/// Drag the fill shown in the bar onto an object (`App::drop_fill`).
+fn drag_fill(
+    app: &mut App,
+    ui: &Ui,
+    resp: &egui::Response,
+    fill: &tracedraw_core::Fill,
+    swatch: Option<Color32>,
+) {
+    if resp.drag_started_by(egui::PointerButton::Primary) {
+        app.fill_drag = Some(fill.clone());
+    }
+    if app.fill_drag.is_some() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        app.fill_drag = None;
+    }
+    let pos = ui.ctx().pointer_latest_pos();
+    if resp.dragged() {
+        if let (Some(_), Some(pos)) = (&app.fill_drag, pos) {
+            let ctx = ui.ctx();
+            let ok = app.fill_target(pos).is_some();
+            ctx.set_cursor_icon(if ok {
+                egui::CursorIcon::Copy
+            } else {
+                egui::CursorIcon::NoDrop
+            });
+            let painter = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Tooltip,
+                egui::Id::new("status_fill_drag_chip"),
+            ));
+            let r = Rect::from_min_size(pos + Vec2::new(12.0, 12.0), Vec2::splat(16.0));
+            painter.rect_filled(r.expand(1.0), 0.0, Color32::WHITE);
+            draw_swatch(&painter, r, swatch);
+            painter.rect_stroke(
+                r,
+                0.0,
+                egui::Stroke::new(1.0, Color32::from_gray(0x5A)),
+                egui::StrokeKind::Outside,
+            );
+            ctx.request_repaint();
+        }
+    }
+    if resp.drag_stopped() {
+        let dragged = app.fill_drag.take();
+        let on_part = pos.is_some_and(|p| resp.rect.contains(p));
+        if let (Some(f), Some(p), false) = (dragged, pos, on_part) {
+            app.drop_fill(f, p);
+        }
+    }
+}
+
 /// The fill or outline part: tool icon, swatch, description.
 struct Indicator<'a> {
     id: &'a str,
     icon: Tool,
     swatch: Option<Color32>,
+    /// The swatch's colour and whether it overprints, for its marks.
+    marks: Option<(tracedraw_core::Color, bool)>,
     text: &'a str,
     tip: &'a str,
 }
 
 impl Indicator<'_> {
     /// Draw it; true when double-clicked.
-    fn show(&self, ui: &mut Ui, painter: &egui::Painter, part: Rect) -> bool {
+    fn show(&self, ui: &mut Ui, painter: &egui::Painter, part: Rect) -> (bool, egui::Response) {
         let resp = ui
-            .interact(part, egui::Id::new(self.id), Sense::click())
+            .interact(part, egui::Id::new(self.id), Sense::click_and_drag())
             .rich_tip(self.tip);
         let cy = part.center().y;
         let icon_r = Rect::from_center_size(Pos2::new(part.min.x + 11.0, cy), Vec2::splat(20.0));
@@ -678,6 +762,9 @@ impl Indicator<'_> {
             Vec2::new(26.0, 25.0),
         );
         draw_swatch(painter, sw, self.swatch);
+        if let Some((c, overprint)) = self.marks {
+            crate::ui::palette::swatch_marks(painter, sw, c, overprint);
+        }
         let clip = Rect::from_min_max(Pos2::new(sw.max.x + 5.0, part.min.y), part.max);
         let g = elided(painter, self.text.to_owned(), part.max.x - sw.max.x - 5.0);
         painter.with_clip_rect(clip).galley(
@@ -685,7 +772,7 @@ impl Indicator<'_> {
             g,
             Tokens::text(),
         );
-        resp.double_clicked()
+        (resp.double_clicked(), resp)
     }
 
     /// The width of the part without its text: icon, swatch and gaps.
@@ -702,6 +789,38 @@ impl Indicator<'_> {
             .size()
             .x;
         Self::MIN_W + w.ceil() + 2.0
+    }
+}
+
+/// How long a status message stays before the tool hint has the field
+/// to itself again, seconds.
+pub const STATUS_SECS: f64 = 12.0;
+
+/// Clear the status message once it has been shown for [`STATUS_SECS`]:
+/// a message such as "Saved" with a long file path stayed until the next
+/// one and squeezed the tool hint after it off the bar (#1126). A new
+/// message starts its own time, and so does the same text set again
+/// after it went.
+fn expire_status(app: &mut App, ctx: &egui::Context) {
+    let id = egui::Id::new("status_message_since");
+    let now = ctx.input(|i| i.time);
+    if app.status.is_empty() {
+        ctx.data_mut(|d| d.remove::<(String, f64)>(id));
+        return;
+    }
+    let since = ctx.data_mut(|d| {
+        let kept = d.get_temp_mut_or_insert_with(id, || (app.status.clone(), now));
+        if kept.0 != app.status || now < kept.1 {
+            *kept = (app.status.clone(), now);
+        }
+        kept.1
+    });
+    let left = STATUS_SECS - (now - since);
+    if left <= 0.0 {
+        app.status.clear();
+        ctx.data_mut(|d| d.remove::<(String, f64)>(id));
+    } else {
+        ctx.request_repaint_after(std::time::Duration::from_secs_f64(left));
     }
 }
 
@@ -867,6 +986,96 @@ mod tests {
         app.status = "Saved".into();
         has_tip(&mut app, 3000.0);
         assert!(!has_tip(&mut app, 3000.0));
+    }
+
+    /// A status message, such as "Saved" with a long file path, gives the
+    /// tool hint its place back after a while instead of staying until the
+    /// next message (#1126). The same message set again shows again.
+    #[test]
+    fn a_status_message_goes_after_a_while() {
+        let ctx = crate::theme::ui_context();
+        let mut app = App::headless();
+        app.show_welcome = false;
+        app.settings.status_info = StatusInfo::ToolHints;
+        let run = |app: &mut App, time: f64| {
+            let mut out = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 60.0))),
+                    time: Some(time),
+                    ..Default::default()
+                },
+                |ui| status_bar(app, ui),
+            );
+            out.textures_delta.clear();
+        };
+        let saved = "Saved /home/someone/a/long/folder/drawing.tdraw".to_string();
+        app.status = saved.clone();
+        run(&mut app, 100.0);
+        run(&mut app, 100.0 + STATUS_SECS - 1.0);
+        assert_eq!(app.status, saved, "still shown");
+        run(&mut app, 100.0 + STATUS_SECS + 0.5);
+        assert!(app.status.is_empty(), "gone after a while");
+        // Saved again: shown again, for its own while.
+        app.status = saved.clone();
+        run(&mut app, 200.0);
+        run(&mut app, 200.0 + STATUS_SECS - 1.0);
+        assert_eq!(app.status, saved);
+        // A new message starts its own time.
+        app.status = "Opened".into();
+        run(&mut app, 200.0 + STATUS_SECS + 0.5);
+        assert_eq!(app.status, "Opened");
+        run(&mut app, 200.0 + 2.0 * STATUS_SECS + 1.0);
+        assert!(app.status.is_empty());
+    }
+
+    /// The status bar's fill and outline swatches carry the spot colour's
+    /// dot and, while the selection overprints, the ring (#2455).
+    #[test]
+    fn the_status_swatches_carry_the_spot_and_overprint_marks() {
+        let ctx = crate::theme::ui_context();
+        let mut app = App::headless();
+        app.show_welcome = false;
+        let circles = |app: &mut App| {
+            let mut out = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 60.0))),
+                    ..Default::default()
+                },
+                |ui| status_bar(app, ui),
+            );
+            out.textures_delta.clear();
+            out.shapes
+                .iter()
+                .filter(|s| matches!(s.shape, egui::Shape::Circle(_)))
+                .count()
+        };
+        let id = app
+            .new_shape(ShapeKind::Ellipse {
+                rect: PRect::new(0.0, 0.0, 20.0, 20.0),
+                arc: None,
+            })
+            .expect("ellipse");
+        app.select(vec![id]);
+        app.apply_fill(tracedraw_core::Fill::Solid(
+            tracedraw_core::Color::cmyk_pct(0.0, 100.0, 100.0, 0.0),
+        ));
+        let plain = circles(&mut app);
+        // A spot fill: its dot.
+        let gold = crate::palette::spot_color(
+            "Gold 871",
+            tracedraw_core::Color::cmyk_pct(0.0, 20.0, 80.0, 10.0),
+        );
+        app.apply_fill(tracedraw_core::Fill::Solid(gold));
+        assert_eq!(circles(&mut app), plain + 1, "the dot");
+        // Overprinting too: the ring of two circles beside the dot.
+        app.set_overprint(true, true);
+        assert_eq!(circles(&mut app), plain + 3, "the dot and the ring");
+        // The outline overprints as well, adding its own ring.
+        app.set_overprint(false, true);
+        assert_eq!(circles(&mut app), plain + 5, "both rings");
+        // Nothing selected: the defaults' swatches, with no marks.
+        app.select(Vec::new());
+        assert_eq!(circles(&mut app), plain);
     }
 
     #[test]

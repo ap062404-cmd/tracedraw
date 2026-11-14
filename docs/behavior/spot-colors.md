@@ -19,6 +19,31 @@ standing for the new colour (in process inks); names are unique. The
 "..." menu's Add to Custom Spot Colors does the same with the name typed,
 or with the colour's `#rrggbb` code when none is (see `color-docker.md`).
 
+An ink's name in the list is a field: typing over it and pressing Enter,
+or leaving the field, renames the ink in one undo step; an empty name or
+one another ink has changes nothing. Objects and swatches refer to the
+ink by its number, so they all take the new name, as do its separation
+in PDF, EPS and PostScript and the plate it prints on (#2187,
+`ui::color_docker::tests::a_spot_ink_is_renamed`). A spot colour's
+swatch, in the document palette and elsewhere, is named by its ink, and
+the status bar names a spot fill or outline by its ink and tint (#2186).
+
+## Swatch marks (#2321, #2455)
+
+A swatch tells a spot colour from a process colour by a small dot in its
+lower right corner, and an overprinting one by a small ring in its lower
+left corner; the dot and the ring are black on a light colour and white
+on a dark one, and a swatch under 6 px has none.
+
+- The dot (`ui::palette::spot_mark`) is on the palette bars, in the
+  Palette Editor, on the fill and outline swatches of the status bar and
+  on the fill-over-outline swatch of the Colour panel.
+- The ring (`ui::palette::overprint_mark`) is on the fill and outline
+  swatches of the status bar and of the Colour panel while every painted
+  object of the selection overprints that fill or outline (Overprint fill
+  and Overprint outline, `App::selection_overprint`). Palette swatches
+  have none: overprint belongs to an object, not to a colour.
+
 ## Colour books
 
 A palette file can be a colour book of spot inks: in an `.ase` palette,
@@ -75,3 +100,6 @@ is that name's ink.
 - `ui::dialogs::tests::palette_entries_turn_into_spot_colours_and_back`
 - `pdf::tests::overprinting_objects_get_overprint_graphics_states` (io)
 - `export::tests::a_selection_exported_alone_keeps_its_spot_inks`
+- `ui::palette::tests::swatches_carry_the_spot_and_overprint_marks`
+- `ui::palette::tests::the_overprint_ring_and_the_spot_dot_keep_apart`
+- `ui::status::tests::the_status_swatches_carry_the_spot_and_overprint_marks`

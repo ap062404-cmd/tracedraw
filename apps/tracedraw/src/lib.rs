@@ -17,6 +17,7 @@
 
 mod ai;
 mod ai_image;
+mod ai_retry;
 mod anchors;
 #[cfg(target_os = "android")]
 mod android;
@@ -76,6 +77,7 @@ mod export;
 mod export_assets;
 mod extrude_tool;
 mod eyedropper;
+mod file_hold;
 mod file_presence;
 mod files;
 mod fill_page;
@@ -91,6 +93,8 @@ mod fx;
 mod github;
 #[cfg(not(target_arch = "wasm32"))]
 mod gpu;
+#[cfg(not(target_arch = "wasm32"))]
+mod gpu_fx;
 mod gradient_presets;
 mod grammar;
 mod guides;
@@ -102,6 +106,7 @@ mod i18n;
 mod image_dpi;
 mod import_place;
 mod imposition;
+mod object_imposition;
 #[cfg(test)]
 mod input_method_tests;
 #[cfg(not(target_arch = "wasm32"))]
@@ -135,6 +140,7 @@ mod ops;
 mod ops2;
 mod package;
 mod page_drop;
+mod page_names;
 mod painterly_tool;
 mod palette;
 mod palm;
@@ -164,10 +170,13 @@ mod select_similar;
 mod settings;
 mod shadow_tool;
 mod shape_tool;
+#[cfg(test)]
+mod shaping_tests;
 mod shelf;
 mod shortcuts;
 mod snap;
 mod snap_points;
+mod soft_canvas;
 mod soft_keyboard;
 mod spell;
 #[cfg(windows)]
@@ -224,17 +233,28 @@ mod variable_outline;
 mod vector_mosaic;
 mod view;
 mod view_motion;
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))]
+mod wayland_copy;
 #[cfg(target_arch = "wasm32")]
 mod web;
 #[cfg(any(target_arch = "wasm32", test))]
 mod web_page;
+#[cfg(windows)]
+mod win_clipboard;
 #[cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))]
 mod x11_clipboard;
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))]
+mod x11_copy;
 // The pen pressure helper of the patched winit copy, with its tests
 // (vendor/README.md), so that the gate runs them.
 #[cfg(all(test, not(target_arch = "wasm32")))]
 #[path = "../../../vendor/winit/src/pen_pressure.rs"]
 mod winit_pen_pressure;
+// The size bounds of the patched winit copy on Windows, with their tests
+// (vendor/README.md, #2487).
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "../../../vendor/winit/src/size_bounds.rs"]
+mod winit_size_bounds;
 // The pen pressure of the patched eframe's web layer, with its tests
 // (vendor/README.md, #1410), so that the gate runs them.
 #[cfg(test)]
@@ -270,6 +290,11 @@ mod winit_tablet_tool;
 #[allow(dead_code)]
 #[path = "../../../vendor/winit/src/frame_input.rs"]
 mod winit_frame_input;
+// A mouse's buttons, wheel and hover on Android, of the same copy
+// (#2152, #2161).
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "../../../vendor/winit/src/android_mouse.rs"]
+mod winit_android_mouse;
 mod workspace_file;
 
 /// The desktop program: the window, with the command line's files and
@@ -476,7 +501,7 @@ pub fn run() -> eframe::Result<()> {
                 } else {
                     Shell::new(cc, open_path)
                 };
-                shell.handed_over = Some(handed_over);
+                shell.handed_over = Some(instance::Inbox::new(handed_over));
                 Ok(Box::new(shell))
             }),
         )
@@ -547,7 +572,7 @@ struct Shell {
     open: Option<std::path::PathBuf>,
     /// Files later starts handed over (see instance.rs).
     #[cfg(not(target_arch = "wasm32"))]
-    handed_over: Option<std::sync::mpsc::Receiver<Vec<std::path::PathBuf>>>,
+    handed_over: Option<instance::Inbox>,
     /// Frames paced on a software adapter (#616).
     #[cfg(not(target_arch = "wasm32"))]
     pacer: gpu::Pacer,
@@ -870,10 +895,26 @@ impl eframe::App for Shell {
         if let Some(app) = self.app.as_ref() {
             ui::screen_margins::apply(ctx, &app.settings, raw_input);
         }
-        // Shift, Ctrl and Alt held from the toolbar by a finger (#1499).
-        if let Some(app) = self.app.as_ref() {
+        // Shift, Ctrl and Alt held from the keys on the drawing by a
+        // finger, tapped (#1499) or held down while another finger draws
+        // (#2362).
+        if let Some(app) = self.app.as_mut() {
+            touch_modifiers::fingers_on_keys(app, raw_input);
             app.touch_mods.apply(ctx, raw_input);
         }
+    }
+
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Files a later start handed over bring the window up, minimized
+        // too: a minimized window runs this and no ui (#2129).
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(inbox) = &mut self.handed_over {
+            if instance::bring_up_for_handed_over(ctx, inbox) {
+                ctx.request_repaint();
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = ctx;
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -972,8 +1013,8 @@ impl eframe::App for Shell {
         app.take_handed_pastes();
         // Files a later start handed over (one try_recv when none came).
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(rx) = &self.handed_over {
-            if instance::open_handed_over(app, ui.ctx(), rx) {
+        if let Some(inbox) = &mut self.handed_over {
+            if instance::take_handed_over(app, ui.ctx(), inbox) {
                 ui.ctx().request_repaint();
             }
         }

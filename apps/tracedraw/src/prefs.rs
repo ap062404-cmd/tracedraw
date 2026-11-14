@@ -252,6 +252,10 @@ pub struct FormatPrefs {
     /// PDF and AI files: text read in as curves from the fonts the file
     /// embeds (else as editable text, #386).
     pub pdf_text_as_curves: bool,
+    /// PDF and AI files read as text: lines one under another in the same
+    /// font come in as paragraph text frames, linked where the text goes
+    /// on in the next column or page (#2323).
+    pub pdf_text_paragraphs: bool,
     /// Ask how to read a PDF's text each time one is opened or imported.
     pub pdf_ask_text: bool,
     /// PDF and AI files: pictures larger than 80 megapixels come in
@@ -288,6 +292,7 @@ impl Default for FormatPrefs {
             save_new_as_cdr: false,
             skip_export_dialog: false,
             pdf_text_as_curves: false,
+            pdf_text_paragraphs: true,
             pdf_ask_text: true,
             pdf_reduce_pictures: false,
             pdf_as_picture: false,
@@ -522,6 +527,14 @@ pub struct ExportPreset {
     /// JPEG and TIFF colour mode (0 RGB, 1 CMYK, 2 Grayscale; #1763);
     /// presets saved before have none and stay RGB.
     pub color_mode: usize,
+    /// PLT's choices (#2652): scale, origin at the page's middle,
+    /// units per inch, HPGL/2, one pen, curve resolution (mm).
+    pub plt_scale: f64,
+    pub plt_centre: bool,
+    pub plt_units: f64,
+    pub plt_hpgl2: bool,
+    pub plt_one_pen: bool,
+    pub plt_resolution: f64,
 }
 
 impl Default for ExportPreset {
@@ -562,6 +575,12 @@ impl ExportPreset {
             size_unit: st.size_unit,
             scale: st.scale,
             color_mode: st.color_mode,
+            plt_scale: st.plt_scale,
+            plt_centre: st.plt_centre,
+            plt_units: st.plt_units,
+            plt_hpgl2: st.plt_hpgl2,
+            plt_one_pen: st.plt_one_pen,
+            plt_resolution: st.plt_resolution,
         }
     }
 
@@ -595,8 +614,26 @@ impl ExportPreset {
         if self.color_mode < EXPORT_COLOR_MODES.len() {
             st.color_mode = self.color_mode;
         }
+        self.apply_plt(st);
         self.apply_size(st);
         st.preset = self.name.clone();
+    }
+
+    /// PLT's choices into the dialog, each brought into its range.
+    fn apply_plt(&self, st: &mut ExportState) {
+        let o = tracedraw_io::plt::PltOptions {
+            scale: self.plt_scale,
+            units_per_inch: self.plt_units,
+            curve_resolution: self.plt_resolution,
+            ..Default::default()
+        }
+        .sane();
+        st.plt_scale = o.scale;
+        st.plt_units = o.units_per_inch;
+        st.plt_resolution = o.curve_resolution;
+        st.plt_centre = self.plt_centre;
+        st.plt_hpgl2 = self.plt_hpgl2;
+        st.plt_one_pen = self.plt_one_pen;
     }
 
     /// The bitmap size's unit and scale into the dialog, when usable.
@@ -846,6 +883,10 @@ pub struct WarningPrefs {
     pub ask_missing_fonts: bool,
     /// Before an item is taken off the Shelf.
     pub shelf_remove: bool,
+    /// The hint to turn on hardware acceleration when the window is
+    /// drawn on the CPU and slow while a graphics card is idle
+    /// (`ui::gpu_hint`); desktop only.
+    pub hardware_acceleration: bool,
 }
 
 impl Default for WarningPrefs {
@@ -855,6 +896,7 @@ impl Default for WarningPrefs {
             missing_fonts: true,
             ask_missing_fonts: true,
             shelf_remove: true,
+            hardware_acceleration: true,
         }
     }
 }

@@ -56,9 +56,8 @@ over a control handle, a wave over a segment.
   adds a node in the middle of each segment that ends at them. Neighbouring
   nodes deleted together leave one curve fitted to the old outline, so the
   shape keeps its general form.
-- With nodes selected, <kbd>C</kbd> switches them between cusp and smooth,
-  <kbd>S</kbd> between smooth and symmetrical, and <kbd>Y</kbd> makes them
-  symmetrical.
+- With nodes selected, <kbd>C</kbd> makes them cusp, <kbd>S</kbd> smooth
+  and <kbd>Y</kbd> symmetrical.
 - With nodes selected, <kbd>Ctrl+C</kbd> copies the segments between them as
   new curves, <kbd>Ctrl+X</kbd> cuts them out, and <kbd>Ctrl+D</kbd>
   duplicates them.

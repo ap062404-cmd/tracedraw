@@ -19,7 +19,9 @@ use crate::window::Theme;
 
 use super::util;
 
-static WIN10_BUILD_VERSION: Lazy<Option<u32>> = Lazy::new(|| {
+// TraceDraw: also read where a window moved to another scaling goes
+// (event_loop.rs, `WM_DPICHANGED`, #2487).
+pub(super) static WIN10_BUILD_VERSION: Lazy<Option<u32>> = Lazy::new(|| {
     type RtlGetVersion = unsafe extern "system" fn(*mut OSVERSIONINFOW) -> NTSTATUS;
     let handle = get_function!("ntdll.dll", RtlGetVersion);
 

@@ -353,6 +353,62 @@ mod tests {
         assert!(app.update_card_hidden, "dismissed again: it stays");
     }
 
+    /// A real pointer click on Update now, in the whole window, reaches
+    /// the button (the card sits over everything else), with a drawing
+    /// open and on the Welcome Screen.
+    #[test]
+    fn a_click_on_update_now_reaches_the_button() {
+        for welcome in [false, true] {
+            let ctx = crate::theme::ui_context();
+            let mut app = App::headless();
+            app.show_welcome = welcome;
+            found(&mut app, release(true));
+            let run = |app: &mut App, events: Vec<egui::Event>| {
+                let input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1400.0, 900.0),
+                    )),
+                    events,
+                    ..Default::default()
+                };
+                let mut out = ctx.run_ui(input, |ui| crate::ui::root(app, ui));
+                out.textures_delta.clear();
+                out.shapes
+                    .iter()
+                    .filter_map(|s| match &s.shape {
+                        egui::Shape::Text(t) => {
+                            Some((t.galley.text().to_string(), t.visual_bounding_rect()))
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let mut texts = Vec::new();
+            for _ in 0..3 {
+                texts = run(&mut app, Vec::new());
+            }
+            let at = texts
+                .iter()
+                .find(|(t, _)| t == &tr("updates.update_now"))
+                .map(|(_, r)| r.center());
+            assert!(at.is_some(), "welcome={welcome}: the card shows Update now");
+            let at = at.unwrap_or_default();
+            let button = |pressed| egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            run(&mut app, vec![egui::Event::PointerMoved(at)]);
+            run(&mut app, vec![button(true)]);
+            run(&mut app, vec![button(false)]);
+            let started =
+                app.installer.get() != InstallState::Idle || matches!(app.dialog, Dialog::Updates);
+            assert!(started, "welcome={welcome}: the click reached Update now");
+        }
+    }
+
     /// The card draws in every state of an install, with and without the
     /// first-start question open, and Escape dismisses it.
     #[test]

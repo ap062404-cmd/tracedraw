@@ -51,13 +51,17 @@ alternar. Manter o ponteiro parado continua o efeito.
 
 ## Esfumar {#smudge}
 
-A ferramenta [[tool.smudge]] (<kbd>V</kbd>) suaviza um pouco o contorno e
-depois o borra, então ele é puxado sem dobras. **Pressão** (1 a 100%, 100% de
-início) define quanto.
+A ferramenta [[tool.smudge]] (<kbd>V</kbd>) leva junto com o ponteiro o
+contorno que está sob a ponta: um traço que cruza o contorno o estica em uma
+língua com cerca de metade da largura da ponta, cujos lados se unem
+suavemente ao resto do contorno, seja o traço rápido ou lento. **Pressão**
+(1 a 100%, 100% de início) define quanto o contorno acompanha.
 
 ## Tornar áspero {#roughen}
 
 A ferramenta [[tool.roughen]] (<kbd>E</kbd>) acrescenta pontas serrilhadas ao
 longo do contorno. **Frequência** (1 a 10 pontas a cada 10 mm, 5 de início)
 define quantas, e **Tamanho da ponta** (2 mm de início) a altura. As pontas são
-retas, então ficam afiadas.
+retas, então ficam afiadas. Passar de novo sobre o contorno num novo traço o
+deixa mais áspero; pontas que cruzam o contorno continuam preenchidas, sem
+frestas brancas entre elas.

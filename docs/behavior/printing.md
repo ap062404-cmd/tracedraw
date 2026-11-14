@@ -251,8 +251,23 @@ same function (`export::print_sheets`).
   `print_preview::tests::plates_split_the_sheet_by_ink`). Pictures follow
   the ticked inks pixel by pixel (#1659,
   `print_preview::tests::plates_split_pictures_by_ink`).
+  The arrows (and Page Up / Page Down) then page through each plate of
+  the sheet after it, one page per ticked ink as File > Print sends them,
+  the plate's name beside the sheet number: the sheet with the ticked
+  inks together, then Cyan, Magenta, Yellow, Black and each spot ink, in
+  grey or, with "Show one ink in its color", in the ink's colour; an
+  unticked ink has no page (#2379,
+  `print_preview::tests::separations_preview_a_page_per_plate`). Before,
+  the preview showed only the inks together, never a page per plate.
 - A plate shows the ink's coverage in grey, black = full ink, as the
-  separations print; registration colour shows on every plate.
+  separations print; registration colour shows on every plate. So cyan
+  ink ticked alone shows a pure cyan square black, which reads as black
+  ink on the cyan plate. "Show one ink in its color" (under the ink
+  boxes, off at first) shows one ink alone as the colour it prints, the
+  way several inks show: the cyan square cyan, what the ink does not
+  print paper white. It changes the preview only; the plate prints the
+  same (#1652,
+  `print_preview::tests::one_ink_alone_shows_in_its_colour_when_asked`).
 - Paper margins (left, right, top, bottom, mm, 0 at first) keep the
   paper's edges clear: the pages and their marks go in the middle of what
   is left, shrinking to fit inside it unless Keep size is on; a sheet
@@ -277,6 +292,12 @@ same function (`export::print_sheets`).
   a drag inside moves it; the stretch shows as x and y percentages
   there, typed or reset to 100 % (#595). The handles come before the
   margin lines, which come before moving.
+- Rotation (left panel, 0 at first, under Transform) turns every page
+  on the sheet about its middle by any angle from -360 to 360 degrees
+  counter-clockwise; the 90, 180 and 270 buttons add that turn. The
+  page's clip and marks follow it, the marks standing round the box that
+  holds the turned page, and Print prints it so
+  (`imposition::tests::pages_turn_about_their_middle`).
 - Stretch to fill (a fixed sheet): the pages stretch on each axis on
   their own to fill the room inside the paper margins (#591,
   `imposition::tests::pages_stretch_to_fill_and_follow_the_preview_transform`).

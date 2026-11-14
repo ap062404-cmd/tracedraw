@@ -45,10 +45,30 @@ pub fn shadow_image(shape: &Shape, dpi: f64) -> Option<(Rect, Pixmap)> {
         anti_alias: true,
         ..Paint::default()
     };
-    pm.fill_path(&sk, &paint, FillRule::Winding, Transform::identity(), None);
+    pm.fill_path(
+        &sk,
+        &paint,
+        silhouette_rule(shape),
+        Transform::identity(),
+        None,
+    );
     shade(&mut pm, sh, b, screen, zoom);
     let exact = Rect::new(area.x0, area.y1 - h / zoom, area.x0 + w / zoom, area.y1);
     Some((exact, pm))
+}
+
+/// The rule the silhouette of `shape` is filled by: the object's own,
+/// so a hole of the object is a hole of its shadow (#2216). Text is
+/// filled by the nonzero rule, as it is drawn, and so are groups and
+/// clip frames, whose objects overlap without making holes.
+fn silhouette_rule(shape: &Shape) -> FillRule {
+    use tracedraw_core::shaping::FillRule as Rule;
+    use tracedraw_core::ShapeKind;
+    match (&shape.kind, shape.fill_rule) {
+        (ShapeKind::Text { .. } | ShapeKind::Group { .. } | ShapeKind::ClipFrame { .. }, _)
+        | (_, Rule::NonZero) => FillRule::Winding,
+        (_, Rule::EvenOdd) => FillRule::EvenOdd,
+    }
 }
 
 fn to_sk_path(path: &BezPath) -> Option<tiny_skia::Path> {
@@ -231,6 +251,35 @@ mod tests {
         assert!((120..=135).contains(&mid.alpha()), "{}", mid.alpha());
         let edge = pm.pixel(1, pm.height() / 2).expect("pixel");
         assert!(edge.alpha() < 40, "{}", edge.alpha());
+    }
+
+    /// A ring (two circles the same way round in one curve, as Combine
+    /// makes it) casts a ring: the shadow's middle is clear (#2216). Set
+    /// to the nonzero rule the curve is a disc, and so is its shadow.
+    #[test]
+    fn the_shadow_of_a_ring_has_its_hole() {
+        use tracedraw_core::geometry::Circle;
+        use tracedraw_core::shaping::FillRule as Rule;
+        let mut path = Circle::new((20.0, 20.0), 10.0).to_path(0.01);
+        path.extend(Circle::new((20.0, 20.0), 5.0).to_path(0.01));
+        let mut s = square();
+        s.kind = ShapeKind::Path { path, closed: true };
+        s.shadow = Some(Shadow {
+            offset: Vec2::new(0.0, 0.0),
+            blur: 0.0,
+            opacity: 1.0,
+            ..Shadow::default()
+        });
+        for (rule, middle) in [(Rule::EvenOdd, 0), (Rule::NonZero, 255)] {
+            s.fill_rule = rule;
+            let (_, pm) = shadow_image(&s, 25.4).expect("image");
+            let mid = pm.pixel(pm.width() / 2, pm.height() / 2).expect("pixel");
+            assert_eq!(mid.alpha(), middle, "{rule:?}");
+            let ring = pm
+                .pixel(pm.width() / 2 + 7, pm.height() / 2)
+                .expect("pixel");
+            assert_eq!(ring.alpha(), 255, "{rule:?}");
+        }
     }
 
     #[test]

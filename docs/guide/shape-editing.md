@@ -65,7 +65,7 @@ All of these are on the property bar, and on the menu you get by
 right-clicking a node:
 
 - **Join Nodes**: join two end nodes into one.
-- **Break Curve**: split the curve at the selected node.
+- **Break Curve**: split the curve at the selected node. A closed curve opens there, both new ends sitting on the node.
 - **Extend Curve to Close**: join two selected end nodes with a straight
   segment.
 - **Close Curve** and **Reverse Direction**.

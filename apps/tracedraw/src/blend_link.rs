@@ -45,19 +45,40 @@ fn with_blend(effects: &[Effect], b: Option<Effect>) -> Vec<Effect> {
 }
 
 impl App {
-    /// Whether `a` is drawn below `b` on the page (an earlier layer, or
-    /// earlier in the same layer). False when either is not a top-level
-    /// object of the page.
+    /// Whether `a` is drawn below `b` on the page: an earlier layer, or
+    /// earlier in the order the page is painted, at any depth (inside
+    /// groups and clip frames too, the frame before its contents). False
+    /// when either is not on the page. Only top-level objects counted
+    /// before, so a blend that was grouped or placed in a frame had its
+    /// steps moved in front of its start object at the next change of
+    /// the drawing (#2023, #2120).
     pub(crate) fn stacked_below(&self, a: ShapeId, b: ShapeId) -> bool {
-        let layers = self.page_layers();
-        let place = |id: ShapeId| {
-            layers
-                .iter()
-                .enumerate()
-                .find_map(|(li, l)| l.shapes.iter().position(|s| s.id == id).map(|i| (li, i)))
-        };
-        match (place(a), place(b)) {
-            (Some(pa), Some(pb)) => pa < pb,
+        fn walk(s: &Shape, a: ShapeId, b: ShapeId, n: &mut usize, at: &mut [Option<usize>; 2]) {
+            if s.id == a {
+                at[0] = Some(*n);
+            }
+            if s.id == b {
+                at[1] = Some(*n);
+            }
+            *n += 1;
+            match &s.kind {
+                ShapeKind::Group { children } => children.iter().for_each(|c| walk(c, a, b, n, at)),
+                ShapeKind::ClipFrame { frame, contents } => {
+                    walk(frame, a, b, n, at);
+                    contents.iter().for_each(|c| walk(c, a, b, n, at));
+                }
+                _ => {}
+            }
+        }
+        let mut n = 0;
+        let mut at = [None, None];
+        for l in self.page_layers() {
+            for s in &l.shapes {
+                walk(s, a, b, &mut n, &mut at);
+            }
+        }
+        match at {
+            [Some(pa), Some(pb)] => pa < pb,
             _ => false,
         }
     }
@@ -336,6 +357,63 @@ mod tests {
             (c.x - 55.0).abs() < 0.5 && (c.y - 45.0).abs() < 0.5,
             "{c:?}"
         );
+    }
+
+    /// A front object blended to one behind it, then grouped, recoloured
+    /// as a group and placed inside a frame: the steps stay below the
+    /// start object every time instead of jumping in front of it, where
+    /// the grouped blend looked all in the end's colour (#2023, #2120).
+    #[test]
+    fn a_grouped_blend_keeps_its_steps_behind_the_front_object() {
+        let mut app = App::headless();
+        let end = square(&mut app, 30.0, Color::rgb8(0, 160, 80));
+        let start = square(&mut app, 0.0, Color::rgb8(250, 220, 0));
+        app.select(vec![start, end]);
+        app.blend_selection(5, 0.0, 0.0, 0.0);
+        app.refresh_blends();
+        let ev = |app: &App| {
+            let s = app.doc().find_shape(start).cloned().expect("start");
+            tracedraw_core::live::evaluate(&s)
+        };
+        let below = |app: &App, what: &str| {
+            let e = ev(app);
+            assert!(e.above.is_empty(), "{what}: steps above the start");
+            assert_eq!(e.below.len(), 5, "{what}");
+        };
+        below(&app, "made");
+        app.select(vec![start, end]);
+        app.group_selection();
+        app.refresh_blends();
+        below(&app, "grouped");
+        let group = app.selection[0];
+        app.run(Command::SetFill {
+            shapes: vec![group],
+            fill: Fill::Solid(Color::rgb8(200, 0, 0)),
+        });
+        app.refresh_blends();
+        app.run(Command::SetFill {
+            shapes: vec![start],
+            fill: Fill::Solid(Color::rgb8(250, 220, 0)),
+        });
+        app.refresh_blends();
+        below(&app, "group recoloured");
+        app.run(Command::TransformShapes {
+            shapes: vec![group],
+            transform: Affine::translate((5.0, 5.0)),
+        });
+        app.refresh_blends();
+        below(&app, "group moved");
+        // The group placed inside a frame.
+        let frame = app
+            .new_shape(ShapeKind::Rect {
+                rect: Rect::new(-50.0, -50.0, 100.0, 100.0),
+                radius: 0.0,
+                corners: None,
+            })
+            .expect("frame");
+        app.place_inside(vec![group], frame);
+        app.refresh_blends();
+        below(&app, "inside a frame");
     }
 
     #[test]

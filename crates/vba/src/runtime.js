@@ -48,6 +48,38 @@ V.unsupported = function (what) {
   throw new VbError(445, "Not supported in TraceDraw: " + what);
 };
 
+// ShellExecute(hwnd, operation, file, parameters, directory, show) of a
+// declared Windows API function (#2165): a web or mail address goes to
+// the host (`__host_open`), which opens it with the system; it returns
+// what the function returns, above 32 when it opened and 2 (file not
+// found) for anything else, programs and files included, as a host
+// without the hook does.
+V.shellexecute = function (args) {
+  const file = args.length > 2 && args[2] !== undefined && args[2] !== null ? V.cstr(args[2]) : "";
+  if (!/^(https?:\/\/|mailto:)/i.test(file.trim())) return 2;
+  if (typeof G.__host_open !== "function") return 2;
+  return G.__host_open(file.trim()) ? 42 : 2;
+};
+
+// URLDownloadToFile(caller, url, file, reserved, callback) and
+// URLDownloadToCacheFile(caller, url, buffer, length, reserved, callback)
+// of declared Windows API functions (#2165): the host (`__host_download`)
+// fetches the address, into the file the macro names or into a file of
+// its own whose path goes back into the macro's buffer. They return 0
+// when the file was written and INET_E_DOWNLOAD_FAILURE when not, as
+// a host without the hook does.
+V.urldownload = function (args, cache) {
+  const failed = -2146697200;
+  const url = args.length > 1 ? V.cstr(V.deref(args[1])).trim() : "";
+  if (!url || typeof G.__host_download !== "function") return failed;
+  const target = cache ? "" : (args.length > 2 ? V.cstr(V.deref(args[2])) : "");
+  if (!cache && !target) return failed;
+  const path = String(G.__host_download(url, target));
+  if (!path) return failed;
+  if (cache && args.length > 2) V.wb(args[2], path);
+  return 0;
+};
+
 V.toVbError = function (e) {
   if (e instanceof VbError) return e;
   if (e === V.END) return e;
@@ -350,6 +382,9 @@ class VbForm extends VbObject {
     if (typeof G.__host_form_create === "function") G.__host_form_create(this);
   }
   __init() {
+    // A default instance runs Initialize once it is known by its name
+    // (`V.form`).
+    if (deferFormInit) return;
     if (typeof this.$userform_initialize === "function") this.$userform_initialize();
   }
   __ctl(l) {
@@ -368,7 +403,14 @@ class VbForm extends VbObject {
     const v = this.__getx(name);
     return args.length ? V.index(v, args) : v;
   }
-  __setx(name, v) {
+  __setx(name, v, isSet) {
+    // `Form.control = v` (also from the form's own code through its
+    // name): the control's default property (#2165).
+    const c = this.__ctl(name.toLowerCase());
+    if (!isSet && c !== null && typeof c === "object" && typeof c.__default === "string") {
+      c[c.__default] = v;
+      return;
+    }
     this.__props[name.toLowerCase()] = v;
     if (typeof G.__host_form_set === "function") G.__host_form_set(this, name, v);
   }
@@ -390,12 +432,29 @@ class VbForm extends VbObject {
 V.VbForm = VbForm;
 
 // The default instance of a form, made on first use.
+// Its Initialize runs after it is known by the form's name, so code there
+// that names the form (`CropForm.ctrlUnits.AddItem`) reaches this
+// instance instead of making another one, and that one another (#2165).
+let deferFormInit = false;
 V.form = function (name) {
   const l = name.toLowerCase();
   if (!formInstances[l]) {
     const C = V.forms[l];
     if (!C) V.raise(424, name);
-    formInstances[l] = new C();
+    let f;
+    deferFormInit = true;
+    try {
+      f = new C();
+    } finally {
+      deferFormInit = false;
+    }
+    formInstances[l] = f;
+    try {
+      f.__init();
+    } catch (e) {
+      if (formInstances[l] === f) delete formInstances[l];
+      throw e;
+    }
   }
   return formInstances[l];
 };
@@ -665,7 +724,8 @@ V.callf = function (f, args, named) {
 V.each = function (c) {
   if (c instanceof VArray) return c.items();
   if (c === null) V.raise(91);
-  if (c === undefined || typeof c !== "object") V.raise(424);
+  // Host collections may be functions too (called for their items).
+  if (c === undefined || (typeof c !== "object" && typeof c !== "function")) V.raise(424);
   if (Array.isArray(c)) return c.slice();
   if (c instanceof Collection) return c._items.map((x) => x.v);
   if (c instanceof Dictionary) return c.Keys().items();
@@ -1555,6 +1615,9 @@ B.dir = (path) => {
   if (typeof G.__host_dir !== "function") V.unsupported("Dir");
   return String(G.__host_dir(V.cstr(path)));
 };
+// LoadPicture(path): a picture for a control's Picture (the file is read
+// when the control gets it); without a path, no picture.
+B.loadpicture = (path) => (miss(path) || V.cstr(path) === "" ? null : { __picture: V.cstr(path) });
 B.doevents = () => 0;
 B.environ = () => "";
 B.eof = () => V.unsupported("EOF");

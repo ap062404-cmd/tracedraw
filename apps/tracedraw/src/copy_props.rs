@@ -172,6 +172,55 @@ pub fn fill_commands(fill: &Fill, src: &Shape, targets: &[Shape]) -> Vec<Command
     cmds
 }
 
+/// The commands that give `targets` the mesh fill `mesh` when it is new
+/// to them: its nodes, wherever the fill was made (over the page box of
+/// the object, or a box of its own), are fitted to each object's own
+/// box, the space its fill is drawn and edited in (#2506). An object
+/// with a mesh already takes `mesh` as it is (an edit of that mesh).
+/// None when no target needs fitting.
+pub fn new_mesh_commands(mesh: &tracedraw_core::Mesh, targets: &[Shape]) -> Vec<Command> {
+    let mut leaves = Vec::new();
+    for t in targets {
+        fill_leaves(t, &mut leaves);
+    }
+    let Some(from) = mesh_box(mesh) else {
+        return Vec::new();
+    };
+    if !leaves.iter().any(|l| !matches!(l.fill, Fill::Mesh(_))) {
+        return Vec::new();
+    }
+    let mut cmds = Vec::new();
+    for t in targets {
+        texts_changed(t, &|sp| sp.fill = None, &mut cmds);
+    }
+    for leaf in leaves {
+        let fitted = match (&leaf.fill, local_box(&leaf)) {
+            (Fill::Mesh(_), _) | (_, None) => mesh.clone(),
+            (_, Some(b)) => mesh.transformed(
+                Affine::translate((b.x0, b.y0))
+                    * Affine::scale_non_uniform(
+                        b.width() / from.width(),
+                        b.height() / from.height(),
+                    )
+                    * Affine::translate((-from.x0, -from.y0)),
+            ),
+        };
+        cmds.push(Command::SetFill {
+            shapes: vec![leaf.id],
+            fill: Fill::Mesh(fitted),
+        });
+    }
+    cmds
+}
+
+/// The box of a mesh's nodes.
+fn mesh_box(m: &tracedraw_core::Mesh) -> Option<Rect> {
+    let mut it = m.nodes.iter().map(|n| n.pos);
+    let first = it.next()?;
+    let b = it.fold(Rect::from_points(first, first), |r, p| r.union_pt(p));
+    (b.width() > 1e-9 && b.height() > 1e-9).then_some(b)
+}
+
 /// The commands that let the characters of the texts in `targets` drop
 /// the outlines they carry of their own, so the object's outline shows.
 pub fn clear_character_outlines(targets: &[Shape]) -> Vec<Command> {

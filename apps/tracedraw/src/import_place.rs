@@ -88,11 +88,21 @@ impl App {
             path: path.to_path_buf(),
             drag_from: None,
         });
-        let name = path
+        if let Some(tag) = self.import_placement_tag() {
+            self.status = tag;
+        }
+    }
+
+    /// What the pointer's tag and the status line say while an import
+    /// waits for its place: the file's name and how to place it.
+    pub fn import_placement_tag(&self) -> Option<String> {
+        let placing = self.import_placing.as_ref()?;
+        let name = placing
+            .path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
-        self.status = crate::i18n::trf("status.import_place", &[("name", &name)]);
+        Some(crate::i18n::trf("status.import_place", &[("name", &name)]))
     }
 
     /// Esc or a right click: nothing comes in.

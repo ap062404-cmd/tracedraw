@@ -182,6 +182,17 @@ impl NewDocSettings {
                 }
             }
         }
+        // The master page's desktop layer: objects put on it, beside the
+        // pages or on them, show and can be picked from every page
+        // (#1161, #1775). New objects still go to the page's own layer.
+        let id = doc.ids_mut().layer();
+        let mut desktop = tracedraw_core::Layer::master(
+            id,
+            crate::i18n::tr("docker.desktop_layer"),
+            tracedraw_core::MasterScope::All,
+        );
+        desktop.desktop = true;
+        doc.master.push(desktop);
         let m = &mut doc.metadata;
         m.resolution_dpi = self.values.dpi;
         m.rgb_profile = self.rgb_profile.clone();

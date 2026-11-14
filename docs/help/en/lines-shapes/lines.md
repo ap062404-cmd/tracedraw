@@ -25,6 +25,10 @@ To draw a straight line with this tool, click where the line starts and
 click again where it ends. Hold <kbd>Ctrl</kbd> to keep the line to steps of
 15 degrees. <kbd>Esc</kbd> drops the first click.
 
+To draw a line of several straight segments, click where it starts, then
+double-click at each corner, and click once where it ends. <kbd>Space</kbd>,
+<kbd>Enter</kbd> or <kbd>Esc</kbd> ends it at the last corner.
+
 With a graphics tablet, the pen's pressure sets the width of the line along
 it; see [Drawing with a graphics tablet](pen-pressure.md).
 
@@ -60,6 +64,10 @@ time, and <kbd>Ctrl+Shift+Z</kbd> puts them back. A finished curve keeps these
 steps: undoing goes back to drawing it, with the tool chosen again and a line
 going on from the last node left, so you can undo node by node and draw on at
 once.
+
+<kbd>Space</kbd> ends the curve you are drawing with the Bezier, Pen,
+B-spline, Polyline or Freehand tool where the last node is, as a right click
+or <kbd>Enter</kbd> does, and changes to the Pick tool.
 
 <kbd>Backspace</kbd> or <kbd>Delete</kbd> while you draw with the Bezier, Pen,
 B-spline or Polyline tool removes the last node you placed, with its handles,

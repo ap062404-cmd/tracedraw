@@ -106,19 +106,25 @@ Preferences saved before are brought back to off once (upgrade 7,
 | BMP, PSD | resolution |
 | PDF | Export all text as curves (off at first: every text becomes filled outlines, so the file needs no fonts and cannot be searched; #1382, `export::tests::export_pdf_text_as_curves_holds_no_font`), standard (PDF 1.4, PDF/X-1a, PDF/X-3, PDF/X-4), bleed, output condition for PDF/X; the author, subject and keywords come from the drawing's properties (File > Export as PDF has bookmarks and protection, see `publish-to-pdf.md`) |
 | AI | Compatibility: PDF-compatible (the default) or Illustrator 8 (EPS-based); see "AI files" below (#1728) |
-| SVG, EPS, DXF, HTML, EMF, WMF, PLT | none |
+| PLT | Scale (100 %), Plotter origin (bottom left of page or centre of page), Plotter units per inch (1016), Curve resolution (0.02 mm), HPGL/2 pen colours and widths (on), One pen for every outline (off); see `plt.md`, "Export choices" (#2652) |
+| SVG, EPS, DXF, HTML, EMF, WMF | none |
 | PostScript (`.ps`), PRN (`.prn`) | none; every exported page in one file (All pages, else the current page), each page setting its size with `setpagedevice` and ending with `showpage` (Document Structuring Conventions 3.0); a `.prn` print file is the same PostScript, to send to a PostScript printer |
 
 - Bitmap formats show Size: a width and a height and their unit (px,
   mm, cm or in, kept with the other choices; #617). In pixels the size
-  is the page (or selection) size over 25.4 times the resolution,
-  rounded up, and typing a width or a height sets the resolution that
-  gives it, so a 32 x 32 pixel icon is typed rather than worked out. In
-  a length it is the printed size: typing a width or a height sets the
-  scale of the artwork (the resolution stays), from 1 % to 10000 % and
-  never past what 2400 dpi can draw; a button with the scale ("200 %")
-  shows when it is not 100 % and puts it back. Either way the other side
-  follows the page's proportions.
+  is the page (or selection) size over 25.4 times the resolution and
+  the scale, rounded up; in a length it is the printed size. Typing a
+  width or a height sets the scale of the artwork that gives it, the
+  resolution staying, so a 32 x 32 pixel icon is typed rather than
+  worked out: from 1 % to 10000 % and never past what 2400 dpi can draw;
+  a button with the scale ("200 %") shows when it is not 100 % and puts
+  it back. Either way the other side follows the page's proportions.
+  The resolution typed or picked (72, 96, 150, 300) leaves the size
+  shown: in pixels the scale makes up for it, so as many pixels come
+  out, recorded at the new resolution; in a length the printed size
+  stays and the pixels follow. A size typed in pixels set the
+  resolution, and a resolution changed the pixels (#2640,
+  `export::tests::the_export_resolution_and_size_change_one_at_a_time`).
 - Under the size: what comes out, "1240 x 1754 pixels, 150 dpi, sRGB"
   ("sRGB + alpha" with a transparent background, "CMYK" or "Grayscale"
   in those colour modes).
@@ -278,6 +284,10 @@ dialog's choices, and Export for Web and Office keep their own (#617,
 - The Format list shows each format as "EXT - Description (*.ext)": JPG,
   PDF, AI and PNG first, a separator, then every format in the order of
   its extension, then installed script filters.
+- Selected only sizes the file to what the selected objects draw,
+  their outlines included (also those of objects inside a group), so an
+  outline is never cut at the file's edge (#2290,
+  `export::tests::a_selection_exported_alone_keeps_its_whole_outline`).
 - Under the format's settings: Selected only and the export range; at
   the bottom, above OK and Cancel, "Do not show this dialog again" (see
   "Skipping the options").

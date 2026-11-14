@@ -83,11 +83,20 @@ never moves the pages before it
 
 ## `.cdr` files
 
-Facing pages are TraceDraw-only: they are not read from or written to
-`.cdr` files. The one note on a facing pages flag in `.cdr` files
-(version 21 `mcfg` byte 26, see `docs/cdr-format.md`) is an assumption
-from two templates that does not say which side the first page is on,
-so it is not taken for this setting and nothing is written for it.
+A `.cdr` book on facing pages (version 21 and later, `mcfg` byte 26,
+see `docs/cdr-format.md`) opens with Facing Pages on, in spreads. Its
+objects are measured from the spine of their spread, so each page's
+objects move half a page onto the page by the page's place in the
+spreads: pages take turns on the right and left of the spine. The file
+does not say which side the first page is on; of Start on Right side
+and Left side, the one that puts more of all the pages' objects on
+their pages is taken, and every page then goes by it, so an object a
+left page reaches across the spine stays at the spine. Each page took
+the side that put most of its own objects on it before, and the pages
+showed one by one: a book opened with pages mixed and no spreads
+(#1660, `parse::tests::a_book_on_facing_pages_opens_in_spreads`).
+Nothing is written for facing pages: a `.cdr` saved from TraceDraw has
+single pages, each object where it shows on its page.
 
 ## Not done
 

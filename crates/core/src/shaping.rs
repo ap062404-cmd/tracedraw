@@ -1153,10 +1153,188 @@ pub fn offset(path: &BezPath, d: f64) -> BezPath {
 /// Offset a closed path outward (positive) or inward (negative) by `d` mm,
 /// the corners turned as `join` says.
 pub fn offset_with(path: &BezPath, d: f64, join: Join) -> BezPath {
+    offset_filled(path, d, join, FillRule::EvenOdd)
+}
+
+/// Offset a closed path like [`offset_with`], its area read with `fill`:
+/// text and other outlines filled with the nonzero rule have contours
+/// that overlap (the strokes of a letter in many variable fonts), whose
+/// overlaps the even-odd rule would take for holes, each given a contour
+/// of its own (#2156).
+pub fn offset_filled(path: &BezPath, d: f64, join: Join, fill: FillRule) -> BezPath {
     if !d.is_finite() {
         return BezPath::new();
     }
-    fit_polygon_curves(&offset_polygon_with(path, d, join), FIT_TOL)
+    fit_polygon_curves(&offset_polygon_with(path, d, join, fill), fit_tolerance(d))
+}
+
+/// The area `path` fills read with `fill`, in square units of its
+/// coordinates: holes taken out, overlaps counted once. The curves are
+/// flattened finely for the size of the path, so a circle's area comes
+/// within a hundred-thousandth of pi r squared (#2599).
+pub fn filled_area(path: &BezPath, fill: FillRule) -> f64 {
+    use crate::geometry::Shape as _;
+    use i_overlay::float::simplify::SimplifyShape;
+    let b = path.bounding_box();
+    let size = b.width().hypot(b.height());
+    if !size.is_finite() || size <= 0.0 {
+        return 0.0;
+    }
+    let tol = (size * 1e-6).max(1e-9);
+    let mut rings: Vec<Vec<[f64; 2]>> = Vec::new();
+    let mut cur: Vec<[f64; 2]> = Vec::new();
+    kurbo::flatten(path.elements().iter().copied(), tol, &mut |el| match el {
+        PathEl::MoveTo(p) => {
+            if cur.len() >= 3 {
+                rings.push(std::mem::take(&mut cur));
+            } else {
+                cur.clear();
+            }
+            cur.push([p.x, p.y]);
+        }
+        PathEl::LineTo(p) => cur.push([p.x, p.y]),
+        _ => {}
+    });
+    if cur.len() >= 3 {
+        rings.push(cur);
+    }
+    let clean = rings.simplify_shape(match fill {
+        FillRule::EvenOdd => IFill::EvenOdd,
+        FillRule::NonZero => IFill::NonZero,
+    });
+    // Outer contours turn one way and holes the other once simplified.
+    clean
+        .iter()
+        .flatten()
+        .map(|r| ring_area(r))
+        .sum::<f64>()
+        .abs()
+}
+
+/// The closed band `d` mm (taken as positive) to each side of an open
+/// path's subpaths, with straight-cut ends, its corners `join`ed: the
+/// contour of an open curve, which runs round both sides of it and is
+/// closed across its ends, as the reference program draws it (#2577).
+/// Empty for a path with nothing to stroke.
+pub fn open_offset_band(path: &BezPath, d: f64, join: Join) -> BezPath {
+    use i_overlay::mesh::float::stroke::offset::StrokeOffset;
+    use i_overlay::mesh::float::style::{LineCap, LineJoin, StrokeStyle};
+    let d = d.abs();
+    if !d.is_finite() || d < 1e-9 {
+        return BezPath::new();
+    }
+    let lines: Vec<Vec<[f64; 2]>> = polylines(path, (d / 50.0).clamp(1e-4, 0.02))
+        .into_iter()
+        .map(|(pts, _)| pts.iter().map(|p| [p.x, p.y]).collect())
+        .collect();
+    if lines.is_empty() {
+        return BezPath::new();
+    }
+    let style = StrokeStyle::new(2.0 * d)
+        .line_join(match join {
+            Join::Miter => LineJoin::Miter(MITER_MIN),
+            Join::Round => LineJoin::Round(0.05),
+            Join::Bevel => LineJoin::Bevel,
+        })
+        .start_cap(LineCap::Butt)
+        .end_cap(LineCap::Butt);
+    fit_polygon_curves(&from_shapes(lines.stroke(style, false)), fit_tolerance(d))
+}
+
+/// How far the curves fitted to an offset by `d` mm may stray from it:
+/// [`FIT_TOL`], and no more than a tenth of the offset. A round corner
+/// of a small offset is an arc of that radius, and with the fixed
+/// tolerance an arc of a tenth of a millimetre or two was within reach of
+/// one or two straight lines, so a narrow round contour came out with its
+/// corners cut off straight, each a little differently (#2176).
+fn fit_tolerance(d: f64) -> f64 {
+    FIT_TOL.min(d.abs() / 10.0).max(1e-6)
+}
+
+/// The area `path` (read with `fill`) covers as it slides along `v`: the
+/// area itself, its copy moved by `v` and every place between, as a path
+/// read with the even-odd rule. Each contour is swept along its runs of
+/// edges facing `v`, and only within itself: a block shadow (#2156)
+/// joined the end of one
+/// letter to the start of the next. The curves of the outline and of its
+/// moved copy are kept.
+pub fn sweep(path: &BezPath, v: Vec2, fill: FillRule) -> BezPath {
+    use i_overlay::float::simplify::SimplifyShape;
+    if !(v.x.is_finite() && v.y.is_finite()) {
+        return BezPath::new();
+    }
+    let rule = match fill {
+        FillRule::EvenOdd => IFill::EvenOdd,
+        FillRule::NonZero => IFill::NonZero,
+    };
+    // Clean contours: no crossings, outer contours turning one way and
+    // holes the other, so the area winds once round every place in it and
+    // never the other way.
+    let clean = contours(path).simplify_shape(rule);
+    let Some(first) = clean.first().and_then(|s| s.first()) else {
+        return BezPath::new();
+    };
+    let turn = ring_area(first).signum();
+    if v.hypot() < 1e-9 || turn == 0.0 {
+        return recover_curves(&from_shapes(clean), &[path]);
+    }
+    let moved = |p: &[f64; 2]| [p[0] + v.x, p[1] + v.y];
+    let mut all: Vec<Vec<[f64; 2]>> = Vec::new();
+    for ring in clean.iter().flatten() {
+        all.push(ring.clone());
+        all.push(ring.iter().map(moved).collect());
+        // A place between the area and its copy is in the band an edge
+        // sweeps: the last edge the line back along `v` from it crosses
+        // faces `v`, so the edges facing away from `v` add nothing. The
+        // area lies on the left of an edge of a contour turning the
+        // positive way, on its right otherwise. An edge along `v` (to a
+        // millionth of a radian) sweeps no area: its band would only be
+        // a line lying on others, which the overlay took minutes over
+        // when many such edges lay end to end along a slanted side.
+        let n = ring.len();
+        let facing = |i: usize| {
+            let (a, b) = (ring[i], ring[(i + 1) % n]);
+            let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+            let across = turn * (dy * v.x - dx * v.y);
+            across > ALONG_V * dx.hypot(dy) * v.hypot()
+        };
+        let faces: Vec<bool> = (0..n).map(facing).collect();
+        // The edges facing `v` one after another sweep one band: their
+        // run goes one way across `v` all along, so the run and its copy
+        // bound a simple polygon. One band a run, not one a edge: with a
+        // long offset the bands of single edges all cross one another,
+        // and the overlay took minutes on a line of text.
+        let Some(start) = (0..n).find(|&i| faces[i] && !faces[(i + n - 1) % n]) else {
+            // Every edge or none faces `v` (only a degenerate contour).
+            for i in (0..n).filter(|&i| faces[i]) {
+                let (a, b) = (ring[i], ring[(i + 1) % n]);
+                all.push(wound(vec![a, b, moved(&b), moved(&a)], turn));
+            }
+            continue;
+        };
+        let mut k = 0;
+        while k < n {
+            let i = (start + k) % n;
+            if !faces[i] {
+                k += 1;
+                continue;
+            }
+            let mut run = vec![ring[i]];
+            while k < n && faces[(start + k) % n] {
+                run.push(ring[(start + k + 1) % n]);
+                k += 1;
+            }
+            let mut band = run.clone();
+            band.extend(run.iter().rev().map(moved));
+            all.push(wound(band, turn));
+        }
+    }
+    let empty: Vec<Vec<[f64; 2]>> = Vec::new();
+    // Every piece winds the same way, so the places any of them covers
+    // are those the nonzero rule fills.
+    let union = all.overlay(&empty, OverlayRule::Subject, IFill::NonZero);
+    let copy = crate::geometry::Affine::translate(v) * path.clone();
+    recover_curves(&from_shapes(union), &[path, &copy])
 }
 
 /// Offset a closed path like [`offset`], round corners, but keep the
@@ -1165,10 +1343,10 @@ pub fn offset_with(path: &BezPath, d: f64, join: Join) -> BezPath {
 /// it bounds can be read as a polygon without losing the outside of its
 /// curves (shape nesting needs a region that covers the grown outline).
 pub fn offset_polygon(path: &BezPath, d: f64) -> BezPath {
-    offset_polygon_with(path, d, Join::Round)
+    offset_polygon_with(path, d, Join::Round, FillRule::EvenOdd)
 }
 
-fn offset_polygon_with(path: &BezPath, d: f64, join: Join) -> BezPath {
+fn offset_polygon_with(path: &BezPath, d: f64, join: Join, fill: FillRule) -> BezPath {
     use i_overlay::float::simplify::SimplifyShape;
     use i_overlay::mesh::float::outline::offset::OutlineOffset;
     use i_overlay::mesh::float::style::{LineJoin, OutlineStyle};
@@ -1177,7 +1355,10 @@ fn offset_polygon_with(path: &BezPath, d: f64, join: Join) -> BezPath {
     }
     let subj = contours(path);
     // Simplify guarantees orientation (outer CCW, holes CW) and no self-intersections.
-    let clean = subj.simplify_shape(IFill::EvenOdd);
+    let clean = subj.simplify_shape(match fill {
+        FillRule::EvenOdd => IFill::EvenOdd,
+        FillRule::NonZero => IFill::NonZero,
+    });
     let style = OutlineStyle::new(d).line_join(match join {
         Join::Miter => LineJoin::Miter(MITER_MIN),
         Join::Round => LineJoin::Round(0.05),
@@ -1467,9 +1648,9 @@ pub fn calligraphic_band(path: &BezPath, width: f64, stretch: f64, nib_angle_deg
         lines.push(cur);
     }
     let ellipse = |c: Point| -> Vec<[f64; 2]> {
-        (0..24)
+        (0..48)
             .map(|i| {
-                let t = i as f64 / 24.0 * std::f64::consts::TAU;
+                let t = i as f64 / 48.0 * std::f64::consts::TAU;
                 let (x, y) = (a * t.cos(), b * t.sin());
                 [c.x + x * e1[0] + y * e2[0], c.y + x * e1[1] + y * e2[1]]
             })
@@ -1489,17 +1670,26 @@ pub fn calligraphic_band(path: &BezPath, width: f64, stretch: f64, nib_angle_deg
             }
             let n = [-d.y / len, d.x / len];
             // Support half-width of the ellipse along n.
-            let h = ((a * (n[0] * e1[0] + n[1] * e1[1])).powi(2)
-                + (b * (n[0] * e2[0] + n[1] * e2[1])).powi(2))
-            .sqrt();
+            let (ne1, ne2) = (n[0] * e1[0] + n[1] * e1[1], n[0] * e2[0] + n[1] * e2[1]);
+            let h = ((a * ne1).powi(2) + (b * ne2).powi(2)).sqrt();
             if h < 1e-9 {
                 continue;
             }
+            // The point of the nib that touches its support line: the
+            // band's edge runs through it, not through `n * h`. The two
+            // differ along the segment for a slanted flat nib (by up to
+            // half its width), which set each segment's band off from its
+            // neighbours' and the nibs at the joints: a stroke edged with
+            // steps and teeth (#2334).
+            let o = [
+                (a * a * ne1 * e1[0] + b * b * ne2 * e2[0]) / h,
+                (a * a * ne1 * e1[1] + b * b * ne2 * e2[1]) / h,
+            ];
             polys.push(vec![
-                [p.x + n[0] * h, p.y + n[1] * h],
-                [q.x + n[0] * h, q.y + n[1] * h],
-                [q.x - n[0] * h, q.y - n[1] * h],
-                [p.x - n[0] * h, p.y - n[1] * h],
+                [p.x + o[0], p.y + o[1]],
+                [q.x + o[0], q.y + o[1]],
+                [q.x - o[0], q.y - o[1]],
+                [p.x - o[0], p.y - o[1]],
             ]);
         }
     }
@@ -1645,17 +1835,21 @@ pub fn is_single_loop(path: &BezPath) -> bool {
 /// path widened by the reach `width_at` gives at its ends (left and right
 /// separately), joined with wedges at the corners; butt ends.
 pub fn variable_band(path: &BezPath, base: f64, nodes: &[crate::style::WidthNode]) -> BezPath {
-    variable_band_within(path, base, nodes, 0.05)
+    variable_band_within(path, base, nodes, 0.05, crate::style::LineCap::Butt)
 }
 
 /// [`variable_band`] with the path flattened to `tol` (mm): finer for a
 /// band that is kept as an object and fitted to curves, so the corners
-/// at the joins of the short lines stay small (#627).
+/// at the joins of the short lines stay small (#627). The ends of an
+/// open subpath take the outline's `cap`: a round cap is a half circle
+/// across the reach there, a square one a box half as deep as it is
+/// wide; a variable width kept them square before (#2390).
 pub fn variable_band_within(
     path: &BezPath,
     base: f64,
     nodes: &[crate::style::WidthNode],
     tol: f64,
+    cap: crate::style::LineCap,
 ) -> BezPath {
     let lines = polylines(path, tol.max(1e-4));
     let total: f64 = lines
@@ -1691,10 +1885,12 @@ pub fn variable_band_within(
         // `EASE_TOL` of the eased edge however far the reach changes: a
         // smoothstep from `0` to `dw` over a span bends at most
         // `6 dw / span^2`, and a piece `h` long strays `h^2 / 8` of that
-        // (#776).
+        // (#776). The monotone cubic through a run of nodes may leave a
+        // node at up to three times the span's mean slope, bending at
+        // most four times as much (#2547).
         const EASE_TOL: f64 = 0.005;
         let dw = (la - lb).abs().max((ra - rb).abs());
-        let steps = ((6.0 * dw / (8.0 * EASE_TOL)).sqrt().ceil() as usize).clamp(48, 512);
+        let steps = ((24.0 * dw / (8.0 * EASE_TOL)).sqrt().ceil() as usize).clamp(48, 512);
         eased.extend((1..steps).map(|i| a + (b - a) * i as f64 / steps as f64));
     }
     marks.extend(eased);
@@ -1722,6 +1918,7 @@ pub fn variable_band_within(
     let mut polys: Vec<Vec<[f64; 2]>> = Vec::new();
     let mut run = 0.0;
     for (line, closed) in &lines {
+        let run_start = run;
         // The segments of the polyline (empty ones left out, the next one
         // starting where the last one ended) with their unit normal, to
         // the left.
@@ -1960,6 +2157,58 @@ pub fn variable_band_within(
             }
             polys.push(fan);
         }
+        // The caps at the two ends of an open subpath, across the reach
+        // there, sharing the end edge of the first or last piece.
+        if !*closed && cap != crate::style::LineCap::Butt {
+            let start = segs.first().map(|&(a, b, _)| {
+                let n = ends.first().map_or([0.0, 0.0], |e| e.0);
+                (a, n, [a.x - b.x, a.y - b.y], run_start)
+            });
+            let end = segs.last().map(|&(a, b, _)| {
+                let n = ends.last().map_or([0.0, 0.0], |e| e.1);
+                (b, n, [b.x - a.x, b.y - a.y], run)
+            });
+            for (p, n, d, s) in start.into_iter().chain(end) {
+                let dl = d[0].hypot(d[1]);
+                if dl <= 1e-12 {
+                    continue;
+                }
+                let o = [d[0] / dl, d[1] / dl];
+                let (l, r) = reach(s);
+                let rad = (l + r) / 2.0;
+                if rad <= 1e-9 {
+                    continue;
+                }
+                let edge_l = [p.x + n[0] * l, p.y + n[1] * l];
+                let edge_r = [p.x - n[0] * r, p.y - n[1] * r];
+                let mut poly = vec![[p.x, p.y], edge_r];
+                match cap {
+                    crate::style::LineCap::Square => {
+                        poly.push([edge_r[0] + o[0] * rad, edge_r[1] + o[1] * rad]);
+                        poly.push([edge_l[0] + o[0] * rad, edge_l[1] + o[1] * rad]);
+                    }
+                    _ => {
+                        // From the right edge round the outside to the
+                        // left one.
+                        let c = [p.x + n[0] * (l - r) / 2.0, p.y + n[1] * (l - r) / 2.0];
+                        let steps = ((std::f64::consts::PI / per_turn(rad).max(1e-3)).ceil()
+                            as usize)
+                            .clamp(4, 512);
+                        for k in 1..steps {
+                            let t = std::f64::consts::PI * k as f64 / steps as f64;
+                            let (cos, sin) = (t.cos(), t.sin());
+                            poly.push([
+                                c[0] + rad * (-n[0] * cos + o[0] * sin),
+                                c[1] + rad * (-n[1] * cos + o[1] * sin),
+                            ]);
+                        }
+                    }
+                }
+                poly.push(edge_l);
+                poly.dedup();
+                polys.push(poly);
+            }
+        }
     }
     for poly in polys.iter_mut() {
         let area: f64 = poly
@@ -2013,6 +2262,18 @@ fn rays_meet(p: Point, dp: [f64; 2], q: Point, dq: [f64; 2]) -> Option<(f64, f64
 
 /// The signed area of a closed ring of points (positive when it runs
 /// counter-clockwise).
+/// The sine of the angle under which an edge counts as running along the
+/// direction [`sweep`] slides an area in.
+const ALONG_V: f64 = 1e-6;
+
+/// `ring` turning the way `turn` (the sign of an area) says.
+fn wound(mut ring: Vec<[f64; 2]>, turn: f64) -> Vec<[f64; 2]> {
+    if ring_area(&ring) * turn < 0.0 {
+        ring.reverse();
+    }
+    ring
+}
+
 fn ring_area(ring: &[[f64; 2]]) -> f64 {
     ring.iter()
         .zip(ring.iter().cycle().skip(1))
@@ -2171,7 +2432,13 @@ fn outline_band_uncached(
                 right: n.right * scale,
             })
             .collect();
-        return Some(variable_band(path, stroke.width * scale, &nodes));
+        return Some(variable_band_within(
+            path,
+            stroke.width * scale,
+            &nodes,
+            0.05,
+            stroke.cap,
+        ));
     }
     let hair = stroke.width <= Stroke::HAIRLINE + 1e-9;
     if stroke.stretch < 0.999 && !hair {
@@ -2535,6 +2802,40 @@ pub fn simplify(path: &BezPath) -> BezPath {
     recover_curves(&from_shapes(result), &[path])
 }
 
+/// The area inside the outer edge of one path read with the nonzero rule:
+/// like [`simplify`], but gaps the outline closes round (loops of it that
+/// enclose nothing) are filled too. For an outline that has crossed over
+/// itself (Roughen, #2229), where such gaps showed as white slivers.
+/// Separate bits smaller than `min_area` (specks pinched off where the
+/// outline touches itself) are left out.
+pub fn outer_cover(path: &BezPath, min_area: f64) -> BezPath {
+    let subj = contours(path);
+    let empty: Vec<Vec<[f64; 2]>> = Vec::new();
+    let result = subj.overlay(&empty, OverlayRule::Subject, IFill::NonZero);
+    let area = |c: &[[f64; 2]]| -> f64 {
+        let n = c.len();
+        (0..n)
+            .map(|i| {
+                let (a, b) = (c[i], c[(i + 1) % n]);
+                a[0] * b[1] - b[0] * a[1]
+            })
+            .sum::<f64>()
+            .abs()
+            / 2.0
+    };
+    let mut outers: Vec<Vec<Vec<[f64; 2]>>> = result
+        .into_iter()
+        .filter_map(|shape| shape.into_iter().next().map(|outer| vec![outer]))
+        .collect();
+    // Never everything: the biggest bit stays whatever its size.
+    let biggest = outers.iter().map(|s| area(&s[0])).fold(0.0, f64::max);
+    outers.retain(|s| {
+        let a = area(&s[0]);
+        a >= min_area || a >= biggest
+    });
+    recover_curves(&from_shapes(outers), &[path])
+}
+
 /// The area a path covers under the nonzero rule (how text is filled), as
 /// a path that covers the same under the even-odd rule (how curves are
 /// filled). Only contours whose boxes overlap one turning the same way
@@ -2770,6 +3071,52 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// The round corners of a narrow contour are round (#2176): a square
+    /// offset by a tenth of a millimetre or less keeps an arc of that
+    /// radius at each corner, at the contour's distance all the way. The
+    /// curves were fitted within 0.05 mm whatever the offset, which for
+    /// so small an arc is a straight cut or two across the corner.
+    #[test]
+    fn the_round_corners_of_a_narrow_offset_stay_round() {
+        use super::{offset_with, Join};
+        use crate::geometry::{BezPath, PathEl, Point};
+        let mut sq = BezPath::new();
+        sq.move_to(Point::new(0.0, 0.0));
+        sq.line_to(Point::new(10.0, 0.0));
+        sq.line_to(Point::new(10.0, 10.0));
+        sq.line_to(Point::new(0.0, 10.0));
+        sq.close_path();
+        let outside = |p: Point| {
+            let dx = (-p.x).max(p.x - 10.0).max(0.0);
+            let dy = (-p.y).max(p.y - 10.0).max(0.0);
+            dx.hypot(dy)
+        };
+        for d in [0.02, 0.05, 0.1, 0.2, 0.35] {
+            let q = offset_with(&sq, d, Join::Round);
+            let curves = q
+                .elements()
+                .iter()
+                .filter(|e| matches!(e, PathEl::CurveTo(..) | PathEl::QuadTo(..)))
+                .count();
+            assert!(
+                curves >= 4,
+                "{d}: a curve at each corner: {:?}",
+                q.elements()
+            );
+            let mut worst = 0.0f64;
+            for seg in q.segments() {
+                for i in 0..=20 {
+                    worst = worst.max((outside(seg.eval(i as f64 / 20.0)) - d).abs());
+                }
+            }
+            assert!(
+                worst < 0.04 * d,
+                "{d}: {worst} from the contour's distance, {:?}",
+                q.elements()
+            );
         }
     }
 
@@ -3121,6 +3468,91 @@ mod tests {
 
     /// Along a curve the pieces of the band meet without cracks: one
     /// outline, no slivers or spikes into it (#627).
+    /// A variable outline keeps the line's round or square caps: the
+    /// band ended square whatever the cap (#2390).
+    #[test]
+    fn a_variable_outline_keeps_the_line_caps() {
+        use super::outline_band;
+        use crate::style::{LineCap, Stroke, WidthNode};
+        let mut line = BezPath::new();
+        line.move_to((0.0, 0.0));
+        line.line_to((50.0, 0.0));
+        let mut st = Stroke::new(crate::Color::BLACK, 4.0);
+        st.widths = vec![WidthNode::symmetric(0.5, 3.0)];
+        let width = |st: &Stroke| outline_band(&line, st, 1.0).expect("band").bounding_box();
+        // Butt: the band stops at the ends.
+        let b = width(&st);
+        assert!(
+            (b.x0 - 0.0).abs() < 0.01 && (b.x1 - 50.0).abs() < 0.01,
+            "{b:?}"
+        );
+        // Round: half the width past each end, and round, so a point
+        // past an end off the axis is outside.
+        st.cap = LineCap::Round;
+        let band = outline_band(&line, &st, 1.0).expect("band");
+        let b = band.bounding_box();
+        assert!(
+            (b.x0 + 2.0).abs() < 0.02 && (b.x1 - 52.0).abs() < 0.02,
+            "{b:?}"
+        );
+        assert!(band.winding(Point::new(51.5, 0.0)) != 0);
+        assert!(band.winding(Point::new(-1.5, 0.5)) != 0);
+        assert!(
+            band.winding(Point::new(51.8, 1.8)) == 0,
+            "round, not square"
+        );
+        // The area: the band plus a whole circle of the end width.
+        let want = band_area_without_caps(&line, &st) + std::f64::consts::PI * 4.0;
+        assert!(
+            (band.area().abs() - want).abs() < 0.1,
+            "{} {want}",
+            band.area()
+        );
+        // Square: a box half the width deep at each end.
+        st.cap = LineCap::Square;
+        let band = outline_band(&line, &st, 1.0).expect("band");
+        let b = band.bounding_box();
+        assert!(
+            (b.x0 + 2.0).abs() < 0.02 && (b.x1 - 52.0).abs() < 0.02,
+            "{b:?}"
+        );
+        assert!(band.winding(Point::new(51.8, 1.8)) != 0);
+        // An asymmetric reach at the end: the round cap spans it.
+        st.cap = LineCap::Round;
+        st.widths = vec![WidthNode {
+            at: 1.0,
+            left: 3.0,
+            right: 1.0,
+        }];
+        let b = outline_band(&line, &st, 1.0).expect("band").bounding_box();
+        assert!((b.x1 - 52.0).abs() < 0.02, "{b:?}");
+        assert!(
+            (b.y1 - 3.0).abs() < 0.02 && (b.y0 + 2.0).abs() < 0.02,
+            "{b:?}"
+        );
+        // A closed path has no ends, and no caps.
+        let sq = BezPath::from_vec(vec![
+            PathEl::MoveTo((0.0, 0.0).into()),
+            PathEl::LineTo((10.0, 0.0).into()),
+            PathEl::LineTo((10.0, 10.0).into()),
+            PathEl::LineTo((0.0, 10.0).into()),
+            PathEl::ClosePath,
+        ]);
+        let round = outline_band(&sq, &st, 1.0).expect("band").area();
+        st.cap = LineCap::Butt;
+        let butt = outline_band(&sq, &st, 1.0).expect("band").area();
+        assert!((round - butt).abs() < 1e-6);
+    }
+
+    fn band_area_without_caps(line: &BezPath, st: &crate::style::Stroke) -> f64 {
+        let mut butt = st.clone();
+        butt.cap = crate::style::LineCap::Butt;
+        super::outline_band(line, &butt, 1.0)
+            .expect("band")
+            .area()
+            .abs()
+    }
+
     #[test]
     fn a_variable_band_along_a_curve_has_no_cracks() {
         use super::variable_band;
@@ -3673,6 +4105,59 @@ mod tests {
         assert!((len - 30.0).abs() < 1e-6, "{len}");
     }
 
+    /// A slanted flat nib (45 degrees, 2 mm, stretch 0.1) along a
+    /// horizontal line: the band's top edge runs through the point of the
+    /// nib that touches it, 0.7 mm to the right of the line's start, so
+    /// near the start the band is only as high as the nib there. Each
+    /// segment's band stood straight above its own ends instead, a step
+    /// off the nibs at the joints, so a drawn stroke was edged with teeth
+    /// and blocks (#2334).
+    #[test]
+    fn a_slanted_nib_band_meets_the_nib_at_its_touching_point() {
+        use super::calligraphic_band;
+        use crate::geometry::{BezPath, Point, Shape as _};
+        let mut line = BezPath::new();
+        line.move_to(Point::new(0.0, 0.0));
+        line.line_to(Point::new(10.0, 0.0));
+        let band = calligraphic_band(&line, 2.0, 0.1, 45.0);
+        // Support of the nib straight up: h = sqrt((a sin45)^2 + (b cos45)^2),
+        // touching at x = (a^2 - b^2) sin45 cos45 / h.
+        let (a, b) = (1.0f64, 0.1f64);
+        let s = std::f64::consts::FRAC_1_SQRT_2;
+        let h = ((a * s).powi(2) + (b * s).powi(2)).sqrt();
+        let x = (a * a - b * b) * s * s / h;
+        assert!(
+            (band.bounding_box().y1 - h).abs() < 0.01,
+            "{:?}",
+            band.bounding_box()
+        );
+        assert!(band.contains(Point::new(5.0, h - 0.02)));
+        assert!(band.contains(Point::new(x + 0.05, h - 0.02)));
+        // Above the start of the line, left of the touching point, the nib
+        // is low: nothing of the band is there.
+        assert!(!band.contains(Point::new(0.05, h - 0.02)));
+        assert!(!band.contains(Point::new(10.0 - 0.05, -(h - 0.02))));
+        // Along a bent line the edge has no notches: every point a little
+        // inside the swept nibs is in the band.
+        let mut bent = BezPath::new();
+        bent.move_to(Point::new(0.0, 0.0));
+        for i in 1..=60 {
+            let t = i as f64 / 60.0 * std::f64::consts::PI;
+            bent.line_to(Point::new(10.0 * t, 5.0 * t.sin()));
+        }
+        let band = calligraphic_band(&bent, 2.0, 0.1, 45.0);
+        for i in 0..=600 {
+            let t = i as f64 / 600.0 * std::f64::consts::PI;
+            let c = Point::new(10.0 * t, 5.0 * t.sin());
+            for k in 0..16 {
+                let u = k as f64 / 16.0 * std::f64::consts::TAU;
+                let (ex, ey) = (0.95 * a * u.cos(), 0.95 * b * u.sin());
+                let q = Point::new(c.x + (ex - ey) * s, c.y + (ex + ey) * s);
+                assert!(band.contains(q), "{q:?} of the nib at {c:?}");
+            }
+        }
+    }
+
     #[test]
     fn calligraphic_band_is_thin_along_the_nib_and_full_across_it() {
         use super::calligraphic_band;
@@ -3934,6 +4419,147 @@ mod tests {
             .is_empty());
     }
 
+    /// A plus sign drawn as two crossing bars turning the same way, as the
+    /// strokes of a letter in a variable font: 20 x 10 and 10 x 20.
+    fn crossing_bars() -> BezPath {
+        let mut cross = Rect::new(0.0, 5.0, 20.0, 15.0).to_path(0.01);
+        cross.extend(Rect::new(5.0, 0.0, 15.0, 20.0).to_path(0.01));
+        cross
+    }
+
+    fn subpath_count(p: &BezPath) -> usize {
+        p.elements()
+            .iter()
+            .filter(|e| matches!(e, PathEl::MoveTo(_)))
+            .count()
+    }
+
+    /// Read with the nonzero rule, the overlap of two strokes is no hole:
+    /// the inside offset is one plus sign, where the even-odd rule made a
+    /// contour round the overlap too (#2156).
+    #[test]
+    fn offset_reads_overlapping_strokes_with_the_fill_rule_given() {
+        let cross = crossing_bars();
+        let nonzero = offset_filled(&cross, -1.0, Join::Miter, FillRule::NonZero);
+        assert_eq!(subpath_count(&nonzero), 1);
+        // Bars 8 wide, 18 long: 2 * 144 - 64.
+        assert!(
+            (nonzero.area().abs() - 224.0).abs() < 0.2,
+            "{}",
+            nonzero.area()
+        );
+        let even = offset_filled(&cross, -1.0, Join::Miter, FillRule::EvenOdd);
+        assert!(subpath_count(&even) > 1);
+        assert_eq!(
+            offset_with(&cross, -1.0, Join::Miter).elements(),
+            even.elements()
+        );
+    }
+
+    /// A square slid along (5, 3): the square, its copy and the band
+    /// between, 100 + 10 * 3 + 10 * 5.
+    #[test]
+    fn sweep_of_a_square() {
+        let s = sweep(&square(0.0), Vec2::new(5.0, 3.0), FillRule::EvenOdd);
+        assert_eq!(subpath_count(&s), 1);
+        assert!((s.area().abs() - 180.0).abs() < 1e-6, "{}", s.area());
+        let b = s.bounding_box();
+        assert!((b.x0, b.y0, b.x1, b.y1) == (0.0, 0.0, 15.0, 13.0), "{b:?}");
+        // Corners stay sharp: six nodes, joined by straight lines.
+        assert_eq!(nodes(&s).len(), 6);
+        assert_eq!(count(&s, true), 0);
+    }
+
+    /// Each contour is swept within itself: two squares far apart stay
+    /// two solids, with nothing joining the end of one to the start of the
+    /// other (the shards of #2156).
+    #[test]
+    fn filled_area_takes_holes_out_and_follows_curves() {
+        use crate::geometry::Shape as _;
+        let circle = kurbo::Circle::new((0.0, 0.0), 50.0).to_path(1e-9);
+        let a = filled_area(&circle, FillRule::NonZero);
+        let want = std::f64::consts::PI * 2500.0;
+        assert!((a - want).abs() < want * 1e-5, "{a} {want}");
+        // A 10 x 10 square with a 4 x 4 hole, both turning the same way:
+        // even-odd takes the hole out, non-zero fills it.
+        let mut p = BezPath::new();
+        for (x0, y0, x1, y1) in [(0.0, 0.0, 10.0, 10.0), (3.0, 3.0, 7.0, 7.0)] {
+            p.move_to((x0, y0));
+            p.line_to((x1, y0));
+            p.line_to((x1, y1));
+            p.line_to((x0, y1));
+            p.close_path();
+        }
+        assert!((filled_area(&p, FillRule::EvenOdd) - 84.0).abs() < 1e-6);
+        assert!((filled_area(&p, FillRule::NonZero) - 100.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn sweep_keeps_each_contour_to_itself() {
+        let mut two = square(0.0);
+        two.extend(square(40.0).elements().iter().copied());
+        let s = sweep(&two, Vec2::new(4.2, -0.2), FillRule::NonZero);
+        assert_eq!(subpath_count(&s), 2);
+        let expected = 2.0 * (100.0 + 10.0 * 4.2 + 10.0 * 0.2);
+        assert!((s.area().abs() - expected).abs() < 1e-3, "{}", s.area());
+        let b = s.bounding_box();
+        assert!(
+            (b.x1 - 54.2).abs() < 1e-5 && (b.y0 + 0.2).abs() < 1e-5,
+            "{b:?}"
+        );
+    }
+
+    /// A ring slid less than its hole is wide keeps a smaller hole; slid
+    /// further, the hole is filled.
+    #[test]
+    fn sweep_of_a_ring() {
+        let mut ring = Rect::new(0.0, 0.0, 20.0, 20.0).to_path(0.01);
+        ring.extend(Rect::new(5.0, 5.0, 15.0, 15.0).to_path(0.01));
+        let short = sweep(&ring, Vec2::new(3.0, 0.0), FillRule::EvenOdd);
+        assert_eq!(subpath_count(&short), 2);
+        // 20 x 23 less a hole of 7 x 10.
+        assert!(
+            (short.area().abs() - 390.0).abs() < 1e-6,
+            "{}",
+            short.area()
+        );
+        let long = sweep(&ring, Vec2::new(12.0, 0.0), FillRule::EvenOdd);
+        assert_eq!(subpath_count(&long), 1);
+        assert!((long.area().abs() - 640.0).abs() < 1e-6, "{}", long.area());
+    }
+
+    /// Overlapping strokes read with the nonzero rule sweep as one plus
+    /// sign, which no horizontal line crosses twice: its area and the
+    /// height it is slid across (1 * 20).
+    #[test]
+    fn sweep_reads_overlapping_strokes_with_the_fill_rule_given() {
+        let s = sweep(&crossing_bars(), Vec2::new(1.0, 0.0), FillRule::NonZero);
+        assert_eq!(subpath_count(&s), 1);
+        assert!((s.area().abs() - 320.0).abs() < 1e-6, "{}", s.area());
+    }
+
+    /// Curves stay curves, and bad input gives nothing or the area as it
+    /// is.
+    #[test]
+    fn sweep_keeps_curves_and_takes_bad_input() {
+        let c = circle(0.0, 0.0, 5.0);
+        let s = sweep(&c, Vec2::new(10.0, 0.0), FillRule::EvenOdd);
+        assert!(count(&s, true) >= 4, "{s:?}");
+        // Within the overlay's tolerance (0.02 mm) along the outline.
+        let expected = std::f64::consts::PI * 25.0 + 100.0;
+        assert!((s.area().abs() - expected).abs() < 0.5, "{}", s.area());
+        assert!(sweep(&c, Vec2::new(f64::NAN, 0.0), FillRule::EvenOdd)
+            .elements()
+            .is_empty());
+        assert!(
+            sweep(&BezPath::new(), Vec2::new(1.0, 1.0), FillRule::EvenOdd)
+                .elements()
+                .is_empty()
+        );
+        let still = sweep(&c, Vec2::ZERO, FillRule::EvenOdd);
+        assert!((still.area().abs() - std::f64::consts::PI * 25.0).abs() < 0.5);
+    }
+
     fn circle(cx: f64, cy: f64, r: f64) -> BezPath {
         use crate::geometry::Shape as _;
         kurbo::Circle::new((cx, cy), r).to_path(1e-4)
@@ -3950,6 +4576,149 @@ mod tests {
                 PathEl::ClosePath => None,
             })
             .collect()
+    }
+
+    /// A comb of `teeth` thin teeth 1 mm apart, each 20 mm long, on a
+    /// back 2 mm wide, as one contour: many edges facing every way.
+    fn comb(teeth: usize) -> BezPath {
+        let mut pts = vec![(0.0, 0.0)];
+        for k in 0..teeth {
+            let x = k as f64;
+            pts.extend([(x, 22.0), (x + 0.5, 22.0), (x + 0.5, 2.0), (x + 1.0, 2.0)]);
+        }
+        pts.push((teeth as f64, 0.0));
+        let mut p = BezPath::new();
+        p.move_to(pts[0]);
+        for q in &pts[1..] {
+            p.line_to(*q);
+        }
+        p.close_path();
+        p
+    }
+
+    /// The outline of a pointer test's object (see
+    /// `a_sweep_along_a_side_of_many_nodes_stays_quick`).
+    const SLANTED_LINE_AND_BOX: &str = "
+        M157.4991455078125,206.06871032714844 L158.04826681954523,206.6886880057199 L158.59738813127782,207.30866568429136
+        L159.14650944301067,207.92864336286283 L159.6956307547433,208.54862104143416 L160.24475206647614,209.16859872000575
+        L160.79387337820864,209.788576398577 L161.34299468994138,210.4085540771484 L161.8921160016742,211.02853175571985
+        L162.44123731340682,211.64850943429136 L162.9903586251395,212.26848711286274 L163.53947993687223,212.88846479143422
+        L164.0886012486049,213.5084424700056 L164.63772256033766,214.128420148577 L165.18684387207034,214.74839782714844
+        L164.69086456298828,215.36837387084958 L164.19488525390616,215.98834991455078 L163.6989059448242,216.60832595825192
+        L163.2029266357422,217.2283020019532 M162.2029266357422,214.2930806477865 L163.06394358489467,214.2930806477864
+        L163.92496053404733,214.29308064778652 L164.78597748319982,214.2930806477865 L165.64699443235236,214.29308064778652
+        L166.50801138150484,214.2930806477865 L167.36902833065744,214.29308064778655 L168.23004527980999,214.29308064778644
+        L169.09106222896253,214.29308064778644 L169.95207917811507,214.29308064778652 L170.81309612726756,214.2930806477865
+        L171.67411307642018,214.2930806477865 L172.53513002557264,214.29308064778655 L173.39614697472527,214.29308064778652
+        L174.25716392387778,214.29308064778652 L175.11818087303038,214.29308064778652 L175.97919782218287,214.29308064778655
+        L176.8402147713354,214.2930806477865 L177.70123172048795,214.29308064778644 L178.5622486696405,214.29308064778652
+        L179.423265618793,214.2930806477865 L180.2842825679456,214.29308064778647 L181.14529951709815,214.29308064778655
+        L182.00631646625067,214.29308064778644 L182.86733341540318,214.29308064778647 L183.7283503645558,214.2930806477865
+        L184.5893673137083,214.29308064778647 L185.45038426286087,214.29308064778638 L186.31140121201335,214.2930806477865
+        L187.17241816116587,214.29308064778644 L188.03343511031846,214.2930806477865 L188.89445205947098,214.29308064778652
+        L189.75546900862355,214.29308064778655 L190.616485957776,214.29308064778647 L191.47750290692863,214.2930806477865
+        L192.33851985608123,214.2930806477865 L193.19953680523372,214.29308064778652 L194.0605537543863,214.29308064778644
+        L194.92157070353875,214.29308064778655 L195.78258765269138,214.2930806477865 L196.64360460184392,214.2930806477865
+        L197.50462155099638,214.2930806477864 L198.36563850014895,214.29308064778644 L199.2266554493014,214.29308064778655
+        L200.08767239845395,214.29308064778655 L200.94868934760652,214.2930806477865 L201.80970629675906,214.29308064778652
+        L202.67072324591172,214.2930806477865 L203.53174019506412,214.29308064778652 L204.3927571442168,214.2930806477865
+        L205.25377409336923,214.29308064778652 L206.11479104252177,214.2930806477865 L206.97580799167437,214.29308064778652
+        L207.83682494082683,214.29308064778652 L208.69784188997946,214.29308064778652 L209.55885883913191,214.29308064778652
+        L210.41987578828451,214.29308064778652 L211.28089273743703,214.29308064778655 L212.14190968658966,214.29308064778652
+        L213.00292663574217,214.29308064778652 L213.0029266357421,215.13974731445313 L213.00292663574217,215.9864139811198
+        L213.0029266357422,216.83308064778646 L213.00292663574214,217.67974731445307 L213.0029266357422,218.5264139811198
+        L213.0029266357421,219.37308064778648 L213.0029266357421,220.2197473144532 L213.00292663574217,221.0664139811198
+        L213.0029266357421,221.91308064778647 L213.00292663574217,222.75974731445314 L212.14190968658963,222.75974731445314
+        L211.28089273743703,222.75974731445314 L210.41987578828454,222.75974731445314 L209.55885883913194,222.75974731445314
+        L208.69784188997946,222.75974731445314 L207.83682494082686,222.75974731445314 L206.97580799167437,222.75974731445314
+        L206.11479104252177,222.75974731445314 L205.25377409336923,222.75974731445314 L204.39275714421683,222.75974731445314
+        L203.53174019506417,222.75974731445314 L202.67072324591172,222.75974731445308 L201.80970629675906,222.75974731445314
+        L200.94868934760652,222.75974731445314 L200.08767239845398,222.75974731445314 L199.22665544930143,222.75974731445314
+        L198.36563850014895,222.75974731445314 L197.50462155099635,222.75974731445314 L196.64360460184392,222.75974731445314
+        L195.78258765269138,222.75974731445314 L194.92157070353875,222.75974731445314 L194.06055375438626,222.75974731445314
+        L193.19953680523366,222.75974731445314 L192.3385198560812,222.75974731445314 L191.47750290692863,222.75974731445314
+        L190.6164859577761,222.75974731445314 L189.75546900862355,222.7597473144532 L188.894452059471,222.75974731445314
+        L188.03343511031846,222.75974731445314 L187.17241816116587,222.75974731445308 L186.31140121201332,222.75974731445314
+        L185.45038426286084,222.75974731445314 L184.5893673137083,222.75974731445314 L183.7283503645558,222.75974731445314
+        L182.86733341540315,222.75974731445314 L182.00631646625067,222.75974731445314 L181.14529951709812,222.75974731445314
+        L180.28428256794564,222.75974731445314 L179.42326561879304,222.75974731445314 L178.5622486696405,222.7597473144532
+        L177.70123172048795,222.75974731445314 L176.8402147713354,222.75974731445325 L175.97919782218287,222.7597473144532
+        L175.11818087303038,222.7597473144531 L174.25716392387778,222.75974731445314 L173.39614697472524,222.75974731445314
+        L172.53513002557264,222.75974731445314 L171.67411307642016,222.75974731445314 L170.81309612726756,222.75974731445308
+        L169.95207917811507,222.75974731445314 L169.09106222896253,222.7597473144532 L168.23004527980999,222.75974731445314
+        L167.36902833065747,222.7597473144531 L166.50801138150484,222.75974731445308 L165.64699443235236,222.75974731445314
+        L164.7859774831998,222.75974731445314 L163.9249605340473,222.75974731445314 L163.06394358489467,222.75974731445314
+        L162.2029266357422,222.7597473144532 L162.2029266357422,221.91308064778647 L162.2029266357422,221.06641398111987
+        L162.20292663574222,220.21974731445317 L162.2029266357422,219.3730806477865 L162.20292663574222,218.5264139811198
+        L162.2029266357422,217.67974731445307 L162.2029266357422,216.83308064778646 L162.2029266357422,215.9864139811197
+        L162.2029266357422,215.13974731445313 Z";
+
+    /// An area slid along its own slanted side, whose nodes lie close
+    /// together on it (as a curve drawn by hand or a dimension's arrow
+    /// gives them, at the precision of single floats): the edges along the
+    /// slide sweep nothing and are left out, so the sweep is quick and
+    /// is the parallelogram the side and the slide make. Their bands, each
+    /// a line lying on the others, took the overlay over a minute.
+    #[test]
+    fn a_sweep_along_a_side_of_many_nodes_stays_quick() {
+        let side = Vec2::new(7.6876983642578125, 8.6796875);
+        let at = |x: f64, y: f64| Point::new(x as f32 as f64, y as f32 as f64);
+        let steps = 14;
+        let mut p = BezPath::new();
+        p.move_to(at(157.5, 206.0));
+        p.line_to(at(167.5, 206.0));
+        for k in 1..=steps {
+            let t = k as f64 / steps as f64;
+            p.line_to(at(167.5 + side.x * t, 206.0 + side.y * t));
+        }
+        for k in (1..=steps).rev() {
+            let t = k as f64 / steps as f64;
+            p.line_to(at(157.5 + side.x * t, 206.0 + side.y * t));
+        }
+        p.close_path();
+        let t = std::time::Instant::now();
+        let s = sweep(&p, side * 0.5, FillRule::EvenOdd);
+        let took = t.elapsed();
+        assert!(took < std::time::Duration::from_secs(5), "{took:?}");
+        // Base 10, height 1.5 times the side's.
+        let expected = 10.0 * side.y * 1.5;
+        assert!((s.area().abs() - expected).abs() < 0.01, "{}", s.area());
+        assert_eq!(subpath_count(&s), 1);
+        // The object the block shadow tool met in the pointer test (a
+        // bent line with its first leg along the slide, and a box drawn
+        // as lines of close nodes), as the tool gave it: the sweep took
+        // 75 s and made 644177 elements.
+        let p = BezPath::from_svg(SLANTED_LINE_AND_BOX).expect("path");
+        let t = std::time::Instant::now();
+        let s = sweep(
+            &p,
+            Vec2::new(7.6876983642578125, 8.6796875),
+            FillRule::EvenOdd,
+        );
+        let took = t.elapsed();
+        assert!(took < std::time::Duration::from_secs(5), "{took:?}");
+        assert!(s.elements().len() < 200, "{}", s.elements().len());
+    }
+
+    /// A long sweep of an outline with many edges stays quick: the edges
+    /// facing the offset one after another make one band, so the bands
+    /// do not all cross one another (a block shadow dragged far from a
+    /// line of text took minutes, #2156). The comb's sweep along its
+    /// teeth, far past them, is the comb and the band over its back.
+    #[test]
+    fn a_long_sweep_of_many_edges_stays_quick() {
+        let c = comb(300);
+        let t = std::time::Instant::now();
+        let s = sweep(&c, Vec2::new(150.0, 200.0), FillRule::EvenOdd);
+        let took = t.elapsed();
+        assert!(took < std::time::Duration::from_secs(5), "{took:?}");
+        assert!(!s.elements().is_empty());
+        // Straight up, 100 mm: the comb, its copy and the band the back
+        // and the teeth sweep, 300 mm wide and 122 mm tall but for the
+        // gaps between the copy's teeth: 300 * 102 + 300 * 20 / 2.
+        let up = sweep(&c, Vec2::new(0.0, 100.0), FillRule::EvenOdd);
+        let expected = 300.0 * 102.0 + 300.0 * 20.0 / 2.0;
+        assert!((up.area().abs() - expected).abs() < 1e-3, "{}", up.area());
     }
 
     fn count(p: &BezPath, curves: bool) -> usize {

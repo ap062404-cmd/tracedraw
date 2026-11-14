@@ -35,7 +35,7 @@ impl App {
     /// The layer of page `idx` that objects sent there go to: its
     /// topmost visible, unlocked layer, else its topmost unlocked one
     /// (as [`App::active_layer`] chooses for the current page).
-    fn page_drop_layer(&self, idx: usize) -> Option<LayerId> {
+    pub(crate) fn page_drop_layer(&self, idx: usize) -> Option<LayerId> {
         let page = self.doc().pages.get(idx)?;
         if page.id == self.page {
             return self.active_layer();

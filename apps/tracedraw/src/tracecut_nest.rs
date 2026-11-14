@@ -563,6 +563,57 @@ mod tests {
         assert!(overlap.width() <= 1e-6 || overlap.height() <= 1e-6);
     }
 
+    /// #2227: an object with an envelope is nested by what it draws. A
+    /// 30 mm square whose envelope draws it 60 mm wide and high used to
+    /// be placed as the 30 mm square it was before the envelope, so its
+    /// neighbour landed on top of it.
+    #[test]
+    fn an_enveloped_object_is_nested_by_what_it_draws() {
+        use tracedraw_core::envelope::Frame;
+        use tracedraw_core::geometry::Affine;
+        for shape_nest in [true, false] {
+            let mut app = App::headless();
+            let a = rect(&mut app, 500.0, 500.0, 30.0, 30.0);
+            let b = rect(&mut app, 600.0, 500.0, 30.0, 30.0);
+            app.select(vec![a]);
+            app.apply_envelope_frame(|r| {
+                Frame::around(r).transformed(
+                    Affine::translate((r.x0, r.y0))
+                        * Affine::scale(2.0)
+                        * Affine::translate((-r.x0, -r.y0)),
+                )
+            });
+            let drawn = |app: &App, id| app.doc().shape_on_page(id).expect("shape").visual_bounds();
+            assert!((drawn(&app, a).width() - 60.0).abs() < 0.01);
+            app.select(vec![a, b]);
+            let c = if shape_nest {
+                app.tracecut_shape_nest(&ShapeNestSettings {
+                    sheet: small_sheet(),
+                    rounds: 2,
+                    draw_sheets: false,
+                    ..Default::default()
+                })
+            } else {
+                app.tracecut_rect_nest(&RectNestSettings {
+                    sheet: small_sheet(),
+                    draw_sheets: false,
+                    ..Default::default()
+                })
+            };
+            assert!(app.tracecut_apply_changes(&c));
+            let (ba, bb) = (drawn(&app, a), drawn(&app, b));
+            for r in [ba, bb] {
+                assert!(r.x0 >= -0.01 && r.y0 >= -0.01, "{r:?}");
+                assert!(r.x1 <= 100.01 && r.y1 <= 100.01, "{r:?}");
+            }
+            let overlap = ba.intersect(bb);
+            assert!(
+                overlap.width() <= 1e-6 || overlap.height() <= 1e-6,
+                "{ba:?} and {bb:?} overlap (shape nesting: {shape_nest})"
+            );
+        }
+    }
+
     /// The live test of 0.41: Shape Nesting at 1 mm accuracy left objects
     /// crossing each other and past the sheet's edge. Ellipses, stars,
     /// round-cornered rectangles, an L-shaped curve, some turned or

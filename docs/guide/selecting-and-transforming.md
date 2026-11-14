@@ -95,7 +95,9 @@ will land; the status bar shows the distance and angle.
 Drag a selected object with the right button and let go: a menu offers
 **Move Here**, **Copy Here**, **Copy Fill Here**, **Copy Outline Here**,
 **Copy All Properties**, **Place Inside** (the object under the pointer
-becomes a clip frame for the selection) and **Cancel**.
+becomes a clip frame for the selection) and **Cancel**. Hold `Shift` as
+you let go over another object to give it the outline at once, `Alt` for
+the fill, or `Ctrl` (`Cmd` on a Mac) for both.
 
 Without the menu: start dragging a selected object with the left
 button, then hold `Alt` and let go over another object to give it the selection's fill;

@@ -26,7 +26,7 @@ Alt+Q turns all snapping off and on.
 | Tangent | from where the line being drawn starts: where it touches an ellipse or a curve | circle under a line |
 | Perpendicular | from the same start: the foot of the perpendicular on a segment | right angle |
 | Edge | the nearest point of an outline | hourglass |
-| Center | the centre of rectangles, ellipses, polygons, bitmaps and tables; the area centroid of closed curves; the middle of the box of any other object (a group, a text, an open curve, a symbol, a clip frame) and of a selection of several objects for the Pick tool (#2004) | circle with a cross |
+| Center | the centre of rectangles, ellipses, polygons, bitmaps and tables; the area centroid of closed curves; the middle of the box of any other object (a group, a text, an open curve, a clip frame; a symbol snaps by the objects it shows, their nodes, edges, midpoints and centres, and by the middle of its own box, #2135, `snap::tests::symbols_snap_by_what_they_show`) and of a selection of several objects for the Pick tool (#2004) | circle with a cross |
 | Text baseline | the nearest point of the baseline of a line of artistic or paragraph text | a T on a line |
 
 Groups and clip frames offer their contents' points. The line being drawn

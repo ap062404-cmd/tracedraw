@@ -468,14 +468,53 @@ fn parse_tdpal(src: &str) -> Result<Vec<(String, Color)>, String> {
 /// `<color cs="CMYK" name="Green" tints="1,0,1,0"/>` per colour, the
 /// layout of the document palette `.cdr` files carry (see
 /// `docs/cdr-format.md`). CMYK, RGB, grey, CMY, HSB, HLS, Lab and YIQ
-/// colours are read with their names; spot colours and unknown colour
-/// spaces are skipped. A file with no colour that can be read is an error,
-/// so the status bar says why nothing was added (#882).
+/// colours are read with their names.
+///
+/// A spot colour library (a Pantone palette) first names its inks in
+/// `<colorspaces>`: one `<cs name="PANTONE 100 C">` each, holding the
+/// ink's look as `<color cs="LAB" ..>` and `<color cs="CMYK" ..>`; the
+/// page's colours then name the ink as their colour space,
+/// `<color cs="PANTONE 100 C" tints="1"/>`. Each becomes the spot colour
+/// of that ink (its CMYK look as the stand-in, else the first look given),
+/// named after it, at the tint given. The looks inside `<colorspaces>`
+/// are not colours of the palette: read as such, they made every colour
+/// twice, without a name and in process inks (#882). Unknown colour
+/// spaces are skipped. A file with no colour that can be read is an
+/// error, so the status bar says why nothing was added (#882).
 pub fn parse_xml(bytes: &[u8]) -> Result<Vec<(String, Color)>, String> {
     let text = String::from_utf8_lossy(bytes);
-    let colors = tracedraw_cdr::container::parse_palette_xml(&text);
+    let (inks, page) = xml_colorspaces(&text);
+    let mut colors = Vec::new();
+    let mut rest = page.as_str();
+    while let Some(at) = rest.find("<color ") {
+        let tail = &rest[at..];
+        let end = tail.find('>').map_or(tail.len(), |e| e + 1);
+        let tag = &tail[..end];
+        rest = &tail[end..];
+        let cs = xml_attribute(tag, "cs").unwrap_or_default();
+        if let Some(look) = inks.get(&cs.trim().to_lowercase()) {
+            let name = xml_attribute(tag, "name")
+                .filter(|n| !n.trim().is_empty())
+                .unwrap_or_else(|| cs.trim().to_string());
+            let tint = xml_attribute(tag, "tints")
+                .and_then(|t| {
+                    t.split(',')
+                        .next()
+                        .and_then(|v| v.trim().parse::<f32>().ok())
+                })
+                .filter(|v| v.is_finite())
+                .map_or(1.0, |v| v.clamp(0.0, 1.0));
+            let mut c = spot_color(cs.trim(), *look);
+            if let Color::Spot { tint: t, .. } = &mut c {
+                *t = tint;
+            }
+            colors.push((name, c));
+        } else {
+            colors.extend(tracedraw_cdr::container::parse_palette_xml(tag));
+        }
+    }
     if colors.is_empty() {
-        let entries = text.matches("<color ").count();
+        let entries = page.matches("<color ").count();
         return Err(if entries == 0 {
             "no <color> entries in this XML palette".into()
         } else {
@@ -485,6 +524,70 @@ pub fn parse_xml(bytes: &[u8]) -> Result<Vec<(String, Color)>, String> {
         });
     }
     Ok(colors)
+}
+
+/// The spot inks an XML palette names in `<colorspaces>`, by their names
+/// in lower case, each with its look (CMYK when given, else the first look
+/// that can be read), and the rest of the file without that section.
+fn xml_colorspaces(text: &str) -> (std::collections::HashMap<String, Color>, String) {
+    let mut inks = std::collections::HashMap::new();
+    let Some(start) = text.find("<colorspaces") else {
+        return (inks, text.to_string());
+    };
+    let end = text[start..]
+        .find("</colorspaces>")
+        .map_or(text.len(), |e| start + e + "</colorspaces>".len());
+    let section = &text[start..end];
+    let mut rest = section;
+    while let Some(at) = rest.find("<cs ") {
+        let tail = &rest[at..];
+        let open_end = tail.find('>').map_or(tail.len(), |e| e + 1);
+        let open = &tail[..open_end];
+        let body_end = if open.ends_with("/>") {
+            open_end
+        } else {
+            tail.find("</cs>").unwrap_or(tail.len())
+        };
+        let body = &tail[open_end.min(body_end)..body_end];
+        rest = &tail[body_end..];
+        let Some(name) = xml_attribute(open, "name").filter(|n| !n.trim().is_empty()) else {
+            continue;
+        };
+        let looks = tracedraw_cdr::container::parse_palette_xml(body);
+        let look = looks
+            .iter()
+            .find(|(_, c)| matches!(c, Color::Cmyk { .. }))
+            .or(looks.first())
+            .map(|(_, c)| *c);
+        if let Some(look) = look {
+            inks.entry(name.trim().to_lowercase()).or_insert(look);
+        }
+    }
+    let page = format!("{}{}", &text[..start], &text[end..]);
+    (inks, page)
+}
+
+/// The value of `key="..."` in an XML tag, the five entities decoded.
+fn xml_attribute(tag: &str, key: &str) -> Option<String> {
+    let pat = format!("{key}=\"");
+    let mut search = tag;
+    loop {
+        let at = search.find(&pat)?;
+        let ok = at == 0 || search[..at].ends_with(char::is_whitespace);
+        let after = &search[at + pat.len()..];
+        if ok {
+            let end = after.find('"')?;
+            return Some(
+                after[..end]
+                    .replace("&quot;", "\"")
+                    .replace("&apos;", "'")
+                    .replace("&lt;", "<")
+                    .replace("&gt;", ">")
+                    .replace("&amp;", "&"),
+            );
+        }
+        search = after;
+    }
 }
 
 /// GIMP palette: `r g b [name]` per line after the header.
@@ -860,6 +963,57 @@ mod tests {
         );
         assert_eq!(p.colors[1].1.to_rgb8(), [255, 128, 0]);
         assert!(matches!(p.colors[2].1, Color::Lab { .. }));
+    }
+
+    /// A spot colour library as CorelDRAW writes it (a Pantone palette):
+    /// the inks named in `<colorspaces>` with their looks, the page's
+    /// colours naming the ink as their colour space. Each colour comes in
+    /// once, named, as the spot colour of its ink with its CMYK look as the
+    /// stand-in; the looks were read as colours of their own, so every
+    /// colour came twice, nameless and in process inks (#882).
+    #[test]
+    fn spot_libraries_in_xml_open_as_named_spot_colours() {
+        let xml = br#"<?xml version="1.0"?>
+<palette guid="a74d62e5-0000-0000-0000-000000000000" fixedID="36" name="Inks.xml" prefix="INK "><colorspaces><cs name="INK Yellow C" fixedID="1" version="1500"><color cs="CMYK" tints="0,0.01,1,0"/><color cs="LAB" tints="0.8898,0.4968,0.9367"/><color cs="sRGB" tints="0.996,0.867,0"/></cs><cs name="INK Trans. White" fixedID="19" version="1500"><color cs="LAB" tints="1.0,0.5,0.5"/><color cs="CMYK" tints="0,0,0,0"/></cs><cs name="INK Lab Only" fixedID="20" version="1500"><color cs="LAB" tints="0.5,0.5,0.5"/></cs></colorspaces><colors><page><color cs="INK Trans. White" name="INK Trans. White" tints="1"/><color cs="INK Yellow C" name="INK Yellow C" tints="1"/><color cs="INK Lab Only" tints="0.5"/><color cs="CMYK" name="Process" tints="1,0,0,0"/></page></colors></palette>"#;
+        let colors = parse_xml(xml).unwrap();
+        let names: Vec<&str> = colors.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "INK Trans. White",
+                "INK Yellow C",
+                "INK Lab Only",
+                "Process"
+            ]
+        );
+        match colors[1].1 {
+            Color::Spot {
+                ink,
+                tint,
+                c,
+                m,
+                y,
+                k,
+            } => {
+                assert_eq!(ink, spot_ink_id("INK Yellow C"));
+                assert_eq!(tint, 1.0);
+                assert_eq!([c, m, y, k], [0.0, 0.01, 1.0, 0.0]);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(colors[0].1, Color::Spot { c, m, y, k, .. } if [c, m, y, k] == [0.0; 4]));
+        // An ink with a Lab look only: still the spot colour, at the tint
+        // the page gives.
+        assert!(matches!(colors[2].1, Color::Spot { tint, .. } if tint == 0.5));
+        assert_eq!(
+            colors[3].1,
+            Color::Cmyk {
+                c: 1.0,
+                m: 0.0,
+                y: 0.0,
+                k: 0.0
+            }
+        );
     }
 
     /// XML that holds no colour that can be read says so instead of

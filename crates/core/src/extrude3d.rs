@@ -11,8 +11,8 @@
 //! A parallel body runs in space along its offset across and as far in
 //! depth (a point at depth `u` sits at `p + vector * u / L`), and is seen
 //! straight on, so the offset is what shows. The other bodies are seen
-//! from the vanishing point: a point at depth share `t` (its distance
-//! along z over `L`) goes to `q + (V - q) * s` with `s = t d / (t d + 1 -
+//! from the vanishing point: a point at depth share `t` (its depth `u`
+//! over `L`, whatever the turn) goes to `q + (V - q) * s` with `s = t d / (t d + 1 -
 //! d)` (small: a perspective that puts the copy where the flat body has
 //! it) or `q + (q - V) * d t` (big), `q` its place across. The prism
 //! turns about the middle of the body by `rotation` (degrees about x,
@@ -204,6 +204,149 @@ fn inset(pts: &[Point], b: f64) -> Vec<Point> {
         .collect()
 }
 
+/// Twice the signed area of the triangle `a`, `b`, `c`: positive with `c`
+/// on the left of the way from `a` to `b`.
+fn side(a: Point, b: Point, c: Point) -> f64 {
+    (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
+}
+
+/// One edge of a closed loop for [`loops_cross`]: its box, its ends, its
+/// loop and its place in it.
+struct LoopEdge {
+    lo: Point,
+    hi: Point,
+    a: Point,
+    b: Point,
+    of: usize,
+    at: usize,
+    n: usize,
+}
+
+/// Whether an edge of the closed `loops` crosses another edge, of its own
+/// loop or of another one (edges that only touch do not count).
+fn loops_cross(loops: &[Vec<Point>]) -> bool {
+    let mut edges: Vec<LoopEdge> = Vec::new();
+    for (of, pts) in loops.iter().enumerate() {
+        let n = pts.len();
+        for at in 0..n {
+            let (a, b) = (pts[at], pts[(at + 1) % n]);
+            edges.push(LoopEdge {
+                lo: Point::new(a.x.min(b.x), a.y.min(b.y)),
+                hi: Point::new(a.x.max(b.x), a.y.max(b.y)),
+                a,
+                b,
+                of,
+                at,
+                n,
+            });
+        }
+    }
+    // Sorted by their left end, an edge is only tried against those that
+    // start before it ends.
+    edges.sort_by(|p, q| p.lo.x.total_cmp(&q.lo.x));
+    for (k, e) in edges.iter().enumerate() {
+        for f in edges.iter().skip(k + 1) {
+            if f.lo.x > e.hi.x {
+                break;
+            }
+            if f.lo.y > e.hi.y || f.hi.y < e.lo.y {
+                continue;
+            }
+            // Neighbours on a loop share a corner.
+            if e.of == f.of {
+                let d = e.at.abs_diff(f.at);
+                if d <= 1 || d + 1 == e.n {
+                    continue;
+                }
+            }
+            if side(e.a, e.b, f.a) * side(e.a, e.b, f.b) < 0.0
+                && side(f.a, f.b, e.a) * side(f.a, f.b, e.b) < 0.0
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Halvings [`fitting_bevel`] makes: what it finds is within a thousandth
+/// of the bevel asked for of the widest one that fits.
+const BEVEL_FIT_STEPS: usize = 10;
+
+/// The widest bevel up to `b` the outline takes: inset by it, the closed
+/// subpaths keep their sense, cross neither themselves nor one another
+/// and still enclose an area. A bevel wider than a letter's stem, or than
+/// the wall between an outline and its hole, folded the near cap over
+/// itself (#2205).
+fn fitting_bevel(subs: &[(Vec<Point>, bool, bool)], b: f64) -> f64 {
+    let loops: Vec<&Vec<Point>> = subs
+        .iter()
+        .filter(|(pts, closed, _)| *closed && pts.len() >= 3)
+        .map(|(pts, _, _)| pts)
+        .collect();
+    if loops.is_empty() || b <= 0.0 {
+        return b;
+    }
+    let filled: f64 = loops.iter().map(|pts| area2(pts)).sum();
+    let fits = |w: f64| {
+        let ins: Vec<Vec<Point>> = loops.iter().map(|pts| inset(pts, w)).collect();
+        ins.iter()
+            .zip(&loops)
+            .all(|(i, pts)| area2(i) * area2(pts) > 0.0)
+            && ins.iter().map(|i| area2(i)).sum::<f64>() * filled > 0.0
+            && !loops_cross(&ins)
+    };
+    if fits(b) {
+        return b;
+    }
+    // An outline that crosses itself as drawn has no bevel that fits: it
+    // keeps the one asked for.
+    let own: Vec<Vec<Point>> = loops.iter().map(|pts| (*pts).clone()).collect();
+    if loops_cross(&own) {
+        return b;
+    }
+    let (mut lo, mut hi) = (0.0, b);
+    for _ in 0..BEVEL_FIT_STEPS {
+        let mid = (lo + hi) / 2.0;
+        if fits(mid) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
+/// What orders the faces of a parallel body: its run in space, across the
+/// page (x and y, each over the run's length across squared) and in depth.
+type Run = Option<(f64, f64, f64)>;
+
+/// The run of a parallel `body` turned by `m`: none for a body with a
+/// vanishing point and for one that runs straight at the viewer.
+fn run_of(body: &Body, m: &[[f64; 3]; 3], dir: f64, len: f64) -> Run {
+    if !body.kind.parallel() {
+        return None;
+    }
+    let r = apply(m, V3::new(body.vector.x, body.vector.y, dir * len));
+    let across = r.x * r.x + r.y * r.y;
+    (across > 1e-9).then_some((r.x / across, r.y / across, r.z))
+}
+
+/// How near the point `q` of a face is, for the order the faces are drawn
+/// in (larger is nearer). Two points drawn at one place of the page lie
+/// on two lines that run as the body does, so a point's depth is taken
+/// back along its line to where the line crosses the page's origin: the
+/// key is the same along the whole run of a wall, and for two points
+/// drawn at one place it differs by what their depths differ by. The
+/// plain z of a wall differs by the body's depth from one end to the
+/// other, so its mean put long walls in the wrong order (#2206).
+fn depth_key(run: Run, q: V3) -> f64 {
+    match run {
+        Some((ax, ay, rz)) => q.z - (q.x * ax + q.y * ay) * rz,
+        None => q.z,
+    }
+}
+
 /// A face that shows: its z key, flat key, shape and drawn corners.
 type ShownFace = (f64, f64, Shape, [Point; 4]);
 
@@ -237,9 +380,14 @@ impl Ctx<'_> {
         apply(&self.m, v).add(self.pivot)
     }
 
-    /// Where a turned point is drawn.
-    fn project(&self, q: V3) -> Point {
-        let t = self.dir * q.z / self.len;
+    /// Where the turned point `q` of depth `u` is drawn. The depth share
+    /// is the point's own (`u / L`, 0 at the object and 1 at the copy),
+    /// not where the turn puts it along z: the body is only as deep as
+    /// its share of the way to the vanishing point, so with that point
+    /// near the object a turn moved z by many depths and the faces ran
+    /// far past the object (#2207).
+    fn project(&self, q: V3, u: f64) -> Point {
+        let t = (u / self.len).clamp(0.0, 1.0);
         let p = Point::new(q.x, q.y);
         let d = self.body.depth.clamp(0.0, 0.99);
         match self.body.kind {
@@ -305,8 +453,14 @@ fn poly(pts: &[Point], close: bool) -> BezPath {
 
 /// The body of `shape` turned, lit and bevelled as `body.solid` and
 /// `body.bevel` say. `subs` are the outline's flattened subpaths with
-/// whether each closes and is a hole.
-pub(crate) fn faces(body: &Body, shape: &Shape, subs: &[(Vec<Point>, bool, bool)]) -> Faces {
+/// whether each closes and is a hole, `outline` the same subpaths with
+/// their curves.
+pub(crate) fn faces(
+    body: &Body,
+    shape: &Shape,
+    subs: &[(Vec<Point>, bool, bool)],
+    outline: &BezPath,
+) -> Faces {
     let mut out = Faces::default();
     let mut lo = Point::new(f64::INFINITY, f64::INFINITY);
     let mut hi = Point::new(f64::NEG_INFINITY, f64::NEG_INFINITY);
@@ -344,12 +498,14 @@ pub(crate) fn faces(body: &Body, shape: &Shape, subs: &[(Vec<Point>, bool, bool)
         len,
         dir,
     };
+    let run = run_of(body, &ctx.m, dir, len);
     let half_min = ((hi.x - lo.x).min(hi.y - lo.y) / 2.0).max(0.0);
     let bevel = if body.bevel.is_finite() {
         body.bevel.clamp(0.0, (0.9 * len).min(0.9 * half_min))
     } else {
         0.0
     };
+    let bevel = fitting_bevel(subs, bevel);
     let turned = body.solid.turned();
     let replace_main = turned || bevel > 0.0;
 
@@ -441,16 +597,17 @@ pub(crate) fn faces(body: &Body, shape: &Shape, subs: &[(Vec<Point>, bool, bool)
                 let j = (i + 1) % n;
                 let (a0, b0) = (ctx.turn(r0[i], u0), ctx.turn(r0[j], u0));
                 let (a1, b1) = (ctx.turn(r1[i], u1), ctx.turn(r1[j], u1));
-                let quad = if dir < 0.0 {
-                    [a0, a1, b1, b0]
+                // Each corner with its depth.
+                let (quad, depths) = if dir < 0.0 {
+                    ([a0, a1, b1, b0], [u0, u1, u1, u0])
                 } else {
-                    [a0, b0, b1, a1]
+                    ([a0, b0, b1, a1], [u0, u0, u1, u1])
                 };
                 let proj: [Point; 4] = [
-                    ctx.project(quad[0]),
-                    ctx.project(quad[1]),
-                    ctx.project(quad[2]),
-                    ctx.project(quad[3]),
+                    ctx.project(quad[0], depths[0]),
+                    ctx.project(quad[1], depths[1]),
+                    ctx.project(quad[2], depths[2]),
+                    ctx.project(quad[3], depths[3]),
                 ];
                 if !proj.iter().all(|p| p.x.is_finite() && p.y.is_finite()) {
                     shown.push(None);
@@ -505,7 +662,7 @@ pub(crate) fn faces(body: &Body, shape: &Shape, subs: &[(Vec<Point>, bool, bool)
                 };
                 s.fill = fill;
                 s.stroke = Some(crate::Stroke::hairline(edge));
-                let z = (quad[0].z + quad[1].z + quad[2].z + quad[3].z) / 4.0;
+                let z = quad.iter().map(|q| depth_key(run, *q)).sum::<f64>() / 4.0;
                 let mid = proj[0].midpoint(proj[2]);
                 shown.push(Some((z, flat_key(mid), s, proj)));
             }
@@ -597,8 +754,8 @@ pub(crate) fn faces(body: &Body, shape: &Shape, subs: &[(Vec<Point>, bool, bool)
         let near: Vec<V3> = near_ring.iter().map(|p| ctx.turn(*p, near_u)).collect();
         let far_u = if dir < 0.0 { len } else { 0.0 };
         let far: Vec<V3> = pts.iter().map(|p| ctx.turn(*p, far_u)).collect();
-        let near_p: Vec<Point> = near.iter().map(|q| ctx.project(*q)).collect();
-        let far_p: Vec<Point> = far.iter().map(|q| ctx.project(*q)).collect();
+        let near_p: Vec<Point> = near.iter().map(|q| ctx.project(*q, near_u)).collect();
+        let far_p: Vec<Point> = far.iter().map(|q| ctx.project(*q, far_u)).collect();
         if closed {
             near_area += projected_area(&near_p);
             far_area -= projected_area(&far_p);
@@ -619,24 +776,67 @@ pub(crate) fn faces(body: &Body, shape: &Shape, subs: &[(Vec<Point>, bool, bool)
         }
         p
     };
+    // A cap lies at one depth, where the turn and the view move and
+    // scale the outline and bend nothing: it is the outline's own curves
+    // taken there, with the outline's nodes (#2208). The near cap of a
+    // bevelled body is the outline drawn in, kept as its flattened ring.
+    let far_u = if dir < 0.0 { len } else { 0.0 };
+    let cap_map = |u: f64| -> Option<Affine> {
+        let at = |p: Point| ctx.project(ctx.turn(p, u), u);
+        let (o, x, y) = (
+            at(c),
+            at(c + Vec2::new(1.0, 0.0)),
+            at(c + Vec2::new(0.0, 1.0)),
+        );
+        let (ex, ey) = (x - o, y - o);
+        let all = [o.x, o.y, ex.x, ex.y, ey.x, ey.y];
+        if !all.iter().all(|v| v.is_finite()) {
+            return None;
+        }
+        Some(Affine::new([ex.x, ex.y, ey.x, ey.y, o.x, o.y]) * Affine::translate(-c.to_vec2()))
+    };
+    let cap_curves = |u: f64| -> Option<BezPath> {
+        if outline.elements().is_empty() {
+            return None;
+        }
+        cap_map(u).map(|to_cap| to_cap * outline.clone())
+    };
     // The far cap, darkest; the near cap looks like the object.
     let far_shows = any_closed && (far_area > 1e-12 || !turned);
     if far_shows {
         let mut far = template();
         far.kind = ShapeKind::Path {
-            path: cap_path(&far_loops),
+            path: cap_curves(far_u).unwrap_or_else(|| cap_path(&far_loops)),
             closed: true,
         };
         far.fill = Fill::Solid(to);
-        drawn.push((far_z / cnt, f64::INFINITY, far));
+        // A parallel body's far cap is behind every wall that shows or,
+        // facing the viewer, in front of them all.
+        let far_key = match run {
+            Some(_) if far_area > 1e-12 => f64::INFINITY,
+            Some(_) => f64::NEG_INFINITY,
+            None => far_z / cnt,
+        };
+        drawn.push((far_key, f64::INFINITY, far));
     }
     let near_shows = !any_closed || near_area > 1e-12 || !turned;
     let mut near = shape.clone();
     near.effects.clear();
     near.shadow = None;
     near.transform = Affine::IDENTITY;
+    // The near cap is the outline taken to its depth: the object's mesh
+    // goes there with it (#2337).
+    crate::extrude::place_paint(
+        &mut near,
+        cap_map(near_u).unwrap_or(Affine::IDENTITY) * shape.transform,
+    );
+    let near_curves = if bevel > 0.0 {
+        None
+    } else {
+        cap_curves(near_u)
+    };
     near.kind = ShapeKind::Path {
-        path: cap_path(&near_loops),
+        path: near_curves.unwrap_or_else(|| cap_path(&near_loops)),
         closed: any_closed,
     };
     // Far first: smaller z, then the larger flat key.
@@ -727,6 +927,69 @@ mod tests {
         assert!((far.x0 - 10.0).abs() < 1e-6 && (far.y0 - 10.0).abs() < 1e-6);
     }
 
+    /// #2208: the caps of a turned body keep the outline's curves and
+    /// nodes (a turned circle's face had a node for each flattened edge).
+    #[test]
+    fn the_caps_of_a_turned_body_keep_the_outline_curves() {
+        use kurbo::{ParamCurveNearest, PathEl};
+        let mut c = square();
+        c.kind = ShapeKind::Ellipse {
+            rect: Rect::new(0.0, 0.0, 20.0, 20.0),
+            arc: None,
+        };
+        let nodes = c.page_path().elements().len();
+        let solid = Solid {
+            rotation: [-17.0, 10.0, 5.0],
+            ..Default::default()
+        };
+        for kind in [
+            ExtrudeKind::BackParallel,
+            ExtrudeKind::FrontParallel,
+            ExtrudeKind::SmallBack,
+            ExtrudeKind::BigFront,
+        ] {
+            let curved = body(kind, solid.clone(), 0.0).faces(&c);
+            // The same body from the circle as a polygon of its flattened
+            // points: its caps are where the curved ones must lie.
+            let mut flat = BezPath::new();
+            crate::geometry::flatten(&c.page_path(), 0.05, &mut |el| flat.push(el));
+            let mut polygon = c.clone();
+            polygon.kind = ShapeKind::Path {
+                path: flat,
+                closed: true,
+            };
+            let lines = body(kind, solid.clone(), 0.0).faces(&polygon);
+            let cap = |f: &Faces| f.above.last().expect("the near cap").page_path();
+            let (near, want) = (cap(&curved), cap(&lines));
+            assert_eq!(near.elements().len(), nodes, "{kind:?}");
+            assert!(want.elements().len() > 3 * nodes, "{kind:?}");
+            for el in want.elements() {
+                let (PathEl::MoveTo(p) | PathEl::LineTo(p)) = el else {
+                    continue;
+                };
+                let d = near
+                    .segments()
+                    .map(|s| s.nearest(*p, 1e-9).distance_sq.sqrt())
+                    .fold(f64::INFINITY, f64::min);
+                assert!(d < 0.05, "{kind:?}: {p:?} is {d} off the cap");
+            }
+            // The far cap too, where it shows.
+            let far_nodes = |f: &Faces| {
+                f.above
+                    .iter()
+                    .chain(&f.below)
+                    .filter(|s| {
+                        s.fill == Fill::Solid(lerp_color(Color::rgb8(200, 0, 0), Color::BLACK, 0.5))
+                    })
+                    .map(|s| s.page_path().elements().len())
+                    .max()
+            };
+            if let Some(n) = far_nodes(&curved) {
+                assert_eq!(n, nodes, "{kind:?}: the far cap");
+            }
+        }
+    }
+
     #[test]
     fn turning_shows_the_side_turned_toward_the_viewer() {
         // Turned 40 degrees about y: the right side turns away, so the
@@ -793,6 +1056,188 @@ mod tests {
         );
     }
 
+    /// #2205: a bevel wider than a letter's stems folded the near cap over
+    /// itself.
+    #[test]
+    fn a_bevel_wider_than_the_outline_takes_is_narrowed_to_fit() {
+        let pts = |v: &[(f64, f64)]| -> Vec<Point> {
+            v.iter().map(|(x, y)| Point::new(*x, *y)).collect()
+        };
+        // A letter K, 20 high, its stems 4 wide.
+        let k = pts(&[
+            (0.0, 0.0),
+            (4.0, 0.0),
+            (4.0, 8.0),
+            (10.0, 0.0),
+            (15.0, 0.0),
+            (7.5, 10.5),
+            (15.0, 20.0),
+            (10.0, 20.0),
+            (4.0, 12.5),
+            (4.0, 20.0),
+            (0.0, 20.0),
+        ]);
+        let subs = vec![(k.clone(), true, false)];
+        assert!(loops_cross(&[inset(&k, 2.0)]), "as asked, it folds");
+        for b in [1.0, 2.0, 3.0, 5.0] {
+            let w = fitting_bevel(&subs, b);
+            assert!(w > 0.3 && w < b, "{b}: {w}");
+            let ins = inset(&k, w);
+            assert!(area2(&ins) * area2(&k) > 0.0, "{b}: {w}");
+            assert!(!loops_cross(&[ins]), "{b}: {w}");
+        }
+        // A bevel that fits stays as asked.
+        assert_eq!(fitting_bevel(&subs, 0.5), 0.5);
+        // A frame with a wall 4 wide: the cap and its hole would swap
+        // places past a bevel of 2.
+        let frame = vec![
+            (
+                pts(&[(0.0, 0.0), (20.0, 0.0), (20.0, 20.0), (0.0, 20.0)]),
+                true,
+                false,
+            ),
+            (
+                pts(&[(4.0, 4.0), (4.0, 16.0), (16.0, 16.0), (16.0, 4.0)]),
+                true,
+                true,
+            ),
+        ];
+        let w = fitting_bevel(&frame, 3.0);
+        assert!(w > 1.9 && w < 2.0, "{w}");
+        // An open outline has no bevel to narrow.
+        assert_eq!(fitting_bevel(&[(k, false, false)], 3.0), 3.0);
+    }
+
+    /// #2206: with a long offset and a turn, walls were drawn in the order
+    /// of their mean z, which differs by the body's depth along a wall, so
+    /// far walls came out over near ones.
+    #[test]
+    fn walls_of_a_turned_parallel_body_are_ordered_where_they_overlap() {
+        fn inside(q: &[Point; 4], p: Point) -> bool {
+            let (mut pos, mut neg) = (0, 0);
+            for i in 0..4 {
+                let s = side(q[i], q[(i + 1) % 4], p);
+                if s > 1e-9 {
+                    pos += 1;
+                } else if s < -1e-9 {
+                    neg += 1;
+                }
+            }
+            pos == 4 || neg == 4
+        }
+        // z of the quad's plane at `p`, unless it is seen edge-on.
+        fn z_at(q: &[V3; 4], p: Point) -> Option<f64> {
+            let n = q[1].sub(q[0]).cross(q[3].sub(q[0]));
+            (n.z.abs() > 1e-9).then(|| q[0].z - (n.x * (p.x - q[0].x) + n.y * (p.y - q[0].y)) / n.z)
+        }
+        // A letter K 34 high, its offset and turn as in the report.
+        let k: Vec<Point> = [
+            (0.0, 0.0),
+            (4.0, 0.0),
+            (4.0, 8.0),
+            (10.0, 0.0),
+            (15.0, 0.0),
+            (7.5, 10.5),
+            (15.0, 20.0),
+            (10.0, 20.0),
+            (4.0, 12.5),
+            (4.0, 20.0),
+            (0.0, 20.0),
+        ]
+        .iter()
+        .map(|(x, y)| Point::new(x * 1.7, y * 1.7))
+        .collect();
+        let rot = [-17.0, 10.0, -8.0];
+        // Both offsets of the report; the walls of a K overlap on the page
+        // in a few pairs at each, and the mean z misorders all of them.
+        let (mut pairs, mut by_z, mut by_key) = (0, 0, 0);
+        for v in [Vec2::new(16.384, 10.656), Vec2::new(10.776, 37.191)] {
+            let solid = Solid {
+                rotation: rot,
+                ..Default::default()
+            };
+            let mut b = body(ExtrudeKind::BackParallel, solid, 0.0);
+            b.vector = v;
+            let len = b.vector.hypot();
+            let ctx = Ctx {
+                body: &b,
+                m: rotation(rot),
+                pivot: V3::new(
+                    12.75 + b.vector.x / 2.0,
+                    17.0 + b.vector.y / 2.0,
+                    -len / 2.0,
+                ),
+                len,
+                dir: -1.0,
+            };
+            let run = run_of(&b, &ctx.m, -1.0, len);
+            assert!(run.is_some());
+            // The walls that show: mean z, key, corners in space and drawn.
+            let mut walls: Vec<(f64, f64, [V3; 4], [Point; 4])> = Vec::new();
+            for i in 0..k.len() {
+                let j = (i + 1) % k.len();
+                let quad = [
+                    ctx.turn(k[i], 0.0),
+                    ctx.turn(k[i], len),
+                    ctx.turn(k[j], len),
+                    ctx.turn(k[j], 0.0),
+                ];
+                let proj = [
+                    ctx.project(quad[0], 0.0),
+                    ctx.project(quad[1], len),
+                    ctx.project(quad[2], len),
+                    ctx.project(quad[3], 0.0),
+                ];
+                if projected_area(&proj) <= 1e-12 {
+                    continue;
+                }
+                let z = quad.iter().map(|q| q.z).sum::<f64>() / 4.0;
+                let key = quad.iter().map(|q| depth_key(run, *q)).sum::<f64>() / 4.0;
+                walls.push((z, key, quad, proj));
+            }
+            // Pairs that overlap on the page and are drawn with the farther
+            // one over the nearer, by the mean z and by the key.
+            for (ia, a) in walls.iter().enumerate() {
+                for c in walls.iter().skip(ia + 1) {
+                    // How much nearer `a` is than `c` where both are drawn.
+                    let mut nearer: Option<(f64, f64)> = None;
+                    for (src, other) in [(&a.3, &c.3), (&c.3, &a.3)] {
+                        for s in 1..12 {
+                            for t in 1..12 {
+                                let (s, t) = (s as f64 / 12.0, t as f64 / 12.0);
+                                let p = src[0].lerp(src[1], s).lerp(src[3].lerp(src[2], s), t);
+                                if !inside(other, p) {
+                                    continue;
+                                }
+                                if let (Some(za), Some(zc)) = (z_at(&a.2, p), z_at(&c.2, p)) {
+                                    let (lo, hi) = nearer.unwrap_or((za - zc, za - zc));
+                                    nearer = Some((lo.min(za - zc), hi.max(za - zc)));
+                                }
+                            }
+                        }
+                    }
+                    let Some((lo, hi)) = nearer else {
+                        continue;
+                    };
+                    pairs += 1;
+                    // `a` nearer by more than 0.05 somewhere, yet drawn first
+                    // (the smaller key), or the other way round.
+                    let wrong =
+                        |ka: f64, kc: f64| (hi > 0.05 && ka < kc) || (lo < -0.05 && ka > kc);
+                    by_z += usize::from(wrong(a.0, c.0));
+                    by_key += usize::from(wrong(a.1, c.1));
+                }
+            }
+        }
+        assert!(pairs >= 5, "{pairs} pairs overlap");
+        assert!(by_z >= 3, "the mean z misorders {by_z} of {pairs}");
+        assert_eq!(by_key, 0, "of {pairs} pairs");
+        // A body with a vanishing point keeps z.
+        let small = body(ExtrudeKind::SmallBack, Solid::default(), 0.0);
+        assert!(run_of(&small, &rotation(rot), -1.0, 20.0).is_none());
+        assert_eq!(depth_key(None, V3::new(3.0, 4.0, 5.0)), 5.0);
+    }
+
     #[test]
     fn further_lights_brighten_the_faces_they_reach() {
         let one = body(ExtrudeKind::BackParallel, Solid::default(), 0.0);
@@ -852,6 +1297,154 @@ mod tests {
                 let _ = b.faces(&square());
                 b.bevel = 1e9;
                 let _ = b.faces(&square());
+            }
+        }
+    }
+
+    /// A letter K, 34 high.
+    fn letter_k() -> Shape {
+        let pts: Vec<Point> = [
+            (0.0, 0.0),
+            (4.0, 0.0),
+            (4.0, 8.0),
+            (10.0, 0.0),
+            (15.0, 0.0),
+            (7.5, 10.5),
+            (15.0, 20.0),
+            (10.0, 20.0),
+            (4.0, 12.5),
+            (4.0, 20.0),
+            (0.0, 20.0),
+        ]
+        .iter()
+        .map(|(x, y)| Point::new(x * 1.7, y * 1.7))
+        .collect();
+        let mut s = Shape::new(
+            ShapeId(1),
+            ShapeKind::Path {
+                path: poly(&pts, true),
+                closed: true,
+            },
+        );
+        s.fill = Fill::Solid(Color::rgb8(200, 0, 0));
+        s.stroke = None;
+        s
+    }
+
+    fn corners(s: &Shape) -> Vec<Point> {
+        s.page_path()
+            .elements()
+            .iter()
+            .filter_map(|el| el.end_point())
+            .collect()
+    }
+
+    /// #2207: with the vanishing point near the object, a turned body's
+    /// faces ran far past it.
+    #[test]
+    fn a_turned_body_stays_by_the_object_with_the_vanishing_point_near() {
+        let shape = letter_k();
+        let bb = shape.bounds();
+        let c = bb.center();
+        let turn = [-22.0, 7.0, -11.0];
+        let d = 0.2;
+        for kind in [
+            ExtrudeKind::BigFront,
+            ExtrudeKind::BigBack,
+            ExtrudeKind::SmallFront,
+            ExtrudeKind::SmallBack,
+        ] {
+            // Just outside the object's corner, then on the object.
+            for off in [
+                Vec2::new(bb.width() / 2.0 + 5.0, bb.height() / 2.0 + 5.0),
+                Vec2::new(3.0, 2.0),
+            ] {
+                let mut b = body(
+                    kind,
+                    Solid {
+                        rotation: turn,
+                        ..Default::default()
+                    },
+                    0.0,
+                );
+                b.vanishing = c + off;
+                b.depth = d;
+                let f = b.faces(&shape);
+                assert!(f.below.is_empty() && !f.above.is_empty(), "{kind:?}");
+                // The turned prism stays within `reach` of the middle,
+                // and the vanishing point moves a point at most the depth
+                // share of its distance to it.
+                let len = d * off.hypot();
+                let reach = (bb.width() / 2.0).hypot(bb.height() / 2.0).hypot(len / 2.0);
+                let most = reach + d * (reach + off.hypot()) + 1e-6;
+                for s in &f.above {
+                    for p in corners(s) {
+                        assert!((p - c).hypot() <= most, "{kind:?} {off:?}: {p:?}");
+                    }
+                }
+                // The near cap is the turned copy, moved by the vanishing
+                // point as the flat body's copy is: all the way (depth
+                // share 1) for front bodies, not at all for back ones.
+                let m = rotation(turn);
+                let dir = if kind.front() { 1.0 } else { -1.0 };
+                let pivot = V3::new(c.x, c.y, dir * len / 2.0);
+                let u = if kind.front() { len } else { 0.0 };
+                let t = u / len;
+                let want: Vec<Point> = corners(&shape)
+                    .into_iter()
+                    .map(|p| {
+                        let q = apply(&m, V3::new(p.x, p.y, dir * u).sub(pivot)).add(pivot);
+                        let q = Point::new(q.x, q.y);
+                        match kind {
+                            ExtrudeKind::BigFront | ExtrudeKind::BigBack => {
+                                q + (q - b.vanishing) * (d * t)
+                            }
+                            _ => q + (b.vanishing - q) * (t * d / (t * d + 1.0 - d)),
+                        }
+                    })
+                    .collect();
+                let cap = corners(f.above.last().expect("near cap"));
+                assert_eq!(cap.len(), want.len(), "{kind:?}");
+                for (got, want) in cap.iter().zip(&want) {
+                    assert!((*got - *want).hypot() < 1e-6, "{kind:?} {off:?}");
+                }
+            }
+        }
+    }
+
+    /// A turned parallel body is the turned prism seen straight on: no
+    /// corner of a face leaves the ball the prism turns in (#2207).
+    #[test]
+    fn a_turned_parallel_body_keeps_every_corner_in_its_reach() {
+        let shape = letter_k();
+        let bb = shape.bounds();
+        let vector = Vec2::new(10.776, 37.191);
+        let c = bb.center() + vector / 2.0;
+        for bevel in [0.0, 1.0] {
+            for kind in [ExtrudeKind::BackParallel, ExtrudeKind::FrontParallel] {
+                let mut b = body(
+                    kind,
+                    Solid {
+                        rotation: [-17.0, 10.0, -8.0],
+                        ..Default::default()
+                    },
+                    bevel,
+                );
+                b.vector = vector;
+                let f = b.faces(&shape);
+                assert!(f.above.len() > 3, "{kind:?}");
+                let len = vector.hypot();
+                // The prism's corners farthest from its middle.
+                let reach = corners(&shape)
+                    .into_iter()
+                    .flat_map(|p| [p, p + vector])
+                    .map(|p| (p - c).hypot().hypot(len / 2.0))
+                    .fold(0.0, f64::max);
+                for s in &f.above {
+                    for p in corners(s) {
+                        assert!((p - c).hypot() <= reach + 1e-6, "{kind:?} {bevel}: {p:?}");
+                    }
+                }
             }
         }
     }

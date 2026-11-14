@@ -493,7 +493,15 @@ pub fn options_dialog(app: &mut App, ctx: &Context, close: &mut bool) {
                             .show(ui, |ui| {
                                 ui.spacing_mut().item_spacing.y = 7.0;
                                 let from = shapes_drawn(ui);
+                                #[cfg(test)]
+                                let room = ui.max_rect().right();
                                 draw_page(app, ui);
+                                #[cfg(test)]
+                                {
+                                    let over = ui.min_rect().right() - room;
+                                    ui.ctx()
+                                        .data_mut(|d| d.insert_temp(page_overflow_id(), over));
+                                }
                                 highlight_setting(app, ui, from);
                             });
                     });
@@ -525,17 +533,12 @@ pub fn options_dialog(app: &mut App, ctx: &Context, close: &mut bool) {
                         app.status = tr("status.settings_saved");
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if chrome::button(ui, &tr("dialog.cancel"))
-                            .rich_tip(crate::ui::tips::keyed("dialog.cancel"))
-                            .clicked()
-                        {
+                        // The buttons bring their own tips (#2367).
+                        if chrome::button(ui, &tr("dialog.cancel")).clicked() {
                             cancel = true;
                         }
                         ui.add_space(5.0);
-                        if chrome::button(ui, &tr("dialog.ok"))
-                            .rich_tip(crate::ui::tips::keyed("dialog.ok"))
-                            .clicked()
-                        {
+                        if chrome::button(ui, &tr("dialog.ok")).clicked() {
                             ok = true;
                         }
                     });
@@ -554,6 +557,13 @@ pub fn options_dialog(app: &mut App, ctx: &Context, close: &mut bool) {
         }
         *close = true;
     }
+}
+
+/// How far the page drawn last reached past the right edge of its
+/// panel (for tests).
+#[cfg(test)]
+fn page_overflow_id() -> egui::Id {
+    egui::Id::new("options_page_overflow")
 }
 
 /// Height of the tab row over the page list.
@@ -1132,6 +1142,22 @@ fn hardware_acceleration(app: &mut App, ui: &mut Ui) {
         dim(ui, trf("options.gpu_in_use", &[("name", name)]));
     }
     dim(ui, tr("options.restart_to_apply"));
+    // What the card does and what the processor does, and why.
+    ui.add_space(4.0);
+    ui.scope(|ui| {
+        ui.set_max_width(520.0);
+        dim(ui, tr("options.gpu_explain"));
+    });
+    // Shadows blurred on the card: from this frame on, the same pixels
+    // as on the processor; exports and printing stay on the processor.
+    let available = crate::gpu_fx::available();
+    ui.add_enabled_ui(app.settings.hardware_acceleration, |ui| {
+        ui.checkbox(&mut app.settings.gpu_effects, tr("options.gpu_effects"))
+            .rich_tip(crate::ui::tips::keyed("options.gpu_effects"));
+    });
+    if app.settings.gpu_effects && app.settings.hardware_acceleration && !available {
+        dim(ui, tr("options.gpu_effects_unavailable"));
+    }
     // A new choice is tried afresh at the next start.
     if (
         app.settings.hardware_acceleration,
@@ -1388,11 +1414,25 @@ fn edit_page(app: &mut App, ui: &mut Ui) {
     crate::ui::chrome::section(ui, &tr("options.focus_inactive"));
     ui.horizontal(|ui| {
         let mut v = app.settings.focus_visibility as f32;
+        // The slider takes the rest of the row but for the Reset button
+        // after it, which stood past the panel's edge (#2199).
+        let reset = egui::WidgetText::from(tr("dialog.reset"))
+            .into_galley(
+                ui,
+                Some(egui::TextWrapMode::Extend),
+                f32::INFINITY,
+                egui::TextStyle::Button,
+            )
+            .size()
+            .x
+            + 2.0 * ui.spacing().button_padding.x
+            + ui.spacing().item_spacing.x;
         if ui
             .add(
                 crate::ui::Slider::new(&mut v, 0.0..=100.0)
                     .suffix(" %")
-                    .integer(),
+                    .integer()
+                    .reserve(reset),
             )
             .rich_tip(crate::ui::tips::pair(
                 "options.focus_inactive",
@@ -1519,10 +1559,7 @@ fn nodes_page(app: &mut App, ui: &mut Ui) {
 
         ui.end_row();
         ui.label("");
-        if chrome::button(ui, &tr("options.reset"))
-            .rich_tip(crate::ui::tips::pair("options.reset", "dialog.reset_desc"))
-            .clicked()
-        {
+        if chrome::button(ui, &tr("options.reset")).clicked() {
             let d = crate::settings::NodePrefs::default();
             n.cusp = d.cusp;
             n.smooth = d.smooth;
@@ -4340,11 +4377,7 @@ fn ellipse_page(app: &mut App, ui: &mut Ui) {
         .rich_tip(crate::ui::tips::pair("options.pie", "options.pie_tip"));
     ui.radio_value(&mut kind, 2, tr("options.arc"))
         .rich_tip(crate::ui::tips::pair("options.arc", "options.arc_tip"));
-    let mut arc = app.ellipse_arc.unwrap_or(tracedraw_core::EllipseArc {
-        start_deg: 0.0,
-        end_deg: 270.0,
-        pie: true,
-    });
+    let mut arc = app.ellipse_arc.unwrap_or(crate::app::DEFAULT_ELLIPSE_ARC);
     if kind != before {
         app.ellipse_arc = match kind {
             0 => None,
@@ -4826,6 +4859,8 @@ fn global_general_page(app: &mut App, ui: &mut Ui) {
                 if ui.selectable_label(follows, label).clicked() {
                     crate::i18n::set_language(system);
                     app.settings.language = crate::i18n::SYSTEM.to_string();
+                    #[cfg(not(target_arch = "wasm32"))]
+                    crate::theme::language_changed(ui.ctx(), &current, system);
                 }
                 ui.separator();
                 for (code, n) in crate::i18n::LANGUAGES {
@@ -4833,6 +4868,8 @@ fn global_general_page(app: &mut App, ui: &mut Ui) {
                     if ui.selectable_label(picked, n).clicked() {
                         crate::i18n::set_language(code);
                         app.settings.language = code.to_string();
+                        #[cfg(not(target_arch = "wasm32"))]
+                        crate::theme::language_changed(ui.ctx(), &current, code);
                     }
                 }
             })
@@ -5141,10 +5178,8 @@ fn layout_page(app: &mut App, ui: &mut Ui) {
     {
         let s = app.page_size();
         let page = app.page;
-        app.run(Command::ResizePage {
-            page,
-            size: Size::new(s.height, s.width),
-        });
+        let size = Size::new(s.height, s.width);
+        app.resize_pages_about_centre(&[page], size, "Switch Page Orientation");
         app.fit_pending = true;
     }
     page_spacing_row(app, ui);
@@ -5580,9 +5615,11 @@ mod tests {
     /// their own (#1779). The
     /// documented splits are E, Align Centers Horizontally with a
     /// selection and the Roughen tool without one (`shortcuts.md`, Align
-    /// keys and tool keys) (#1595), and the clip frame's Edit Contents
+    /// keys and tool keys) (#1595), the clip frame's Edit Contents
     /// and Finish Editing, never offered together: one key goes in and
-    /// out (#1273).
+    /// out (#1273), and Shift+L, Shift+B and Shift+C, node commands with
+    /// the Shape tool and nodes chosen and Distribute keys otherwise
+    /// (`shortcuts.md`, Distribute keys) (#2147).
     #[test]
     fn no_two_default_commands_share_a_shortcut() {
         let app = app_with_commands();
@@ -5639,8 +5676,32 @@ mod tests {
             ids.retain(|id| !opens_panel(id, tab));
             ids.push(format!("panel {tab:?}"));
         }
+        // Shift+L, Shift+B and Shift+C: a node command with the Shape
+        // tool and nodes chosen, Distribute otherwise (#2147).
+        let node_or_distribute = |keys: &str, ids: &[String]| {
+            [
+                (
+                    "Shift+B",
+                    "menu.object.distribute_bottom",
+                    "menu.object.node_break",
+                ),
+                (
+                    "Shift+C",
+                    "menu.object.distribute_centers_v",
+                    "menu.object.node_cusp",
+                ),
+                (
+                    "Shift+L",
+                    "menu.object.distribute_left",
+                    "menu.object.node_to_line",
+                ),
+            ]
+            .iter()
+            .any(|(k, distribute, node)| keys == *k && ids == [*distribute, *node])
+        };
         let documented_split = |keys: &str, ids: &[String]| {
             (keys == "E" && ids == ["menu.object.align_centers_h", "roughen"])
+                || node_or_distribute(keys, ids)
                 || (keys == crate::ui::menus::CLIP_EDIT_KEY
                     && ids
                         == [
@@ -6304,6 +6365,58 @@ mod tests {
         // Drawing a page never changes what it shows (fields clamp the
         // values they hold to their ranges).
         assert_eq!(app.star_sharpness, 0.5);
+    }
+
+    /// #2199: the window stays where it is from one page to the next
+    /// and from frame to frame (its first frame aside, which sizes it),
+    /// on a large screen and on one smaller than the dialog; and no page
+    /// is wider than its panel (the Edit page's slider row was, by 32
+    /// points, which made the window wider while it showed).
+    #[test]
+    fn the_window_keeps_its_place_from_page_to_page() {
+        for screen in [egui::vec2(1600.0, 1000.0), egui::vec2(1280.0, 680.0)] {
+            let ctx = crate::theme::ui_context();
+            let mut app = App::headless();
+            let mut first: Option<(OptionsPage, egui::Rect)> = None;
+            let mut frames = 0;
+            let mut wide: Vec<String> = Vec::new();
+            for set in OptionsSet::ALL {
+                for p in set.pages() {
+                    app.options_page = *p;
+                    for _ in 0..3 {
+                        let input = egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, screen)),
+                            ..Default::default()
+                        };
+                        let mut out = ctx.run_ui(input, |ui| {
+                            let mut close = false;
+                            options_dialog(&mut app, ui.ctx(), &mut close);
+                        });
+                        out.textures_delta.clear();
+                        frames += 1;
+                        if frames == 1 {
+                            continue;
+                        }
+                        let rect = ctx
+                            .memory(|m| m.area_rect(egui::Id::new("options_dialog")))
+                            .expect("the dialog is drawn");
+                        let (at, was) = *first.get_or_insert((*p, rect));
+                        assert!(
+                            (rect.min - was.min).length() < 0.01
+                                && (rect.max - was.max).length() < 0.01,
+                            "{p:?} at {rect:?}, {at:?} at {was:?} (screen {screen:?})"
+                        );
+                        let over: f32 = ctx
+                            .data(|d| d.get_temp(page_overflow_id()))
+                            .expect("a page is drawn");
+                        if over >= 0.5 && !wide.contains(&format!("{p:?} by {over}")) {
+                            wide.push(format!("{p:?} by {over}"));
+                        }
+                    }
+                }
+            }
+            assert!(wide.is_empty(), "wider than the panel: {wide:?}");
+        }
     }
 
     /// A frame of the whole window with `events` as its input.

@@ -293,11 +293,15 @@ pub fn file_formats_page(app: &mut App, ui: &mut Ui) {
             Some((&mut f.pdf_as_picture, &mut f.pdf_picture_dpi)),
         );
     });
-    ui.checkbox(&mut f.pdf_ask_text, tr("pdf_import.ask"))
-        .rich_tip(crate::ui::tips::pair(
-            "pdf_import.ask",
-            "pdf_import.ask_tip",
-        ));
+    ui.horizontal_wrapped(|ui| {
+        ui.checkbox(&mut f.pdf_ask_text, tr("pdf_import.ask"))
+            .rich_tip(crate::ui::tips::pair(
+                "pdf_import.ask",
+                "pdf_import.ask_tip",
+            ));
+        let text = !f.pdf_text_as_curves && !f.pdf_as_picture;
+        crate::ui::pdf_import_dialog::paragraphs_checkbox(ui, &mut f.pdf_text_paragraphs, text);
+    });
     crate::ui::pdf_import_dialog::reduce_pictures_checkbox(ui, &mut f.pdf_reduce_pictures);
     chrome::section(ui, &tr("options.cdr_save_section"));
     f.cdr_version = f.cdr_version.clamp(
@@ -396,6 +400,16 @@ pub fn warnings_page(app: &mut App, ui: &mut Ui) {
             "options.warn_shelf_remove",
             "options.warn_shelf_remove_tip",
         ));
+    if crate::ui::options::DesktopOnly::HardwareAcceleration.shown() {
+        ui.checkbox(
+            &mut w.hardware_acceleration,
+            tr("options.warn_hardware_acceleration"),
+        )
+        .rich_tip(crate::ui::tips::pair(
+            "options.warn_hardware_acceleration",
+            "options.warn_hardware_acceleration_tip",
+        ));
+    }
     ui.add_space(6.0);
     hint(ui, "options.warnings_hint");
 }

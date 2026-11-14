@@ -15,6 +15,11 @@ use serde::{Deserialize, Serialize};
 /// The most nodes a frame takes.
 pub const MAX_NODES: usize = 96;
 
+/// The most sharp nodes of an outline tried as a frame's corners (every
+/// four of them are weighed); an outline with more takes the points
+/// nearest the corners of its box.
+const MAX_SHARP_CORNERS: usize = 24;
+
 /// How an object is mapped into its envelope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -567,10 +572,23 @@ impl Frame {
             Point::new(b.x1, b.y1),
             Point::new(b.x0, b.y1),
         ];
-        let mut points = Vec::new();
-        for q in targets {
-            let i = corner_at(q, &mut segs)?;
-            points.push(segs.get(i)?.p0);
+        // An outline with sharp corners of its own (a rectangle, a
+        // trapezoid, a band of two arcs) keeps them as the frame's: the
+        // four of those nodes, in order round it, nearest the corners of
+        // the box (#2178). The nearest point of the outline can fall in
+        // the middle of a slanted side instead, and the frame then bends
+        // the object there (#2344).
+        let mut points = best_corners(&sharp_nodes(&segs), &targets);
+        let distinct =
+            (0..points.len()).all(|i| (i + 1..points.len()).all(|j| points[i] != points[j]));
+        if !distinct || !in_order(&segs, &points) {
+            points.clear();
+        }
+        if points.is_empty() {
+            for q in targets {
+                let i = corner_at(q, &mut segs)?;
+                points.push(segs.get(i)?.p0);
+            }
         }
         // Start at the bottom-left corner. Two box corners at one point
         // (the apex of a triangle) become two nodes there, joined by a
@@ -620,6 +638,101 @@ impl Frame {
         use crate::geometry::Shape as _;
         self.to_path().bounding_box()
     }
+}
+
+/// The nodes of a closed run of segments where the outline turns
+/// sharply (more than 20 degrees between the segment arriving and the one
+/// leaving), in order.
+fn sharp_nodes(segs: &[CubicBez]) -> Vec<Point> {
+    let dir_out = |c: &CubicBez| {
+        [c.p1, c.p2, c.p3]
+            .into_iter()
+            .map(|p| p - c.p0)
+            .find(|v| v.hypot() > 1e-9)
+    };
+    let dir_in = |c: &CubicBez| {
+        [c.p2, c.p1, c.p0]
+            .into_iter()
+            .map(|p| c.p3 - p)
+            .find(|v| v.hypot() > 1e-9)
+    };
+    let n = segs.len();
+    (0..n)
+        .filter_map(|i| {
+            let prev = segs.get((i + n - 1) % n)?;
+            let cur = segs.get(i)?;
+            let (a, b) = (dir_in(prev)?, dir_out(cur)?);
+            let cos = a.dot(b) / (a.hypot() * b.hypot());
+            (cos < 20f64.to_radians().cos()).then_some(cur.p0)
+        })
+        .collect()
+}
+
+/// Four of an outline's sharp nodes (`sharp`, in order round it) as the
+/// frame's corners for the box corners `targets` (bottom-left,
+/// bottom-right, top-right, top-left, the way the outline runs): the four
+/// met in that order going round whose distances to the box corners add
+/// up (squared) the least. Picking for each box corner its nearest node
+/// alone can take one node twice, as at the ends of a deep arch band,
+/// where the outer end of a side is nearer the bottom corner than its
+/// inner end (#2178). Empty with fewer than four, or too many to try.
+fn best_corners(sharp: &[Point], targets: &[Point; 4]) -> Vec<Point> {
+    let n = sharp.len();
+    if !(4..=MAX_SHARP_CORNERS).contains(&n) {
+        return Vec::new();
+    }
+    let d = |p: Point, q: Point| (p - q).hypot2();
+    let mut best: Option<(f64, [usize; 4])> = None;
+    // Every four in order round the outline; the first of them may go to
+    // any box corner, the rest follow round.
+    for a in 0..n {
+        for b in a + 1..n {
+            for c in b + 1..n {
+                for e in c + 1..n {
+                    let pick = [a, b, c, e];
+                    for r in 0..4 {
+                        let cost: f64 = (0..4)
+                            .map(|k| {
+                                let i = pick[(k + r) % 4];
+                                sharp.get(i).map_or(f64::INFINITY, |p| d(*p, targets[k]))
+                            })
+                            .sum();
+                        if best.is_none_or(|(c0, _)| cost < c0) {
+                            best = Some((cost, [0, 1, 2, 3].map(|k| pick[(k + r) % 4])));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    match best {
+        Some((cost, idx)) if cost.is_finite() => {
+            idx.iter().filter_map(|i| sharp.get(*i).copied()).collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Whether the four points are nodes met in this order going round the
+/// closed run of segments from the first.
+fn in_order(segs: &[CubicBez], points: &[Point]) -> bool {
+    let Some(first) = points.first() else {
+        return false;
+    };
+    let Some(start) = segs.iter().position(|c| c.p0 == *first) else {
+        return false;
+    };
+    let n = segs.len();
+    let mut k = 1;
+    for step in 1..n {
+        if k == points.len() {
+            break;
+        }
+        if segs.get((start + step) % n).map(|c| c.p0) == points.get(k).copied() {
+            k += 1;
+        }
+    }
+    k == points.len()
 }
 
 /// One side of the frame as a curve from 0 to 1, evenly by segment or by
@@ -960,6 +1073,86 @@ mod tests {
         f.bend_segment(0, f64::NAN, Vec2::new(0.0, -1.0));
         f.bend_segment(0, 0.5, Vec2::new(f64::INFINITY, 0.0));
         assert_eq!(f, Frame::around(b));
+    }
+
+    /// A band of two arcs and two slanted sides (wider at the top) keeps
+    /// its four sharp nodes as the frame's corners (#2344): the nearest
+    /// points to the box's lower corners lie on the slanted sides, and a
+    /// frame cornered there bent the object at the middle of its sides.
+    #[test]
+    fn a_band_keeps_its_own_corners_as_the_frame_corners() {
+        let mut band = BezPath::new();
+        band.move_to((10.0, 0.0));
+        band.curve_to((16.0, 4.0), (24.0, 4.0), (30.0, 0.0));
+        band.line_to((40.0, 30.0));
+        band.curve_to((28.0, 36.0), (12.0, 36.0), (0.0, 30.0));
+        band.close_path();
+        let f = Frame::from_outline(&band).expect("a frame");
+        let at = |k: usize| f.nodes[f.corners[k]];
+        assert!(close(at(0), Point::new(10.0, 0.0)), "{:?}", at(0));
+        assert!(close(at(1), Point::new(30.0, 0.0)), "{:?}", at(1));
+        assert!(close(at(2), Point::new(40.0, 30.0)), "{:?}", at(2));
+        assert!(close(at(3), Point::new(0.0, 30.0)), "{:?}", at(3));
+        // No node was added inside a side.
+        assert_eq!(f.nodes.len(), 4);
+        // A square mapped into it fills the band.
+        let mapped = apply(&square(), &f, false, Mapping::Putty);
+        let want = band.area().abs();
+        assert!(
+            (mapped.area().abs() - want).abs() < want * 0.02,
+            "{} {want}",
+            mapped.area()
+        );
+    }
+
+    /// A deep arch band (two arcs over 100 degrees, as text is fitted
+    /// into, #2178): the outer end of each side is nearer the bottom
+    /// corner of the box than its inner end, yet the frame still takes
+    /// the band's four corners, so the letters at the ends are not folded
+    /// over and cut by the top.
+    #[test]
+    fn a_deep_arch_keeps_its_own_corners() {
+        let c = Point::new(30.0, -20.0);
+        let at_angle = |deg: f64, r: f64| {
+            let a = deg.to_radians();
+            c + Vec2::new(a.cos(), a.sin()) * r
+        };
+        let mut band = BezPath::new();
+        let n = 16;
+        for i in 0..=n {
+            let p = at_angle(40.0 + 100.0 * i as f64 / n as f64, 60.0);
+            if i == 0 {
+                band.move_to(p)
+            } else {
+                band.line_to(p)
+            }
+        }
+        for i in (0..=n).rev() {
+            band.line_to(at_angle(40.0 + 100.0 * i as f64 / n as f64, 45.0));
+        }
+        band.close_path();
+        let f = Frame::from_outline(&band).expect("a frame");
+        let at = |k: usize| f.nodes[f.corners[k]];
+        assert!(close(at(0), at_angle(140.0, 45.0)), "{:?}", at(0));
+        assert!(close(at(1), at_angle(40.0, 45.0)), "{:?}", at(1));
+        assert!(close(at(2), at_angle(40.0, 60.0)), "{:?}", at(2));
+        assert!(close(at(3), at_angle(140.0, 60.0)), "{:?}", at(3));
+        // No node was added inside a side.
+        assert_eq!(f.nodes.len(), 34);
+        // A square mapped into it fills the band, and its top-left corner
+        // goes to the band's top-left corner.
+        let mapped = apply(&square(), &f, false, Mapping::Putty);
+        let want = band.area().abs();
+        assert!(
+            (mapped.area().abs() - want).abs() < want * 0.02,
+            "{} {want}",
+            mapped.area()
+        );
+        let corners = points_of(&apply(&square(), &f, true, Mapping::Putty));
+        assert!(
+            corners.iter().any(|p| close(*p, at_angle(140.0, 60.0))),
+            "{corners:?}"
+        );
     }
 
     /// A frame made from an outline follows it (#993): a rectangle drawn

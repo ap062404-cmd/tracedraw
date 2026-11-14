@@ -134,6 +134,116 @@ pub fn crop_picture(s: &Shape, area: Rect) -> Option<(ShapeKind, Option<Box<Pict
     ))
 }
 
+/// How many samples a side each pixel is tested with against an outline
+/// ([`mask_picture`]): the edge comes out in steps of a quarter.
+const MASK_SAMPLES: u32 = 2;
+
+/// The picture `s` (a bitmap) with the pixels outside `outline` (a
+/// closed path in the picture's own space, filled by the nonzero rule)
+/// made see-through: its new kind, on the same pixels and box, and its
+/// ink channels kept for the new pixels. A pixel partly inside keeps
+/// that share of its opacity. The effects stack's original is cut the
+/// same way when it lies on the same pixels. `None` when every pixel
+/// lies inside, or the picture cannot be read (#1913).
+pub fn mask_picture(
+    s: &Shape,
+    outline: &tracedraw_core::geometry::BezPath,
+) -> Option<(ShapeKind, Option<Box<PictureInks>>)> {
+    let ShapeKind::Bitmap {
+        rect,
+        width_px,
+        height_px,
+        png,
+        fx,
+    } = &s.kind
+    else {
+        return None;
+    };
+    let rect = rect.abs();
+    let (w, h) = (*width_px, *height_px);
+    if w == 0 || h == 0 || !(rect.width() > 0.0 && rect.height() > 0.0) {
+        return None;
+    }
+    // The share of each pixel inside the outline, rows from the top.
+    let (px, py) = (rect.width() / f64::from(w), rect.height() / f64::from(h));
+    let n = MASK_SAMPLES;
+    let mut cover = vec![0u8; (w as usize) * (h as usize)];
+    let mut all = true;
+    for y in 0..h {
+        for x in 0..w {
+            let mut inside = 0u32;
+            for j in 0..n {
+                for i in 0..n {
+                    let p = tracedraw_core::geometry::Point::new(
+                        rect.x0 + (f64::from(x) + (f64::from(i) + 0.5) / f64::from(n)) * px,
+                        rect.y1 - (f64::from(y) + (f64::from(j) + 0.5) / f64::from(n)) * py,
+                    );
+                    if outline.winding(p) != 0 {
+                        inside += 1;
+                    }
+                }
+            }
+            all &= inside == n * n;
+            cover[(y * w + x) as usize] = (inside * 255 / (n * n)) as u8;
+        }
+    }
+    if all {
+        return None;
+    }
+    let cut = |png: &[u8]| -> Option<Vec<u8>> {
+        let img = image::load_from_memory_with_format(png, image::ImageFormat::Png).ok()?;
+        if img.width() != w || img.height() != h {
+            return None;
+        }
+        let mut img = img.to_rgba8();
+        for (x, y, p) in img.enumerate_pixels_mut() {
+            let c = u32::from(cover[(y * w + x) as usize]);
+            p.0[3] = ((u32::from(p.0[3]) * c + 127) / 255) as u8;
+        }
+        let mut buf = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut buf, image::ImageFormat::Png).ok()?;
+        Some(buf.into_inner())
+    };
+    let new_png = cut(png)?;
+    let new_fx = fx.as_ref().and_then(|f| {
+        let same = f.width_px == w
+            && f.height_px == h
+            && (f.rect.abs().x0 - rect.x0).abs() < 1e-6
+            && (f.rect.abs().y0 - rect.y0).abs() < 1e-6
+            && (f.rect.abs().x1 - rect.x1).abs() < 1e-6
+            && (f.rect.abs().y1 - rect.y1).abs() < 1e-6;
+        let png = cut(&f.png).filter(|_| same)?;
+        let mut f = f.clone();
+        f.png = png.into();
+        Some(f)
+    });
+    // The ink planes hold no opacity: they stay, named for the new pixels.
+    let inks = s
+        .picture_inks
+        .as_deref()
+        .filter(|i| i.fits(png.as_slice()))
+        .map(|i| {
+            Box::new(PictureInks {
+                inks: i.inks.clone(),
+                png: i.png.clone(),
+                of: fingerprint(&new_png),
+            })
+        });
+    Some((
+        ShapeKind::Bitmap {
+            rect: *match &s.kind {
+                ShapeKind::Bitmap { rect, .. } => rect,
+                _ => unreachable!(),
+            },
+            width_px: w,
+            height_px: h,
+            png: new_png.into(),
+            fx: new_fx,
+        },
+        inks,
+    ))
+}
+
 /// Whether the live effects of `s` look the same on any box: none, or
 /// only a uniform transparency. A gradient transparency, say, lies on
 /// the object's box and moves when the box changes.
@@ -323,6 +433,46 @@ mod tests {
         );
         s.stroke = None;
         s
+    }
+
+    /// The pixels outside an outline go see-through, a pixel half inside
+    /// keeps half its opacity, and an outline round every pixel changes
+    /// nothing (#1913).
+    #[test]
+    fn a_picture_is_masked_to_an_outline() {
+        use tracedraw_core::geometry::{BezPath, Point};
+        let pic = picture(1);
+        // The triangle under the diagonal from the top left to the
+        // bottom right corner.
+        let mut tri = BezPath::new();
+        tri.move_to(Point::new(0.0, 0.0));
+        tri.line_to(Point::new(40.0, 0.0));
+        tri.line_to(Point::new(0.0, 20.0));
+        tri.close_path();
+        let (kind, inks) = mask_picture(&pic, &tri).expect("masked");
+        assert!(inks.is_none());
+        let ShapeKind::Bitmap {
+            rect,
+            width_px,
+            height_px,
+            png,
+            ..
+        } = &kind
+        else {
+            panic!("a picture");
+        };
+        assert_eq!((*width_px, *height_px), (4, 2));
+        assert_eq!(*rect, Rect::new(0.0, 0.0, 40.0, 20.0));
+        let img = image::load_from_memory(png).expect("png").to_rgba8();
+        // Bottom left: all inside, colour kept. Top right: all outside.
+        assert_eq!(img.get_pixel(0, 1).0, [255, 0, 0, 255]);
+        assert_eq!(img.get_pixel(3, 0).0[3], 0);
+        // On the diagonal: partly in.
+        let a = img.get_pixel(1, 0).0[3];
+        assert!(a > 0 && a < 255, "{a}");
+        // Every pixel inside: nothing to do.
+        let all = Rect::new(-1.0, -1.0, 41.0, 21.0).to_path(0.01);
+        assert!(mask_picture(&pic, &all).is_none());
     }
 
     /// The picture cropped as the Crop tool frames it: a clip frame of

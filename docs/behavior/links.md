@@ -7,8 +7,10 @@ objects of the drawing.
 ## Panel
 
 - Hyperlink: the link of the selected objects (the first one's shows);
-  editing it and leaving the field sets it on all of them, an empty
-  field removes it.
+  editing it and leaving the field (Enter, Tab, a click elsewhere) sets
+  it on all of them, an empty field removes it. What is typed stays in
+  the field until then (#2191,
+  `pick_drag_tests::the_hyperlink_field_takes_what_is_typed`).
 - Web, E-mail and Page put `https://`, `mailto:` or `#page=` in front of
   the text; Remove takes the link away.
 - Bookmarks (named objects): one button per object with a name; a click
@@ -30,6 +32,14 @@ objects of the drawing.
   the object's own shape is what reacts to a click. Links inside a
   linked group are dropped (links cannot nest); `#page=n` links have no
   target in a one-page SVG and are left out.
+
+## In imported files
+
+- SVG: objects inside an `<a>` element (`href` or `xlink:href`) come in
+  with its address as their link: one object carries it itself, several
+  come in as a group that carries it (#2191,
+  `svg_import::tests::links_around_objects_are_read`). Links inside
+  text are not read.
 
 ## Checks
 

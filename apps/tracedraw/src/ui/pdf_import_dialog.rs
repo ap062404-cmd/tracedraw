@@ -1,8 +1,9 @@
 //! Import PDF: how a PDF's (or AI file's) text is read in, asked when one
 //! is opened or imported (#386): as editable text in the fonts installed
 //! here, or as curves drawn from the fonts the file embeds, which keeps
-//! its look exactly. File > Import can also bring each page in as one
-//! picture (#1916).
+//! its look exactly. Each page can also come in as one picture (#1916);
+//! opened that way, the pages can be chosen and set to a page size
+//! (#2570).
 
 use crate::app::App;
 use crate::i18n::{tr, trf};
@@ -10,6 +11,7 @@ use crate::ui::dialogs::{ok_cancel, window};
 use crate::ui::tips::RichTip;
 use egui::Context;
 use std::path::PathBuf;
+use tracedraw_core::geometry::Size;
 
 /// The dialog's state.
 #[derive(Debug, Clone, PartialEq)]
@@ -18,16 +20,129 @@ pub struct PdfTextState {
     /// Import into the drawing (File > Import) rather than open.
     pub import: bool,
     pub curves: bool,
-    /// Each page as one picture at `dpi` (File > Import only, #1916).
+    /// Lines joined into paragraph text (#2323).
+    pub paragraphs: bool,
+    /// Each page as one picture at `dpi` (#1916; opened too, #2570).
     pub picture: bool,
     pub dpi: f64,
+    /// Opened as pictures: the pages put on a page of this size, the
+    /// paper's name or empty for a custom size; `None` keeps each page's
+    /// own size (#2570).
+    pub page_size: Option<(String, Size)>,
+    /// Opened as pictures: every page, or those of `range` ("1-3, 5").
+    pub all_pages: bool,
+    pub range: String,
     /// Reduce very large pictures (#1835).
     pub reduce_pictures: bool,
     /// Keep the choice and stop asking (Options > File Formats).
     pub dont_ask: bool,
 }
 
+/// A PDF opened with each page as one picture (#2570): which pages, the
+/// page size they are put on (`None`: each its own) and the resolution.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PdfOpenPicture {
+    pub all_pages: bool,
+    pub range: String,
+    pub page_size: Option<Size>,
+    pub dpi: f64,
+}
+
+/// `size` turned to the orientation of a page of `page`: a landscape page
+/// goes on the paper turned on its side.
+pub fn oriented(size: Size, page: Size) -> Size {
+    let (short, long) = (size.width.min(size.height), size.width.max(size.height));
+    if page.width > page.height {
+        Size::new(long, short)
+    } else {
+        Size::new(short, long)
+    }
+}
+
+/// What moves a page of `from` onto a page of `to`: scaled to fit, never
+/// stretched, and centred.
+pub fn fit_on_page(from: Size, to: Size) -> tracedraw_core::geometry::Affine {
+    use tracedraw_core::geometry::{Affine, Vec2};
+    if from.width <= 0.0 || from.height <= 0.0 {
+        return Affine::IDENTITY;
+    }
+    let k = (to.width / from.width).min(to.height / from.height);
+    Affine::translate(Vec2::new(
+        (to.width - from.width * k) / 2.0,
+        (to.height - from.height * k) / 2.0,
+    )) * Affine::scale(k)
+}
+
+/// The pages of a PDF opened as pictures (#2570): those chosen (all
+/// when none of the typed ones is in the file), each put on the page size
+/// asked for, scaled to fit and centred, over the white of its paper so
+/// that its picture covers the whole page.
+pub fn pages_for_pictures(
+    pages: &mut Vec<tracedraw_io::pdf_import::ImportedPage>,
+    pic: &PdfOpenPicture,
+) {
+    use tracedraw_core::{Fill, Shape, ShapeKind};
+    let keep = crate::ui::pdf_pages::chosen_pages(pic.all_pages, &pic.range, pages.len());
+    if !keep.is_empty() {
+        let mut i = 0;
+        pages.retain(|_| {
+            i += 1;
+            keep.contains(&(i - 1))
+        });
+    }
+    let mut ids = tracedraw_core::id::IdSource::default();
+    for p in pages.iter_mut() {
+        if let Some(size) = pic.page_size {
+            let to = oriented(size, p.size);
+            let t = fit_on_page(p.size, to);
+            for s in &mut p.shapes {
+                s.transform_by(t);
+            }
+            p.size = to;
+        }
+        let mut paper = Shape::new(
+            ids.shape(),
+            ShapeKind::Rect {
+                rect: tracedraw_core::geometry::Rect::new(0.0, 0.0, p.size.width, p.size.height),
+                radius: 0.0,
+                corners: None,
+            },
+        );
+        paper.fill = Fill::Solid(tracedraw_core::Color::WHITE);
+        paper.stroke = None;
+        p.shapes.insert(0, paper);
+    }
+}
+
 impl App {
+    /// The pages of the PDF just opened as pictures become one picture
+    /// each at `dpi`, and the drawing opens with them as it is, with
+    /// nothing to undo (#2570).
+    pub fn opened_pages_to_pictures(&mut self, dpi: f64) {
+        let options = crate::bitmap_modes::ConvertOptions {
+            dpi,
+            ..Default::default()
+        };
+        for i in 0..self.doc().pages.len() {
+            self.goto_page(i);
+            let ids: Vec<tracedraw_core::ShapeId> = self.doc().pages[i]
+                .layers
+                .iter()
+                .flat_map(|l| &l.shapes)
+                .map(|s| s.id)
+                .collect();
+            if ids.is_empty() {
+                continue;
+            }
+            self.selection = ids;
+            self.convert_to_bitmap_with(&options);
+        }
+        self.goto_page(0);
+        self.selection.clear();
+        let doc = self.doc().clone();
+        self.engine.replace(doc);
+    }
+
     /// Before a PDF is read: ask how to read its text, when the
     /// preferences say so and it has not been asked for this file yet.
     /// True when the dialog was opened (the caller stops there).
@@ -39,8 +154,12 @@ impl App {
             path: path.to_path_buf(),
             import,
             curves: self.settings.formats.pdf_text_as_curves,
+            paragraphs: self.settings.formats.pdf_text_paragraphs,
             picture: self.settings.formats.pdf_as_picture,
             dpi: self.settings.formats.pdf_picture_dpi,
+            page_size: None,
+            all_pages: true,
+            range: "1".into(),
             reduce_pictures: self.settings.formats.pdf_reduce_pictures,
             dont_ask: false,
         });
@@ -64,6 +183,7 @@ impl App {
             } else {
                 FULL_PICTURE_PIXELS
             },
+            text_as_paragraphs: self.settings.formats.pdf_text_paragraphs,
         }
     }
 }
@@ -94,6 +214,19 @@ pub fn reduce_pictures_checkbox(ui: &mut egui::Ui, reduce: &mut bool) {
                 "pdf_import.reduce_pictures_tip",
             ));
     }
+}
+
+/// The Join lines into paragraph text check box (#2323), for text read
+/// as text only (`text`).
+pub fn paragraphs_checkbox(ui: &mut egui::Ui, paragraphs: &mut bool, text: bool) {
+    ui.add_enabled(
+        text,
+        egui::Checkbox::new(paragraphs, tr("pdf_import.paragraphs")),
+    )
+    .rich_tip(crate::ui::tips::pair(
+        "pdf_import.paragraphs",
+        "pdf_import.paragraphs_tip",
+    ));
 }
 
 /// The Text, Curves and Picture choices of the dialog and of Options >
@@ -197,20 +330,36 @@ pub fn dialog(app: &mut App, ctx: &Context, st: &mut PdfTextState, close: &mut b
         ui.label(trf("pdf_import.prompt", &[("name", &name)]));
         ui.add_space(6.0);
         ui.label(tr("pdf_import.text_as"));
-        // A picture only where the file comes into a drawing: opened, it
-        // is a drawing of its own to edit.
-        let picture = st.import.then_some((&mut st.picture, &mut st.dpi));
-        read_as_choices(ui, &mut st.curves, picture);
+        // Opened as pictures too, with the pages and their size (#2570).
+        read_as_choices(ui, &mut st.curves, Some((&mut st.picture, &mut st.dpi)));
+        if st.picture && !st.import {
+            open_picture_choices(app, ui, st);
+        }
+        let text = !st.curves && !st.picture;
+        ui.horizontal(|ui| {
+            ui.add_space(24.0);
+            paragraphs_checkbox(ui, &mut st.paragraphs, text);
+        });
         ui.add_space(4.0);
         reduce_pictures_checkbox(ui, &mut st.reduce_pictures);
         ui.add_space(4.0);
         ui.checkbox(&mut st.dont_ask, tr("pdf_import.dont_ask"));
         if ok_cancel(ui, close) {
             app.settings.formats.pdf_text_as_curves = st.curves;
+            app.settings.formats.pdf_text_paragraphs = st.paragraphs;
             app.settings.formats.pdf_reduce_pictures = st.reduce_pictures;
+            app.settings.formats.pdf_picture_dpi = st.dpi;
             if st.import {
                 app.settings.formats.pdf_as_picture = st.picture;
-                app.settings.formats.pdf_picture_dpi = st.dpi;
+            } else {
+                // Opened as pictures this once; the import keeps its own
+                // choice.
+                app.pdf_open_picture = st.picture.then(|| PdfOpenPicture {
+                    all_pages: st.all_pages,
+                    range: st.range.clone(),
+                    page_size: st.page_size.as_ref().map(|(_, s)| *s),
+                    dpi: st.dpi,
+                });
             }
             if st.dont_ask {
                 app.settings.formats.pdf_ask_text = false;
@@ -223,6 +372,86 @@ pub fn dialog(app: &mut App, ctx: &Context, st: &mut PdfTextState, close: &mut b
                 app.open_path(path);
             }
         }
+    });
+}
+
+/// The page size and the pages of a PDF opened as pictures (#2570).
+fn open_picture_choices(app: &App, ui: &mut egui::Ui, st: &mut PdfTextState) {
+    ui.horizontal(|ui| {
+        ui.add_space(24.0);
+        ui.label(tr("pdf_import.page_size"));
+        let shown = match &st.page_size {
+            None => tr("pdf_import.size_as_file"),
+            Some((n, _)) if n.is_empty() => tr("newdoc.preset_custom"),
+            Some((n, _)) => n.clone(),
+        };
+        let ticked = st.page_size.as_ref().map(|(n, _)| n.clone());
+        egui::ComboBox::from_id_salt("pdf_open_page_size")
+            .selected_text(shown)
+            .height(320.0)
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_label(st.page_size.is_none(), tr("pdf_import.size_as_file"))
+                    .clicked()
+                {
+                    st.page_size = None;
+                }
+                if ui
+                    .selectable_label(ticked.as_deref() == Some(""), tr("newdoc.preset_custom"))
+                    .clicked()
+                {
+                    let s = st
+                        .page_size
+                        .as_ref()
+                        .map_or(tracedraw_core::document::paper::A4, |(_, s)| *s);
+                    st.page_size = Some((String::new(), s));
+                }
+                ui.separator();
+                let saved = &app.settings.page_sizes;
+                if let Some(pick) = crate::ui::dialogs::paper_preset_menu(
+                    ui,
+                    ticked.as_deref().unwrap_or("-"),
+                    saved,
+                ) {
+                    st.page_size = Some(pick);
+                }
+            })
+            .response
+            .rich_tip(crate::ui::tips::pair(
+                "pdf_import.page_size",
+                "pdf_import.page_size_tip",
+            ));
+    });
+    if let Some((n, s)) = &mut st.page_size {
+        if n.is_empty() {
+            ui.horizontal(|ui| {
+                ui.add_space(48.0);
+                ui.add(
+                    crate::ui::field::NumField::new(&mut s.width)
+                        .range(1.0..=10000.0)
+                        .suffix(" mm"),
+                );
+                ui.label("x");
+                ui.add(
+                    crate::ui::field::NumField::new(&mut s.height)
+                        .range(1.0..=10000.0)
+                        .suffix(" mm"),
+                );
+            });
+        }
+    }
+    ui.horizontal(|ui| {
+        ui.add_space(24.0);
+        ui.radio_value(&mut st.all_pages, true, tr("pdf_import.all_pages"));
+        ui.radio_value(&mut st.all_pages, false, tr("pdf_import.pages"));
+        let r = ui.add_enabled(
+            !st.all_pages,
+            egui::TextEdit::singleline(&mut st.range).desired_width(110.0),
+        );
+        r.rich_tip(crate::ui::tips::pair(
+            "pdf_import.pages",
+            "pdf_import.pages_tip",
+        ));
     });
 }
 
@@ -250,6 +479,16 @@ mod tests {
         assert!(!app.ask_pdf_text(p, true));
         app.settings.formats.pdf_text_as_curves = true;
         assert!(app.pdf_options().text_as_curves);
+    }
+
+    /// Text read as text joins its lines into paragraph text unless the
+    /// choice is turned off (#2323).
+    #[test]
+    fn pdf_text_comes_in_as_paragraphs_by_default() {
+        let mut app = App::headless();
+        assert!(app.pdf_options().text_as_paragraphs);
+        app.settings.formats.pdf_text_paragraphs = false;
+        assert!(!app.pdf_options().text_as_paragraphs);
     }
 
     /// Pictures come in at their own size on the desktop unless Reduce

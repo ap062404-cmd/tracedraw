@@ -2325,8 +2325,13 @@ unsafe fn public_window_callback_inner(
                 }
             }
 
+            // TraceDraw: on Windows 11 the window takes the rectangle Windows
+            // suggests, which keeps it under the pointer while it is dragged
+            // (`size_bounds::takes_suggested_rect`, vendor/README.md, #2487).
             let new_outer_rect: RECT;
-            {
+            if crate::size_bounds::takes_suggested_rect(*super::dark_mode::WIN10_BUILD_VERSION) {
+                new_outer_rect = suggested_rect;
+            } else {
                 let suggested_ul =
                     (suggested_rect.left + margin_left, suggested_rect.top + margin_top);
 

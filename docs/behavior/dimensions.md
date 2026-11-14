@@ -27,6 +27,13 @@ moved, scaled, turned or skewed (`dimensions.rs`).
   (Options > Edit, 15 degrees by default) from the first point or the
   vertex, as the curve tools do; the preview follows
   (`pick_drag_tests::ctrl_keeps_a_dimension_leg_to_the_constrain_angle`).
+- From the first point on, the measure so far reads in a small box beside
+  the pointer, in the property bar's units, decimals and units sign: the
+  length while the second point or the dimension line is wanted, the
+  angle once the angular tool's first side is given. It is the value the
+  label will show (prefix and suffix left out), for the point a click
+  would take there, snapped and constrained (#2624,
+  `dimension_bar::tests::the_measure_reads_live_while_the_dimension_is_placed`).
 - The new dimension is selected; one undo step.
 
 ## Add Dimensions

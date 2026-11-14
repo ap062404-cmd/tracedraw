@@ -19,6 +19,17 @@ its row does not show as well. Window > Toolbars > Color Palette hides or shows 
 default palette. The rows described below are the same along a column,
 turned downwards.
 
+## Dragging the fill from the status bar
+
+The fill part of the status bar (its swatch and description) can be
+dragged onto an object in the drawing: the object, inside it or on its
+outline, takes that whole fill, whether it is a solid colour, a fountain,
+a pattern or no fill (#2448). The object need not be selected and the
+selection stays as it was; it is one undo step. A small chip of the fill
+follows the pointer, with a copy cursor over an object and a no-drop
+cursor elsewhere. Esc cancels, and letting go back on the status bar does
+nothing. A click still selects and a double click still opens Edit Fill.
+
 ## Palette bars
 
 Each further palette is a bar of its own (#1164 gave each a strip next
@@ -263,11 +274,37 @@ objects, a picture with others) does what it did before.
   own. **Cancel** or Esc adds nothing. The user's palettes are outside
   the drawing's undo, so the window is the place to back out.
 
+## Colour styles from objects (#2625)
+
+Objects moved with the Pick tool and let go over the Color Styles docker
+(vectors, pictures or both; a frame marks the docker while they are over
+it) are not moved: the same window opens as **Create Color Styles**.
+
+- The colours offered: the fill and outline colours of everything in the
+  selection (in groups and clip frames too, as Document palette >
+  From selection reads them) and the pixels of its pictures. Vectors
+  alone give their own colours exactly (a CMYK or spot colour stays as
+  it is) while there are no more of them than the number asked for;
+  past it, or with a picture, the colours are worked out as above.
+- **Group them into a color harmony** (ticked at first): the new styles
+  form one harmony, named Harmony 1 (Harmony 2 when that name is taken,
+  and so on). Unticked, they are plain styles.
+- **OK** makes a colour style ("Color n") of each colour the drawing has
+  no style of yet, in one undo step; the status bar says how many.
+  Cancel or Esc makes none. With nothing in the selection that has a
+  colour, no window opens and the status bar says so
+  (`ui::picture_colors::tests::objects_dropped_on_the_color_styles_docker_become_a_harmony`,
+  `ui::picture_colors::tests::a_picture_dropped_on_the_color_styles_docker_offers_its_colours`).
+- An empty Color Styles docker says that objects can be dragged onto it.
+
 ## Document palette
 
 - Every colour applied to an object (fill or outline, from a palette, the
-  colour panel or a dialog) joins the document palette, in the same undo
-  step as the change. The palette menu's Automatically Update turns that
+  colour panel, a dialog, the Object Properties docker, the property bar,
+  the Color Eyedropper or any other command that gives a uniform fill or
+  an outline colour) joins the document palette, in the same undo step
+  as the change; before, only the palettes and the colour panel added
+  theirs (#2378, `ui::palette::tests::every_colour_applied_joins_the_document_palette`). The palette menu's Automatically Update turns that
   off (also in Options > Customization > Color Palette).
 - A colour dragged in a colour picker (Properties > Fill > Uniform, and
   Properties > Outline > Colour): the object shows each colour the
@@ -297,8 +334,12 @@ objects, a picture with others) does what it did before.
 Open Palette... (files of `.tdpal`, `.xml`, `.gpl`, `.ase`, `.aco` and
 `.json`, the filter naming each extension; an XML palette is read as
 the document palette of a `.cdr` file, its CMYK, RGB, grey, Lab and the
-other colour models with their names, spot colours skipped, and a file
-with no colour that can be read says so in the status bar, #882,
+other colour models with their names; a spot colour library (a Pantone
+palette: the inks named in `<colorspaces>`, the page's colours naming an
+ink as their colour space) gives each colour once, named, as the spot
+colour of its ink with the ink's CMYK look as its stand-in
+(`palette::tests::spot_libraries_in_xml_open_as_named_spot_colours`);
+a file with no colour that can be read says so in the status bar, #882,
 `palette::tests::xml_palettes_open_with_names_and_values`; the palette
 opened gets a strip of its own next to the default palette, which stays
 first, and the same file opened again replaces the copy already open
@@ -311,8 +352,8 @@ Manager, Swatch Size, Rows, Position, Open as Palette Bar, Rename... and
 Close Palette; the document palette's bar has the document palette's
 items instead of the first two. A right click on a row outside the
 swatches, or on a floating bar's title, opens the same menu; a double
-click there opens the Palette Editor on the palette (not on the
-document palette). A swatch's menu starts with Delete Color: that colour
+click there opens the Palette Editor on the palette, the document
+palette's bar included (#2321). A swatch's menu starts with Delete Color: that colour
 leaves the user's palette at once (its file is saved again, the status
 bar names the colour); on a built-in or locked palette the item is
 greyed and its tooltip says why (#2138).
@@ -328,6 +369,19 @@ or Esc drops it. While the copy has changes the palette list is greyed
 drawing's undo; the editor's Undo takes back its last change (a name
 typed, or a colour dragged in the picker, is one step; up to 100), and
 Cancel all of them.
+
+The document palette is first in the editor's palette list while a
+drawing is open, and Edit Palette... in its bar's menu opens it there
+(#2321). It is the drawing's: OK or Apply gives the drawing the colours
+as one step of its undo history (Edit > Undo takes it back). Its colours
+keep no names of their own, so a name is shown and not edited there, and
+a spot colour, an ink of the drawing, keeps its value and its ink; Save
+as writes the colours to a palette file without changing the drawing.
+Spot colours have a small dot in the corner of their swatch, in the
+editor and on the palette bars, black on a light ink and white on a dark
+one. The fill and outline swatches of the status bar and the Colour panel carry
+the dot too, and a ring in the other corner while the selection overprints
+(see `spot-colors.md`, Swatch marks, #2455).
 
 - Selection as in a list: a click selects one swatch, Ctrl+click adds or
   removes one, Shift+click selects the run from the last swatch clicked

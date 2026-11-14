@@ -401,7 +401,7 @@ impl App {
         let ShapeKind::Text {
             origin,
             frame,
-            align,
+            mut align,
             para,
             on_path,
             ..
@@ -409,6 +409,22 @@ impl App {
         else {
             return;
         };
+        // A text begun in Hebrew or Arabic runs from right to left: its
+        // first letters typed into an empty text left aligned (the
+        // default) align it to the right, so artistic text grows to the
+        // left of where it was clicked and paragraph text starts at the
+        // frame's right edge. It started at the left and pushed the words
+        // to the right (discussion #2122).
+        if was_empty
+            && on_path.is_none()
+            && matches!(
+                align,
+                tracedraw_core::TextAlign::Left | tracedraw_core::TextAlign::None
+            )
+            && starts_right_to_left(&spans_text(&spans))
+        {
+            align = tracedraw_core::TextAlign::Right;
+        }
         // The text keeps its own hyphenation: typing took the setting for
         // new text, turning it on or off for the text edited (#470).
         let kind = ShapeKind::Text {
@@ -571,6 +587,12 @@ impl App {
                     match key {
                         Key::Num8 if ctrl => self.step_text_size(true),
                         Key::Num2 if ctrl => self.step_text_size(false),
+                        Key::Period if ctrl && shift => {
+                            self.step_char_spacing(true);
+                        }
+                        Key::Comma if ctrl && shift => {
+                            self.step_char_spacing(false);
+                        }
                         Key::Backspace => self.text_delete_backward(),
                         Key::Delete => self.text_delete_forward(),
                         Key::Enter if !shift => self.text_insert("\n"),
@@ -1090,6 +1112,12 @@ impl App {
         let te = self.text_edit.as_ref()?;
         let (layout, to_page) = self.text_layout_of(te.shape)?;
         let local = to_page.inverse() * p;
+        // On a path: the place along the line nearest the point (#2423).
+        let local = layout
+            .on_path
+            .as_ref()
+            .and_then(|pp| pp.unplace(local))
+            .unwrap_or(local);
         layout.hit_char(local)
     }
 
@@ -1338,10 +1366,26 @@ fn caret_geometry_sized(
         let size_mm = size_pt * 25.4 / 72.0;
         (0.0, 0.0, size_mm * 0.8, size_mm * 0.2)
     });
-    let top = *to_page * Point::new(x, base + asc);
-    let bottom = *to_page * Point::new(x, base - desc);
+    // On a path the caret stands where the letters are laid (#2423); it
+    // stayed where the straight line would have been.
+    let top = *to_page * layout.placed(Point::new(x, base + asc));
+    let bottom = *to_page * layout.placed(Point::new(x, base - desc));
     let mut quads = Vec::new();
-    if a != b {
+    if a != b && layout.on_path.is_some() {
+        // One quad per selected letter, each standing on the path.
+        for line in &layout.lines {
+            for i in a.max(line.start_char)..b.min(line.end_char) {
+                let k = i - line.start_char;
+                if let (Some(&x0), Some(&x1)) = (line.starts.get(k), line.ends.get(k)) {
+                    let (y0, y1) = (line.baseline - line.descent, line.baseline + line.ascent);
+                    quads.push(
+                        [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+                            .map(|(x, y)| *to_page * layout.placed(Point::new(x, y))),
+                    );
+                }
+            }
+        }
+    } else if a != b {
         // The stretches the selected characters cover on a line: one for
         // plain text, from the right for right-to-left text (#629),
         // several where the directions mix.
@@ -1452,6 +1496,61 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// A text begun in Hebrew runs from right to left (discussion
+    /// #2122): typed after a click, it aligns to the right, so it grows
+    /// to the left of the click instead of pushing its words to the
+    /// right; a frame's Hebrew starts at its right edge. A text begun in
+    /// Latin letters stays left aligned, and so does Hebrew typed into a
+    /// text that already holds letters.
+    #[test]
+    fn a_text_begun_in_hebrew_runs_from_the_right() {
+        let mut app = App::headless();
+        app.settings.autocorrect.enabled = false;
+        let align_of = |app: &App| match app
+            .text_edit
+            .as_ref()
+            .and_then(|te| app.doc().find_shape(te.shape).map(|s| s.kind.clone()))
+        {
+            Some(ShapeKind::Text { align, .. }) => align,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(app.text_align, tracedraw_core::TextAlign::Left);
+        // A digit and a space first: the first letter decides.
+        app.start_text(Point::new(100.0, 10.0), None);
+        app.text_insert("1 ");
+        app.text_insert("\u{5E9}\u{5DC}\u{5D5}\u{5DD}");
+        assert_eq!(align_of(&app), tracedraw_core::TextAlign::Left);
+        app.finish_text();
+        app.start_text(Point::new(100.0, 30.0), None);
+        app.text_insert("\u{5E9}\u{5DC}\u{5D5}\u{5DD}");
+        assert_eq!(align_of(&app), tracedraw_core::TextAlign::Right);
+        assert_eq!(app.text_align, tracedraw_core::TextAlign::Right);
+        // The next word goes on to the left of the click.
+        app.text_insert(" \u{5E2}\u{5D5}\u{5DC}\u{5DD}");
+        let id = app.text_edit.as_ref().expect("editing").shape;
+        if let Some((layout, to_page)) = app.text_layout_of(id) {
+            if layout.glyphs > 0 {
+                let b = to_page * layout.path.clone();
+                let b = tracedraw_core::geometry::Shape::bounding_box(&b);
+                assert!(b.x1 <= 100.0 + 1.0 && b.x0 < 99.0, "{b:?}");
+            }
+        }
+        app.finish_text();
+        // Latin first: left aligned as before.
+        app.start_text(Point::new(10.0, 50.0), None);
+        app.text_insert("Shalom ");
+        app.text_insert("\u{5E9}\u{5DC}\u{5D5}\u{5DD}");
+        assert_eq!(align_of(&app), tracedraw_core::TextAlign::Left);
+        app.finish_text();
+        // Paragraph text: right aligned too.
+        app.start_text(
+            Point::new(10.0, 100.0),
+            Some(tracedraw_core::geometry::Size::new(80.0, 40.0)),
+        );
+        app.text_insert("\u{5E9}\u{5DC}\u{5D5}\u{5DD}");
+        assert_eq!(align_of(&app), tracedraw_core::TextAlign::Right);
     }
 
     /// A text typed after a click with the Text tool is one step: Undo
@@ -1644,7 +1743,7 @@ mod tests {
         let mut ids = Vec::new();
         for (x, size, bold, font) in [(10.0, 11.0, false, "Calibri"), (60.0, 9.0, true, "Arial")] {
             app.text_size_pt = size;
-            app.text_bold = bold;
+            app.text_default_bold = bold;
             app.text_font = font.into();
             app.start_text(Point::new(x, 10.0), None);
             app.text_insert("Text");
@@ -2412,4 +2511,16 @@ mod tests {
             Some(('c', Some(Fill::Solid(Color::rgb8(255, 0, 0)))))
         );
     }
+}
+
+/// The first letter of `text` is of a script written from right to left
+/// (Hebrew, Arabic, Syriac, Thaana, N'Ko and their presentation forms):
+/// the direction the text's paragraph takes.
+pub fn starts_right_to_left(text: &str) -> bool {
+    text.chars().find(|c| c.is_alphabetic()).is_some_and(|c| {
+        matches!(
+            c as u32,
+            0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF | 0x10800..=0x10FFF | 0x1E800..=0x1EFFF
+        )
+    })
 }

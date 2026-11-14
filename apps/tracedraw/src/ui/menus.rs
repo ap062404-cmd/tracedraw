@@ -8,7 +8,6 @@ use crate::ui::dialogs::Dialog;
 use crate::ui::tips::RichTip;
 use egui::Ui;
 use tracedraw_core::document::ShapeKind;
-use tracedraw_core::Command;
 
 const MENU_WIDTH: f32 = 250.0;
 /// Menu rows: 26 px tall, a 30 px grey gutter
@@ -367,6 +366,13 @@ pub const NEW_IN_THIS_VERSION: &[&str] = &[
     // View > Navigator, with the key N, a command like any other.
     "menu.view",
     "menu.view.navigator",
+    // Keys for commands that had none (#2201): Ctrl+Shift+I, Ctrl+;
+    // and Ctrl+'.
+    "menu.edit",
+    "menu.edit.invert_selection",
+    "menu.view.guidelines",
+    "menu.view.grid",
+    "menu.view.document_grid",
 ];
 
 thread_local! {
@@ -411,6 +417,60 @@ pub const OUTLINE_TRACES: [(&str, crate::trace::Preset); 7] = [
     ),
 ];
 
+thread_local! {
+    /// The menu row right-clicked this frame, whose properties open
+    /// next (#2504).
+    static PROPERTIES_OF: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+    /// Each drawn row's place, for the tests.
+    #[cfg(test)]
+    pub(crate) static ROWS: std::cell::RefCell<Vec<(String, egui::Rect)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// A right-click on the menu row `id`, greyed or not, closes the menu and
+/// asks for the row's properties: Options > Customization > Commands at
+/// that command, on its Shortcut Keys tab, as CorelDRAW's Customize >
+/// Menu Item Properties does (#2504).
+fn row_properties(ui: &mut Ui, r: &egui::Response, id: &str, enabled: bool) {
+    #[cfg(test)]
+    ROWS.with(|rows| rows.borrow_mut().push((id.to_string(), r.rect)));
+    let right = if enabled {
+        r.secondary_clicked()
+    } else {
+        // A greyed row only senses the hover (a widget that takes clicks
+        // would be lit by the arrow keys).
+        r.contains_pointer()
+            && ui.input(|i| i.pointer.button_clicked(egui::PointerButton::Secondary))
+    };
+    if right {
+        PROPERTIES_OF.with(|p| *p.borrow_mut() = Some(id.to_string()));
+        ui.close();
+    }
+}
+
+/// Opens the properties a right-click on a menu row asked for.
+pub(crate) fn open_requested_properties(app: &mut App) {
+    if let Some(id) = PROPERTIES_OF.with(|p| p.borrow_mut().take()) {
+        open_command_properties(app, &id);
+    }
+}
+
+/// Options > Customization > Commands with the command `id` (a menu key
+/// or a row's label) picked, on its Shortcut Keys tab, where a key is
+/// given to it (#2504).
+pub(crate) fn open_command_properties(app: &mut App, id: &str) {
+    let ed = &mut app.shortcut_editor;
+    ed.category = None;
+    ed.filter.clear();
+    ed.selected = Some(id.to_string());
+    ed.keys_tab = true;
+    ed.capture = None;
+    ed.note = None;
+    ed.confirm_reset_all = false;
+    app.open_options_page(crate::ui::dialogs::OptionsPage::Commands);
+}
+
 pub fn set_highlight_new(on: bool) {
     HIGHLIGHT_NEW.with(|h| h.set(on));
 }
@@ -452,6 +512,7 @@ fn item_text_tip(
     }
     let shortcut = invoke::shown_shortcut(id, shortcut);
     let (r, _) = menu_row(ui, label, &shortcut, enabled, Mark::None);
+    row_properties(ui, &r, id, enabled);
     let r = match tip {
         Some(t) if !enabled => r.rich_tip(t),
         _ => r,
@@ -502,6 +563,7 @@ fn item_picture(
     }
     let shortcut = invoke::shown_shortcut(label, shortcut);
     let (r, _) = menu_row(ui, label, &shortcut, enabled, Mark::None);
+    row_properties(ui, &r, label, enabled);
     #[cfg(test)]
     if replay::hit(label, enabled) {
         return true;
@@ -632,6 +694,8 @@ fn menu_pic(key: &str) -> Option<crate::ui::propbar::Pic> {
         "menu.object.tf_scale" => Pic::ScaleMirror,
         "menu.object.tf_size" => Pic::SizeBox,
         "menu.object.tf_skew" => Pic::SkewBox,
+        "menu.object.mirror_h" => Pic::MirrorH,
+        "menu.object.mirror_v" => Pic::MirrorV,
         "menu.object.align_distribute_docker" => Pic::AlignDistribute,
         "menu.object.convert_to_bitmap" => Pic::ConvertToBitmap,
         "menu.object.copy_envelope_from" => Pic::EnvelopeCopy,
@@ -1722,6 +1786,62 @@ mod tests {
         assert!(app.document_tab_title(1).ends_with(":2"));
     }
 
+    /// Mirror Horizontally and Mirror Vertically are commands of Object >
+    /// Transformations, so a shortcut of the user's runs them (#2622).
+    #[test]
+    fn the_mirror_buttons_take_a_shortcut() {
+        use egui::{Key, Modifiers};
+        let ctx = crate::theme::ui_context();
+        let mut app = mixed_app();
+        app.show_welcome = false;
+        let first = app.doc().pages[0].layers[0].shapes[0].id;
+        let coeffs = |app: &App| {
+            app.doc().pages[0].layers[0]
+                .shapes
+                .iter()
+                .find(|s| s.id == first)
+                .map(|s| s.transform.as_coeffs())
+                .unwrap_or_default()
+        };
+        app.select(vec![first]);
+        let c0 = coeffs(&app);
+        app.settings
+            .shortcuts
+            .push(("menu.object.mirror_h".into(), "Alt+Shift+H".into()));
+        app.settings
+            .shortcuts
+            .push(("menu.object.mirror_v".into(), "Alt+Shift+V".into()));
+        root_frame(
+            &ctx,
+            &mut app,
+            vec![key(Key::H, Modifiers::ALT | Modifiers::SHIFT)],
+        );
+        root_frame(&ctx, &mut app, vec![]);
+        let c1 = coeffs(&app);
+        assert!((c1[0] + c0[0]).abs() < 1e-9, "{c0:?} {c1:?} {}", app.status);
+        assert!((c1[3] - c0[3]).abs() < 1e-9, "{c0:?} {c1:?}");
+        root_frame(
+            &ctx,
+            &mut app,
+            vec![key(Key::V, Modifiers::ALT | Modifiers::SHIFT)],
+        );
+        root_frame(&ctx, &mut app, vec![]);
+        let c2 = coeffs(&app);
+        assert!((c2[3] + c0[3]).abs() < 1e-9, "{c0:?} {c2:?} {}", app.status);
+        // The menu rows are there and show their keys.
+        assert_eq!(
+            invoke::shown_shortcut("menu.object.mirror_h", ""),
+            "Alt+Shift+H"
+        );
+        let mut ran = false;
+        app.select(vec![first]);
+        run_frame(&ctx, |ui| {
+            ran = run_command(&mut app, ui.ctx(), "menu.object.mirror_h")
+        });
+        assert!(ran);
+        assert!((coeffs(&app)[0] - c0[0]).abs() < 1e-9);
+    }
+
     /// A shortcut of the user's runs its menu command, takes over a
     /// built-in shortcut and shows in the menu row.
     #[test]
@@ -2190,6 +2310,7 @@ fn menu_bar_style(style: &mut egui::Style) {
 
 pub fn menu_bar(app: &mut App, ui: &mut Ui) {
     set_highlight_new(app.highlight_whats_new);
+    open_requested_properties(app);
     // Alt and a letter the user gave a command keeps running that command
     // instead of opening a menu; while Options waits for a shortcut's keys
     // no menu opens either.
@@ -2667,6 +2788,14 @@ fn edit_menu(app: &mut App, ui: &mut Ui) {
     ) {
         app.repeat_last();
     }
+    sub(ui, "menu.edit.repeat_on_similar", |ui| {
+        let can = app.last_repeatable().is_some();
+        for how in crate::select_similar::Similar::ALL {
+            if item(ui, how.repeat_key(), "", can) {
+                app.repeat_on_similar(how);
+            }
+        }
+    });
     sep(ui);
     // Guidelines selected (no objects) are cut and copied too.
     let guides_picked = !app.selected_guides.is_empty();
@@ -2690,12 +2819,9 @@ fn edit_menu(app: &mut App, ui: &mut Ui) {
     if item(ui, "menu.edit.paste", "Ctrl+V", true) {
         app.paste_any();
     }
-    if item(
-        ui,
-        "menu.edit.paste_in_view",
-        "Ctrl+Shift+V",
-        app.clipboard.is_some(),
-    ) {
+    // Offered like Paste: what another program copied pastes too, and
+    // the system clipboard is not read every frame to tell.
+    if item(ui, "menu.edit.paste_in_view", "Ctrl+Shift+V", true) {
         app.paste_in_view();
     }
     if item(ui, "menu.edit.paste_special", "", true) {
@@ -2741,7 +2867,12 @@ fn edit_menu(app: &mut App, ui: &mut Ui) {
         }
     });
     // Selection commands, each one undo step (#2002).
-    if item(ui, "menu.edit.invert_selection", "", app.has_document()) {
+    if item(
+        ui,
+        "menu.edit.invert_selection",
+        "Ctrl+Shift+I",
+        app.has_document(),
+    ) {
         app.invert_selection();
     }
     sub(ui, "menu.edit.select_similar", |ui| {
@@ -2870,7 +3001,7 @@ fn view_menu(app: &mut App, ui: &mut Ui) {
         }
     });
     sub(ui, "menu.view.grid", |ui| {
-        if check(ui, "menu.view.document_grid", "", app.show_grid) {
+        if check(ui, "menu.view.document_grid", "Ctrl+'", app.show_grid) {
             app.show_grid = !app.show_grid;
         }
         if check(ui, "menu.view.pixel_grid", "", app.show_pixel_grid) {
@@ -2887,7 +3018,7 @@ fn view_menu(app: &mut App, ui: &mut Ui) {
         app.settings.show_scrollbars = !app.settings.show_scrollbars;
         app.settings.save();
     }
-    if check(ui, "menu.view.guidelines", "", app.show_guides) {
+    if check(ui, "menu.view.guidelines", "Ctrl+;", app.show_guides) {
         app.show_guides = !app.show_guides;
     }
     if check(
@@ -2995,10 +3126,8 @@ pub(crate) fn layout_menu(app: &mut App, ui: &mut Ui) {
     if item(ui, "menu.layout.switch_orientation", "", true) {
         let s = app.page_size();
         let page = app.page;
-        app.run(Command::ResizePage {
-            page,
-            size: tracedraw_core::geometry::Size::new(s.height, s.width),
-        });
+        let size = tracedraw_core::geometry::Size::new(s.height, s.width);
+        app.resize_pages_about_centre(&[page], size, "Switch Page Orientation");
         app.fit_pending = true;
     }
     sep(ui);
@@ -3116,6 +3245,11 @@ fn node_items(app: &mut App, ui: &mut Ui) {
 
 fn object_menu(app: &mut App, ui: &mut Ui) {
     let has = !app.selection.is_empty();
+    if item(ui, "Object Imposition", "", has) {
+        if let Some(state) = crate::ui::imposition_dialog::State::from_selection(app.selected_shapes()) {
+            app.dialog = Dialog::Imposition(Box::new(state));
+        }
+    }
     let many = app.selection.len() > 1;
     // AI Generate: the docker in each mode, and Remove Background.
     sub(ui, "menu.object.ai_generate", |ui| {
@@ -3355,6 +3489,15 @@ fn object_menu(app: &mut App, ui: &mut Ui) {
                 crate::ui::transform_docker::open(app, tab, false);
             }
         }
+        // The property bar's two mirror buttons as commands, so a
+        // shortcut can be given to them (#2622).
+        sep(ui);
+        if item(ui, "menu.object.mirror_h", "", has) {
+            app.mirror(true);
+        }
+        if item(ui, "menu.object.mirror_v", "", has) {
+            app.mirror(false);
+        }
     });
     if item(ui, "menu.object.clear_transformations", "", has) {
         app.clear_transformations();
@@ -3409,17 +3552,37 @@ fn object_menu(app: &mut App, ui: &mut Ui) {
         }
         sep(ui);
         let three = app.selection.len() >= 3;
-        for (key, d) in [
-            ("menu.object.distribute_left", Distribute::Left),
-            ("menu.object.distribute_centers_h", Distribute::CentersH),
-            ("menu.object.distribute_spacing_h", Distribute::SpacingH),
-            ("menu.object.distribute_right", Distribute::Right),
-            ("menu.object.distribute_top", Distribute::Top),
-            ("menu.object.distribute_centers_v", Distribute::CentersV),
-            ("menu.object.distribute_spacing_v", Distribute::SpacingV),
-            ("menu.object.distribute_bottom", Distribute::Bottom),
+        for (key, shortcut, d) in [
+            ("menu.object.distribute_left", "Shift+L", Distribute::Left),
+            (
+                "menu.object.distribute_centers_h",
+                "Shift+E",
+                Distribute::CentersH,
+            ),
+            (
+                "menu.object.distribute_spacing_h",
+                "Shift+P",
+                Distribute::SpacingH,
+            ),
+            ("menu.object.distribute_right", "Shift+R", Distribute::Right),
+            ("menu.object.distribute_top", "Shift+T", Distribute::Top),
+            (
+                "menu.object.distribute_centers_v",
+                "Shift+C",
+                Distribute::CentersV,
+            ),
+            (
+                "menu.object.distribute_spacing_v",
+                "Shift+A",
+                Distribute::SpacingV,
+            ),
+            (
+                "menu.object.distribute_bottom",
+                "Shift+B",
+                Distribute::Bottom,
+            ),
         ] {
-            if item(ui, key, "", three) {
+            if item(ui, key, shortcut, three) {
                 app.distribute(d);
             }
         }
@@ -3514,11 +3677,7 @@ fn object_menu(app: &mut App, ui: &mut Ui) {
             ),
             ("menu.object.boundary", Shaping::Boundary, false),
         ] {
-            let on = if need_two {
-                op.ready(app.selection.len())
-            } else {
-                has
-            };
+            let on = if need_two { app.shaping_ready(op) } else { has };
             if item(ui, key, "", on) {
                 app.shaping(op);
             }
@@ -3770,25 +3929,46 @@ fn bitmaps_menu(app: &mut App, ui: &mut Ui) {
         if item(ui, "menu.bitmaps.mode_bw", "", has_bitmap) {
             app.dialog = Dialog::BitmapBw(Default::default());
         }
-        if item(ui, "menu.bitmaps.mode_grayscale", "", has_bitmap) {
+        // Grayscale, RGB and CMYK are the bitmaps' colour mode: the mode
+        // of every selected bitmap is ticked (#1254); a grayscale PNG is
+        // a grayscale bitmap (#2330), as the status bar names it.
+        let modes: Vec<crate::bitmap_fx::ColorMode> = app
+            .selected_rc()
+            .iter()
+            .filter_map(|s| match &s.kind {
+                ShapeKind::Bitmap { png, .. } => {
+                    Some(crate::bitmap_fx::mode_of(s.cmyk_bitmap, png))
+                }
+                _ => None,
+            })
+            .collect();
+        let all = |m| has_bitmap && modes.iter().all(|x| *x == m);
+        let all_gray = all(crate::bitmap_fx::ColorMode::Grayscale);
+        let all_rgb = all(crate::bitmap_fx::ColorMode::Rgb);
+        let all_cmyk = all(crate::bitmap_fx::ColorMode::Cmyk);
+        let all_paletted = all(crate::bitmap_fx::ColorMode::Paletted);
+        let all_lab = all(crate::bitmap_fx::ColorMode::Lab);
+        if mark_item_if(
+            ui,
+            "menu.bitmaps.mode_grayscale",
+            "",
+            Mark::Check(all_gray),
+            has_bitmap,
+        ) {
             app.set_bitmap_mode(crate::bitmap_fx::ColorMode::Grayscale);
         }
         if item(ui, "menu.bitmaps.mode_duotone", "", has_bitmap) {
             app.dialog = Dialog::BitmapDuotone(Default::default());
         }
-        if item(ui, "menu.bitmaps.mode_paletted", "", has_bitmap) {
+        if mark_item_if(
+            ui,
+            "menu.bitmaps.mode_paletted",
+            "",
+            Mark::Check(all_paletted),
+            has_bitmap,
+        ) {
             app.dialog = Dialog::BitmapPaletted(Default::default());
         }
-        // RGB and CMYK are the bitmaps' colour mode: the mode of every
-        // selected bitmap is ticked (#1254).
-        let modes: Vec<bool> = app
-            .selected_rc()
-            .iter()
-            .filter(|s| matches!(s.kind, ShapeKind::Bitmap { .. }))
-            .map(|s| s.cmyk_bitmap)
-            .collect();
-        let all_rgb = has_bitmap && modes.iter().all(|c| !c);
-        let all_cmyk = has_bitmap && modes.iter().all(|c| *c);
         if mark_item_if(
             ui,
             "menu.bitmaps.mode_rgb",
@@ -3798,8 +3978,14 @@ fn bitmaps_menu(app: &mut App, ui: &mut Ui) {
         ) {
             app.set_bitmap_mode(crate::bitmap_fx::ColorMode::Rgb);
         }
-        if item(ui, "menu.bitmaps.mode_lab", "", has_bitmap) {
-            app.apply_to_bitmaps("Lab Color", |img, _| crate::bitmap_modes::lab_mode(img));
+        if mark_item_if(
+            ui,
+            "menu.bitmaps.mode_lab",
+            "",
+            Mark::Check(all_lab),
+            has_bitmap,
+        ) {
+            app.set_bitmap_mode(crate::bitmap_fx::ColorMode::Lab);
         }
         if mark_item_if(
             ui,
@@ -4247,6 +4433,9 @@ fn tools_menu(app: &mut App, ui: &mut Ui) {
     if item(ui, "menu.tools.convert_colors", "", true) {
         app.convert_colors_dialog();
     }
+    if item(ui, "menu.tools.recolor", "", !app.selection.is_empty()) {
+        app.recolor_dialog();
+    }
     sep(ui);
     sub(ui, "menu.tools.scripts", |ui| {
         if item(ui, "menu.tools.scripts_docker", "", true) {
@@ -4632,5 +4821,50 @@ pub(crate) fn options_items(app: &mut App, ui: &mut Ui) {
     if item(ui, "menu.tools.options_ai", "", true) {
         app.dialog = Dialog::Options;
         app.options_page = crate::ui::dialogs::OptionsPage::AiGeneral;
+    }
+    // The dialog's last tab, the open drawing's own options: listed here
+    // as well as on the Layout menu, so every tab of the dialog has its
+    // entry (#2006).
+    if item(ui, "menu.layout.document_options", "", app.has_document()) {
+        app.dialog = Dialog::Options;
+        app.options_page = crate::ui::dialogs::OptionsPage::DocumentGeneral;
+    }
+}
+
+#[cfg(test)]
+mod options_items_tests {
+    use super::*;
+
+    /// Run `key` from the Options list alone (Tools > Options and the
+    /// standard bar's Options button): whether its item was there,
+    /// enabled, and fired.
+    fn run_in_options(app: &mut App, key: &str) -> bool {
+        let ctx = crate::theme::ui_context();
+        let _guard = invoke::Guard;
+        invoke::start_trigger(key);
+        let mut out = ctx.run_ui(Default::default(), |ui| options_items(app, ui));
+        out.textures_delta.clear();
+        invoke::finish().1
+    }
+
+    /// Tools > Options and the Options button list Document Setup, the
+    /// dialog's last tab, which only the Layout menu had (#2006).
+    #[test]
+    fn the_options_list_has_document_setup() {
+        let mut app = App::headless();
+        assert!(app.has_document());
+        assert!(run_in_options(&mut app, "menu.layout.document_options"));
+        assert!(matches!(app.dialog, Dialog::Options));
+        assert_eq!(
+            app.options_page,
+            crate::ui::dialogs::OptionsPage::DocumentGeneral
+        );
+        // With no drawing open there is no document to set up: greyed.
+        app.dialog = Dialog::None;
+        while app.has_document() {
+            app.docs.remove(0);
+        }
+        assert!(!run_in_options(&mut app, "menu.layout.document_options"));
+        assert!(matches!(app.dialog, Dialog::None));
     }
 }

@@ -29,27 +29,47 @@ pub mod nest;
 pub mod tray;
 
 use tracedraw_core::geometry::{Affine, BezPath, PathEl, Point};
+use tracedraw_core::live::Effect;
 use tracedraw_core::{Shape, ShapeKind};
 
 /// The outlines a cutter would follow for `shape`, in page space:
 /// one path per drawn object, groups opened, a clip frame by its frame
-/// only (its contents are cut off by it). `shape` must already carry its
-/// page transform (see `Document::shape_on_page`).
+/// only (its contents are cut off by it). An object whose outline a live
+/// effect reshapes (an envelope, a perspective, a distortion) gives the
+/// outline as it is drawn, not the one it had before the effect: the
+/// cutter follows what shows, and nesting keeps what shows apart
+/// (#2227). `shape` must already carry its page transform (see
+/// `Document::shape_on_page`).
 pub fn outlines(shape: &Shape) -> Vec<BezPath> {
     let mut out = Vec::new();
-    collect(shape, Affine::IDENTITY, &mut out);
+    collect(shape, Affine::IDENTITY, 0, &mut out);
     out
 }
 
-fn collect(shape: &Shape, parent: Affine, out: &mut Vec<BezPath>) {
+/// How deep groups are opened: a drawing nested deeper than this is not
+/// followed further.
+const MAX_DEPTH: usize = 64;
+
+fn collect(shape: &Shape, parent: Affine, depth: usize, out: &mut Vec<BezPath>) {
+    if depth > MAX_DEPTH {
+        return;
+    }
+    if shape.effects.iter().any(Effect::warps_outline) {
+        // The outline as the effects leave it; what they add (contours,
+        // blends, shadows) is not the object's own outline.
+        let mut drawn = tracedraw_core::live::evaluate(shape).main;
+        drawn.effects.clear();
+        collect(&drawn, parent, depth + 1, out);
+        return;
+    }
     let t = parent * shape.transform;
     match &shape.kind {
         ShapeKind::Group { children } => {
             for c in children {
-                collect(c, t, out);
+                collect(c, t, depth + 1, out);
             }
         }
-        ShapeKind::ClipFrame { frame, .. } => collect(frame, t, out),
+        ShapeKind::ClipFrame { frame, .. } => collect(frame, t, depth + 1, out),
         _ => {
             let p = t * shape.local_path();
             if !p.elements().is_empty() {
@@ -159,6 +179,54 @@ mod tests {
         assert_eq!(o.len(), 2);
         let b1 = tracedraw_core::geometry::Shape::bounding_box(&o[1]);
         assert!((b1.x0 - 20.0).abs() < 1e-9 && (b1.y0 - 5.0).abs() < 1e-9);
+    }
+
+    /// #2227: an enveloped object is cut and nested by the outline it
+    /// shows. Its frame's top right corner pulled far out, the outline
+    /// reaches there too, alone or inside a group.
+    #[test]
+    fn an_enveloped_object_gives_the_outline_it_draws() {
+        use tracedraw_core::geometry::Shape as _;
+        let rect = Rect::new(0.0, 0.0, 40.0, 20.0);
+        let mut a = Shape::new(
+            ShapeId(1),
+            ShapeKind::Rect {
+                rect,
+                radius: 0.0,
+                corners: None,
+            },
+        );
+        let mut frame = tracedraw_core::envelope::Frame::around(rect);
+        let corner = frame
+            .nodes
+            .iter()
+            .position(|n| (*n - Point::new(40.0, 20.0)).hypot() < 1e-9)
+            .expect("corner");
+        frame.nodes[corner] = Point::new(90.0, 70.0);
+        a.effects = vec![Effect::from_envelope(
+            &frame,
+            false,
+            tracedraw_core::envelope::Mapping::Putty,
+        )];
+        a.transform = Affine::translate((100.0, 0.0));
+        let drawn = a.visual_bounds();
+        assert!(drawn.x1 > 180.0 && drawn.y1 > 60.0, "{drawn:?}");
+        let o = outlines(&a);
+        assert_eq!(o.len(), 1);
+        let b = o[0].bounding_box();
+        assert!(
+            (b.x1 - drawn.x1).abs() < 0.01 && (b.y1 - drawn.y1).abs() < 0.01,
+            "{b:?} vs {drawn:?}"
+        );
+        let mut g = Shape::new(ShapeId(2), ShapeKind::Group { children: vec![a] });
+        g.transform = Affine::translate((0.0, 5.0));
+        let o = outlines(&g);
+        assert_eq!(o.len(), 1);
+        let b = o[0].bounding_box();
+        assert!(
+            (b.x1 - drawn.x1).abs() < 0.01 && (b.y1 - drawn.y1 - 5.0).abs() < 0.01,
+            "{b:?} vs {drawn:?}"
+        );
     }
 
     #[test]

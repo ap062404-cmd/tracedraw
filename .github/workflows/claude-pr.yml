@@ -13,7 +13,8 @@
 # description from the messages of the branch's commits.
 #
 # Needs the repository secret CLAUDE_CODE_OAUTH_TOKEN (from
-# `claude setup-token`) and "Allow auto-merge" in the repository settings.
+# `claude setup-token`) and "Allow auto-merge" in the repository settings;
+# without the secret the job does nothing and passes.
 name: claude-pr
 
 on:
@@ -45,12 +46,22 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/claude/')
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Without the token the action cannot run; the branches' pull requests
+    # are then opened by other means, and this job passes doing nothing
+    # rather than marking every pull request with a failed check.
+    env:
+      HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
     steps:
-      - uses: actions/checkout@v4
+      - if: env.HAS_TOKEN != 'true'
+        run: echo "CLAUDE_CODE_OAUTH_TOKEN is not set; nothing to do."
+
+      - if: env.HAS_TOKEN == 'true'
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - uses: anthropics/claude-code-action@v1
+      - if: env.HAS_TOKEN == 'true'
+        uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # The dispatch job above raises this run with GITHUB_TOKEN, so the

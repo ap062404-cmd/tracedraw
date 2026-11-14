@@ -34,6 +34,13 @@ use tracedraw_core::{
 /// held still, as a pointer move (mm).
 pub const HOLD_MM_PER_S: f64 = 10.0;
 
+/// How far Twirl turns per second while the button is down, as a pointer
+/// move (mm): at the bar's 50 % (0.05 rad per mm) one whole turn a
+/// second at the nib's centre, as CorelDRAW's Twirl winds the outline
+/// round while it is held. It went on as if the pointer moved 10 mm a
+/// second, a turn every 12 s, and read as slow (#2640).
+pub const TWIRL_MM_PER_S: f64 = std::f64::consts::TAU / 0.05;
+
 /// Attract and Repel's dose for each millimetre the pointer moves (or,
 /// held still, [`HOLD_MM_PER_S`] a second), times the bar's rate, over
 /// the nib's radius: at 50 % speed (rate 0.3) a 10 mm nib reaches its
@@ -50,6 +57,8 @@ pub struct StrokeBase {
     pub base: Vec<(ShapeId, BezPath)>,
     /// Attract and Repel's dose (-1 to 1) held so far on `base`.
     pub dose: f64,
+    /// Twirl: the turn (radians) held so far on `base`.
+    pub angle: f64,
     /// Roughen: where the nib went in this stroke.
     pub swath: Vec<Point>,
 }
@@ -221,6 +230,22 @@ impl App {
             }
             self.brush_stroke.dose = dose;
         }
+        if self.tool == Tool::Twirl {
+            // Held in one place, the turn so far is worked out afresh from
+            // the outline the hold found, so a hold of several turns is
+            // one exact twirl, not many small ones each fitted again
+            // (#2640); a move starts afresh from the outline as it is.
+            if delta.hypot() > 1e-9 || self.brush_stroke.base.is_empty() {
+                self.brush_stroke.base = self.brush_page_paths();
+                self.brush_stroke.angle = 0.0;
+            }
+            let step = b.twirl_rate() * turn * (delta.hypot() + TWIRL_MM_PER_S * held);
+            if !step.is_finite() || step == 0.0 {
+                self.drag = Drag::Node { last: p };
+                return;
+            }
+            self.brush_stroke.angle += step;
+        }
         if self.tool == Tool::Roughen {
             if self.brush_stroke.base.is_empty() {
                 self.brush_stroke.base = self.brush_page_paths();
@@ -255,15 +280,16 @@ impl App {
                     delta * BrushSettings::pressure(b.smear_pressure),
                     radius,
                 ),
-                (Tool::Twirl, _) => {
-                    effects::twirl(&page_path, p, motion * b.twirl_rate() * turn, radius)
+                (Tool::Twirl, Some(from)) => {
+                    effects::twirl(from, p, self.brush_stroke.angle, radius)
                 }
                 (Tool::AttractRepel, Some(from)) => effects::attract(from, p, radius, dose),
-                (Tool::Smudge, _) => effects::smear(
-                    &effects::smooth(&page_path, p, radius, 0.2),
+                (Tool::Smudge, _) => effects::smudge(
+                    &page_path,
+                    last,
                     p,
-                    delta * BrushSettings::pressure(b.smudge_pressure),
                     radius,
+                    BrushSettings::pressure(b.smudge_pressure),
                 ),
                 (Tool::Roughen, Some(from)) => effects::roughen_stroke(
                     from,
@@ -579,6 +605,65 @@ mod tests {
 mod hold_tests {
     use super::*;
     use tracedraw_core::Rect;
+
+    /// Held still on the right side of a square for four seconds at the
+    /// bar's 50 %, Twirl winds the side round the nib's centre about four
+    /// times, as CorelDRAW's does (#2640: it turned a little over half a
+    /// turn in that time and left a single hook). The outline comes back
+    /// a smooth spiral of a bounded number of curves, and each held step
+    /// is quick, since it is one twirl of the outline the hold found.
+    #[test]
+    fn a_held_twirl_winds_the_outline_round_several_times() {
+        let mut app = App::headless();
+        let id = app
+            .new_shape(ShapeKind::Rect {
+                rect: Rect::new(0.0, 0.0, 40.0, 40.0),
+                radius: 0.0,
+                corners: None,
+            })
+            .expect("shape");
+        app.select(vec![id]);
+        app.tool = Tool::Twirl;
+        app.brush_radius = 15.0;
+        let at = Point::new(40.0, 20.0);
+        app.brush_begin(at);
+        let t = std::time::Instant::now();
+        for _ in 0..240 {
+            app.brush_step(at, false, 1.0 / 60.0);
+        }
+        let per_step = t.elapsed().as_secs_f64() / 240.0;
+        let page = app.doc().shape_on_page(id).expect("shape").page_path();
+        // How often the outline crosses the ray from the nib's centre
+        // going up: a spiral of n turns on each side of the centre
+        // crosses it about 2 n times.
+        let mut crossings = 0;
+        let mut prev: Option<Point> = None;
+        tracedraw_core::geometry::flatten(&page, 0.01, &mut |e| match e {
+            tracedraw_core::geometry::PathEl::MoveTo(q) => prev = Some(q),
+            tracedraw_core::geometry::PathEl::LineTo(q) => {
+                if let Some(o) = prev {
+                    if (o.x < at.x) != (q.x < at.x) {
+                        let y = o.y + (q.y - o.y) * (at.x - o.x) / (q.x - o.x);
+                        if y > at.y && y < at.y + 15.0 {
+                            crossings += 1;
+                        }
+                    }
+                }
+                prev = Some(q);
+            }
+            _ => {}
+        });
+        assert!(
+            crossings >= 6,
+            "{crossings} crossings: wound round too little"
+        );
+        assert!(
+            page.elements().len() < 400,
+            "{} elements",
+            page.elements().len()
+        );
+        assert!(per_step < 0.25, "{per_step} s a step");
+    }
 
     /// Held still over the top side of a square, Attract and Repel move
     /// the side from the first step on, at a steady rate, and come to

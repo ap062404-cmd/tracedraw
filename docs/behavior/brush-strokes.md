@@ -39,7 +39,12 @@ the other modes could be reached from the panel alone (#1681,
 
 - Calligraphic: the outline swept by a flat nib of `width` at `angle`
   (degrees from +x) along the path; the thickness varies with the
-  direction of travel, thinnest when moving along the nib.
+  direction of travel, thinnest when moving along the nib. The edge
+  runs through the point of the nib that touches it, so a stroke drawn
+  by hand has a smooth edge at any angle; each stretch of the path stood
+  off the nib by up to half its width, which edged the stroke with steps
+  and teeth (#2334,
+  `shaping::tests::a_slanted_nib_band_meets_the_nib_at_its_touching_point`).
 - Preset: a variable-width stroke with a profile: Taper both ends
   (default), Taper start, Taper end, Bulge, Wave, Flat; width is the
   maximum thickness.

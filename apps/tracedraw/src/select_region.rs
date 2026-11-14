@@ -161,6 +161,18 @@ fn children_on_page(g: &Shape) -> Vec<Shape> {
     }
 }
 
+/// How a region takes an object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Take {
+    /// The object lies wholly inside the region, or the region crosses
+    /// or holds part of its outline.
+    Outline,
+    /// The whole region lies inside the object, touching no part of its
+    /// outline: in its fill, or in the box of a text, a bitmap and the
+    /// like.
+    Within,
+}
+
 /// The region takes `s` (in page space): wholly inside it, or with
 /// `touching` when it crosses or holds part of the object's outline, or
 /// lies in an object whose inside counts (`fill_counts`: filled, or
@@ -171,6 +183,59 @@ pub fn takes(
     touching: bool,
     fill_counts: &dyn Fn(&Shape) -> bool,
 ) -> bool {
+    takes_how(region, s, touching, fill_counts).is_some()
+}
+
+/// The objects of `shapes` (in page space) a selection drag over
+/// `region` takes, by their place in `shapes`. A touching drag that
+/// crosses or holds the outline of some object leaves out the objects
+/// it merely lies in (#1503): a frame drawn round a small object over,
+/// or hidden behind, a larger filled one takes the small object alone.
+/// A drag that touches no outline at all takes the objects it lies in,
+/// as before.
+pub fn taken(
+    region: Region,
+    shapes: &[Shape],
+    touching: bool,
+    fill_counts: &dyn Fn(&Shape) -> bool,
+) -> Vec<usize> {
+    let how: Vec<Option<Take>> = shapes
+        .iter()
+        .map(|s| takes_how(region, s, touching, fill_counts))
+        .collect();
+    let by_outline = how.contains(&Some(Take::Outline));
+    how.iter()
+        .enumerate()
+        .filter(|(_, h)| match h {
+            Some(Take::Outline) => true,
+            Some(Take::Within) => !by_outline,
+            None => false,
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// [`takes`], with how: by the object's outline, or only by lying
+/// inside it.
+pub fn takes_how(
+    region: Region,
+    s: &Shape,
+    touching: bool,
+    fill_counts: &dyn Fn(&Shape) -> bool,
+) -> Option<Take> {
+    // Of several parts touched, one touched by its outline counts.
+    let any = |parts: &[Shape]| -> Option<Take> {
+        let mut found = None;
+        for q in parts {
+            match takes_how(region, q, true, fill_counts) {
+                Some(Take::Outline) => return Some(Take::Outline),
+                Some(Take::Within) => found = Some(Take::Within),
+                None => {}
+            }
+        }
+        found
+    };
+    let whole = |yes: bool| yes.then_some(Take::Outline);
     if !s.effects.is_empty() {
         // What the object draws: its warped outline and the objects its
         // effects add; wholly inside means all of them.
@@ -184,23 +249,25 @@ pub fn takes(
             })
             .collect();
         return if touching {
-            parts.iter().any(|q| takes(region, q, true, fill_counts))
+            any(&parts)
         } else {
-            parts.iter().all(|q| takes(region, q, false, fill_counts))
+            whole(parts.iter().all(|q| takes(region, q, false, fill_counts)))
         };
     }
     let b = s.bounds();
     if !b.x0.is_finite() || !b.y0.is_finite() || !b.x1.is_finite() || !b.y1.is_finite() {
-        return false;
+        return None;
     }
     if !touching {
-        return match region {
+        return whole(match region {
             Region::Rect(r) => r.contains_rect(b),
             Region::Polygon(_) => {
                 if matches!(s.kind, ShapeKind::Group { .. }) {
                     let kids = children_on_page(s);
-                    return !kids.is_empty()
-                        && kids.iter().all(|c| takes(region, c, false, fill_counts));
+                    return whole(
+                        !kids.is_empty()
+                            && kids.iter().all(|c| takes(region, c, false, fill_counts)),
+                    );
                 }
                 let outline = if boxed(s) {
                     rect_path(b, 0.0)
@@ -210,15 +277,13 @@ pub fn takes(
                 let lines = polylines(&outline);
                 !lines.is_empty() && lines.iter().flatten().all(|p| region.contains(*p))
             }
-        };
+        });
     }
     if !overlap(region.bounds(), b) {
-        return false;
+        return None;
     }
     if matches!(s.kind, ShapeKind::Group { .. }) {
-        return children_on_page(s)
-            .iter()
-            .any(|c| takes(region, c, true, fill_counts));
+        return any(&children_on_page(s));
     }
     let (outline, inside) = if boxed(s) {
         (rect_path(b, 0.0), true)
@@ -227,7 +292,7 @@ pub fn takes(
     };
     let lines = polylines(&outline);
     if lines.iter().flatten().any(|p| region.contains(*p)) {
-        return true;
+        return Some(Take::Outline);
     }
     let edges = region.edges();
     for line in &lines {
@@ -236,12 +301,12 @@ pub fn takes(
                 .iter()
                 .any(|(c, d)| segments_meet(seg[0], seg[1], *c, *d))
             {
-                return true;
+                return Some(Take::Outline);
             }
         }
     }
     // The whole region lies inside the object.
-    inside && region.sample().is_some_and(|p| outline.contains(p))
+    (inside && region.sample().is_some_and(|p| outline.contains(p))).then_some(Take::Within)
 }
 
 #[cfg(test)]
@@ -284,6 +349,60 @@ mod tests {
         assert!(!takes(inside, &s, true, &filled));
         let f = rect_shape(2, Rect::new(10.0, 10.0, 30.0, 30.0), true);
         assert!(takes(inside, &f, true, &filled));
+    }
+
+    /// A touching frame or lasso drawn round a small object that lies
+    /// over, or hidden behind, a larger filled one takes the small
+    /// object alone; drawn inside the large one and touching no outline,
+    /// it takes the large one as before (#1503).
+    #[test]
+    fn a_touching_drag_leaves_out_the_object_it_merely_lies_in() {
+        let large = rect_shape(1, Rect::new(0.0, 0.0, 100.0, 100.0), true);
+        let small = rect_shape(2, Rect::new(40.0, 40.0, 50.0, 50.0), true);
+        let far = rect_shape(3, Rect::new(200.0, 0.0, 210.0, 10.0), true);
+        let round_small = Region::Rect(Rect::new(35.0, 35.0, 55.0, 55.0));
+        assert_eq!(
+            takes_how(round_small, &large, true, &filled),
+            Some(Take::Within)
+        );
+        assert_eq!(
+            takes_how(round_small, &small, true, &filled),
+            Some(Take::Outline)
+        );
+        // The small one in front of the large one, or behind it.
+        for shapes in [
+            vec![large.clone(), small.clone(), far.clone()],
+            vec![small.clone(), large.clone(), far.clone()],
+        ] {
+            let got: Vec<u64> = taken(round_small, &shapes, true, &filled)
+                .into_iter()
+                .map(|i| shapes[i].id.0)
+                .collect();
+            assert_eq!(got, vec![2]);
+        }
+        let shapes = vec![large.clone(), small.clone(), far];
+        // Across the small one's edge only: still the small one alone.
+        let across = Region::Rect(Rect::new(45.0, 45.0, 60.0, 60.0));
+        assert_eq!(taken(across, &shapes, true, &filled), vec![1]);
+        // A lasso round the small one.
+        let lasso = [
+            Point::new(45.0, 30.0),
+            Point::new(60.0, 45.0),
+            Point::new(45.0, 60.0),
+            Point::new(30.0, 45.0),
+        ];
+        assert_eq!(
+            taken(Region::Polygon(&lasso), &shapes, true, &filled),
+            vec![1]
+        );
+        // In the large one's fill, touching no outline: the large one.
+        let in_fill = Region::Rect(Rect::new(10.0, 10.0, 20.0, 20.0));
+        assert_eq!(taken(in_fill, &shapes, true, &filled), vec![0]);
+        // Across the large one's edge too: both.
+        let both = Region::Rect(Rect::new(-5.0, 35.0, 55.0, 55.0));
+        assert_eq!(taken(both, &shapes, true, &filled), vec![0, 1]);
+        // Not touching: wholly inside only, as ever.
+        assert_eq!(taken(round_small, &shapes, false, &filled), vec![1]);
     }
 
     #[test]

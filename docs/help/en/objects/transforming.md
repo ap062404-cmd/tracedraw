@@ -48,7 +48,9 @@ reference point; off, from the ruler origin.
 ### Scale and Mirror {#scale-and-mirror}
 
 [[docker.x]] and [[docker.y]] scale in percent (100% at first).
-[[toolbar.mirror_h]] and [[toolbar.mirror_v]] flip the selection.
+[[toolbar.mirror_h]] and [[toolbar.mirror_v]] flip the selection. They are also
+commands of **Object > Transformations**, so you can give them a shortcut in
+**Options > Customization > Commands** or with a right click on the menu row.
 [[docker.proportional]] keeps both scales the same.
 
 ### Size {#size}

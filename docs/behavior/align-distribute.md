@@ -3,7 +3,8 @@
 The Align and Distribute panel (no key of its own since Ctrl+Shift+A
 became Paste Style From, #1345; Options > Shortcuts can give it
 one), the Object > Align and
-Distribute menu and the keys L, R, T, B, E, C and P.
+Distribute menu and the keys L, R, T, B, E, C and P (with Shift they
+distribute, see Distribute).
 
 ## Align
 
@@ -40,7 +41,14 @@ are spread:
 - With fewer objects the buttons are pale and a line says how many are
   needed.
 - Use Outline applies here too.
-- The menu distributes between the outermost objects.
+- The menu distributes between the outermost objects, and so do the
+  keys: Shift and the letter that aligns the same way (Shift+L, Shift+R,
+  Shift+T and Shift+B the edges, Shift+E the centres across, Shift+C the
+  centres down), Shift+P equal gaps across and Shift+A equal gaps down
+  (#2147,
+  `pick_drag_tests::shift_and_the_align_letters_distribute_the_selection`).
+  With the Shape tool and nodes chosen the Shift letters stay node
+  commands.
 - Each Distribute is one undo step ("Distribute").
 - Set spacing (#2005): the first object stays and the others follow it
   the spacing apart, as gaps or between edges or centres. Under the

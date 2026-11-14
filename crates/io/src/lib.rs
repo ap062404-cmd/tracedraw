@@ -14,6 +14,8 @@ pub mod pdf;
 pub mod pdf_crypt;
 pub(crate) mod pdf_glyphs;
 pub mod pdf_import;
+mod pdf_indic;
+pub mod pdf_paragraphs;
 pub mod picture_crop;
 pub mod plt;
 pub mod psd;
@@ -136,7 +138,7 @@ pub fn for_export(doc: &Document, page: Option<usize>) -> std::borrow::Cow<'_, D
     }
 }
 
-/// Native format: pretty JSON with a `.tdraw` extension.
+/// Native format: compact JSON with a `.tdraw` extension.
 pub fn save_native(doc: &Document, path: impl AsRef<Path>) -> Result<()> {
     // Written as it is made, not gathered in memory first.
     let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
@@ -336,7 +338,7 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         let back = load_native(&path).unwrap();
         let _ = std::fs::remove_file(&path);
-        assert!(text.contains("\"sharpness\": -0.7"), "{text}");
+        assert!(text.contains("\"sharpness\":-0.7"), "{text}");
         assert_eq!(back, doc);
         // SVG: the outline as the model draws it, inner points past the
         // centre (y flipped to the SVG's top-left origin).
@@ -670,7 +672,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         assert_eq!(back, doc);
         assert!(text.contains("\"double_thin_word\""), "{text}");
-        assert!(text.contains("\"underline\": true"), "{text}");
+        assert!(text.contains("\"underline\":true"), "{text}");
         let ShapeKind::Text { spans, .. } = &back.pages[0].layers[0].shapes[0].kind else {
             panic!("not text");
         };
@@ -797,9 +799,9 @@ mod tests {
         let json = doc.to_json().unwrap();
         for what in [
             "\"blend_direction\"",
-            "\"steps\": 24",
-            "\"smooth\": true",
-            "\"acceleration\": 35",
+            "\"steps\":24",
+            "\"smooth\":true",
+            "\"acceleration\":35",
         ] {
             assert!(json.contains(what), "{what} in {json}");
         }
@@ -848,7 +850,7 @@ mod tests {
         doc.layer_mut(layer).unwrap().shapes.push(s);
         // Native: the flag is written and read back.
         let json = doc.to_json().unwrap();
-        assert!(json.contains("\"fixed\": true"), "{json}");
+        assert!(json.contains("\"fixed\":true"), "{json}");
         assert_eq!(Document::from_json(&json).unwrap(), doc);
         // SVG and PDF draw the outline the rectangle shows.
         let mut ids = tracedraw_core::id::IdSource::default();
@@ -995,7 +997,7 @@ mod tests {
         // Written by a version before #1201: the features as they were,
         // the characters on the baseline.
         let json = doc.to_json().unwrap();
-        let old = json.replace("\"position\": \"superscript\"", "\"features\": []");
+        let old = json.replace("\"position\":\"superscript\"", "\"features\":[]");
         assert_ne!(old, json);
         let back = Document::from_json(&old).unwrap();
         let ShapeKind::Text { spans, .. } = &back.pages[0].layers[0].shapes[0].kind else {

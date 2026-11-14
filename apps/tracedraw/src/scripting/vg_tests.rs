@@ -238,7 +238,9 @@ fn community_macro_resize_the_selection() {
     run(
         &mut app,
         "ActiveDocument.Unit = cdrMillimeter;
-         for (let i = 0; i < 3; i++) ActiveLayer.CreateEllipse2(20 + i * 30, 50, 5 + i).AddToSelection();",
+         const made = [];
+         for (let i = 0; i < 3; i++) made.push(ActiveLayer.CreateEllipse2(20 + i * 30, 50, 5 + i));
+         for (const e of made) e.AddToSelection();",
     );
     run(
         &mut app,
@@ -286,7 +288,9 @@ fn community_macro_grid_layout() {
         &mut app,
         "ActiveDocument.Unit = cdrMillimeter;
          ActiveDocument.ReferencePoint = cdrTopLeft;
-         for (let i = 0; i < 9; i++) ActiveLayer.CreateEllipse2(100, 100, 4 + i % 3).AddToSelection();
+         const made = [];
+         for (let i = 0; i < 9; i++) made.push(ActiveLayer.CreateEllipse2(100, 100, 4 + i % 3));
+         for (const e of made) e.AddToSelection();
          const sr = ActiveSelectionRange;
          let i = 0;
          for (const s of sr) {
@@ -646,7 +650,7 @@ fn documents_pages_layers_and_settings() {
 #[test]
 fn members_without_a_counterpart_raise_named_errors() {
     for (src, member) in [
-        ("ActiveLayer.Paste();", "Layer.Paste"),
+        ("ActiveLayer.PasteSpecial();", "Layer.PasteSpecial"),
         (
             "Application.FrameWork.ShowDocker('x');",
             "Application.FrameWork",

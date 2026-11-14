@@ -128,10 +128,15 @@ pub fn dialog(ctx: &Context, id: &str, title: &str, size: Vec2, add: impl FnOnce
                 0.0,
                 Tokens::panel(),
             );
-            ui.scope_builder(egui::UiBuilder::new().max_rect(body), |ui| {
-                form_style(ui);
-                add(ui)
-            });
+            // The body is drawn in a child of its own, cut at the
+            // window's edge, so nothing in it can make the window wider
+            // or taller: a page a little too wide grew the window for as
+            // long as it showed, and the window, placed by its centre,
+            // moved to the side with every such change (#2199).
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(body));
+            child.set_clip_rect(body.intersect(ui.clip_rect()));
+            form_style(&mut child);
+            add(&mut child);
         });
     if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
         closed = true;

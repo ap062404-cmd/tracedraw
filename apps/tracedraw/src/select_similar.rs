@@ -37,6 +37,16 @@ impl Similar {
             Similar::Kind => "menu.edit.similar_kind",
         }
     }
+
+    /// The Edit > Repeat on Similar item's key.
+    pub fn repeat_key(self) -> &'static str {
+        match self {
+            Similar::Fill => "menu.edit.repeat_similar_fill",
+            Similar::Outline => "menu.edit.repeat_similar_outline",
+            Similar::TextFormat => "menu.edit.repeat_similar_text_format",
+            Similar::Kind => "menu.edit.repeat_similar_kind",
+        }
+    }
 }
 
 /// The fonts and sizes a text's characters use (families compared
@@ -66,6 +76,27 @@ fn text_formats(shape: &Shape) -> Vec<(String, i64)> {
 fn kind_of(shape: &Shape) -> (std::mem::Discriminant<ShapeKind>, bool) {
     let paragraph = matches!(&shape.kind, ShapeKind::Text { frame: Some(_), .. });
     (std::mem::discriminant(&shape.kind), paragraph)
+}
+
+/// The objects of `shape` Select Similar compares: the shape itself, or
+/// for a group the objects in it at any depth, the groups themselves
+/// left out. A group has no fill or outline of its own to compare (its
+/// own fill is none), so compared as one object it matched every object
+/// without a fill and none of the objects it holds (#2203).
+/// For Object Type (`groups`) a group is an object of its kind as well,
+/// kept beside the objects in it.
+fn members<'a>(shape: &'a Shape, groups: bool, out: &mut Vec<&'a Shape>) {
+    match &shape.kind {
+        ShapeKind::Group { children } => {
+            if groups {
+                out.push(shape);
+            }
+            for c in children {
+                members(c, groups, out);
+            }
+        }
+        _ => out.push(shape),
+    }
 }
 
 /// Whether `candidate` is like `reference` in the way `how` asks.
@@ -158,24 +189,146 @@ impl App {
     }
 
     /// Edit > Select Similar: every object of the page Select All would
-    /// take that is like one of the selected objects in the way `how`
-    /// asks (the selected ones among them). Nothing selected: nothing
-    /// happens. One undo step.
+    /// take, and every object in its groups, that is like one of the
+    /// selected objects in the way `how` asks (the selected ones among
+    /// them; a selected group stands for the objects in it). Nothing
+    /// selected: nothing happens. One undo step.
     pub fn select_similar(&mut self, how: Similar) {
         if self.selection.is_empty() {
             return;
         }
-        let refs: Vec<Shape> = self.selected_shapes();
-        let ids: Vec<ShapeId> = self
-            .selectable_shapes()
-            .into_iter()
-            .filter(|c| refs.iter().any(|r| is_similar(r, c, how)))
-            .map(|c| c.id)
-            .collect();
+        let selected: Vec<Shape> = self.selected_shapes();
+        let ids = self.similar_ids(&selected, how);
         if ids.is_empty() {
             return;
         }
         self.selection_command(how.key(), ids);
+    }
+
+    /// The objects of the page Select All would take, and the objects in
+    /// their groups, that are like one of `shapes` in the way `how` asks
+    /// (`shapes` among them when they are on the page).
+    pub(crate) fn similar_ids(&self, shapes: &[Shape], how: Similar) -> Vec<ShapeId> {
+        // Object Type compares a selected group as a group; the other ways
+        // compare the objects in it.
+        let kind = how == Similar::Kind;
+        let mut refs = Vec::new();
+        for s in shapes {
+            if kind {
+                refs.push(s);
+            } else {
+                members(s, false, &mut refs);
+            }
+        }
+        // The objects in groups count too, each on its own (#2203).
+        let mut candidates = Vec::new();
+        for s in self.selectable_shapes() {
+            members(s, kind, &mut candidates);
+        }
+        candidates
+            .into_iter()
+            .filter(|c| refs.iter().any(|r| is_similar(r, c, how)))
+            .map(|c| c.id)
+            .collect()
+    }
+
+    /// Edit > Repeat on Similar: what Edit > Repeat would repeat, done
+    /// again to every object of the page like the objects it was done to
+    /// (as they were before it) in the way `how` asks, those objects and
+    /// the objects in them left out. A move, turn or resize, or a copy, is
+    /// repeated on each object on its own (a turn about each object's own
+    /// centre); fills, outlines, opacity and Recolor on all of them at
+    /// once. One undo step; the objects it was done to become the
+    /// selection. The number of objects.
+    pub fn repeat_on_similar(&mut self, how: Similar) -> usize {
+        let entries = self.repeat_group_entries();
+        let Some(first) = entries.first() else {
+            return 0;
+        };
+        let refs: Vec<Shape> = if first.refs.is_empty() {
+            first
+                .before
+                .iter()
+                .filter_map(|id| self.doc().find_shape(*id).cloned())
+                .collect()
+        } else {
+            first.refs.clone()
+        };
+        // What was done already: the objects of every action of the group,
+        // before and after (a copy), and everything inside them.
+        let mut done: Vec<ShapeId> = Vec::new();
+        for e in &entries {
+            for id in e.before.iter().chain(&e.after) {
+                if let Some(s) = self.doc().find_shape(*id) {
+                    let mut inside = Vec::new();
+                    members(s, true, &mut inside);
+                    done.extend(inside.iter().map(|m| m.id));
+                }
+                done.push(*id);
+            }
+        }
+        let mut group: Vec<crate::app::Repeatable> = Vec::new();
+        for e in &entries {
+            match &e.action {
+                crate::app::Repeatable::Group(actions) => group.extend(actions.iter().cloned()),
+                a => group.push(a.clone()),
+            }
+        }
+        let targets: Vec<ShapeId> = self
+            .similar_ids(&refs, how)
+            .into_iter()
+            .filter(|id| !done.contains(id))
+            .collect();
+        if targets.is_empty() {
+            self.status = crate::i18n::tr("status.repeat_on_similar_none");
+            return 0;
+        }
+        // An object inside another target goes with it (a group's members
+        // matched with the group by Object Type).
+        let targets: Vec<ShapeId> = targets
+            .iter()
+            .copied()
+            .filter(|id| {
+                !targets.iter().any(|other| {
+                    other != id
+                        && self.doc().find_shape(*other).is_some_and(|s| {
+                            let mut inside = Vec::new();
+                            members(s, true, &mut inside);
+                            inside.iter().any(|m| m.id == *id && m.id != s.id)
+                        })
+                })
+            })
+            .collect();
+        let each = group.iter().any(|a| {
+            !matches!(a, crate::app::Repeatable::Command(c)
+                if !matches!(**c, tracedraw_core::Command::TransformShapes { .. }))
+        });
+        let mark = self.engine.begin_group();
+        let mut after = Vec::new();
+        if each {
+            for id in &targets {
+                self.select(vec![*id]);
+                for a in &group {
+                    self.replay(a.clone());
+                }
+                after.extend(self.selection.iter().copied());
+            }
+        } else {
+            self.select(targets.clone());
+            for a in &group {
+                self.replay(a.clone());
+            }
+            after = self.selection.clone();
+        }
+        self.engine.end_group(mark, "Repeat on Similar");
+        self.select(after);
+        // Edit > Repeat after it repeats the same actions again.
+        if self.engine.last_step_id() != mark {
+            self.note_repeatable_from(crate::app::Repeatable::Group(group), targets.clone());
+        }
+        let n = targets.len();
+        self.status = crate::i18n::trf("status.repeat_on_similar_done", &[("n", &n.to_string())]);
+        n
     }
 
     /// Select `ids` as the selection command `key`, kept on the Undo list.
@@ -469,6 +622,55 @@ mod tests {
         );
     }
 
+    /// #2203: yellow and purple squares, two of them grouped, and two
+    /// outlines without a fill. The objects in the group were never
+    /// compared, and the group itself (whose own fill is none) matched the
+    /// outlines.
+    #[test]
+    fn select_similar_reaches_into_groups_and_compares_what_they_hold() {
+        let mut app = App::headless();
+        for id in app.selectable_ids() {
+            app.select(vec![id]);
+            app.delete_selection();
+        }
+        let yellow = || Fill::Solid(Color::rgb8(255, 255, 0));
+        let purple = || Fill::Solid(Color::rgb8(128, 0, 128));
+        let line = Some(Stroke::default());
+        let y1 = rect(&mut app, 0.0, yellow(), line.clone());
+        let y2 = rect(&mut app, 20.0, yellow(), line.clone());
+        let p1 = rect(&mut app, 40.0, purple(), line.clone());
+        let y3 = rect(&mut app, 60.0, yellow(), line.clone());
+        let p2 = rect(&mut app, 80.0, purple(), line.clone());
+        let o1 = rect(&mut app, 100.0, Fill::None, line.clone());
+        let o2 = rect(&mut app, 120.0, Fill::None, line.clone());
+        let e = ellipse(&mut app, 140.0, yellow());
+        app.select(vec![y3, p2]);
+        app.group_selection();
+        let g = app.selection[0];
+        let mut run = |sel: Vec<ShapeId>, how: Similar| {
+            app.select(sel);
+            app.select_similar(how);
+            sorted(app.selection.clone())
+        };
+        // A yellow square, at the top or in the group: every yellow object.
+        let yellows = sorted(vec![y1, y2, y3, e]);
+        assert_eq!(run(vec![y1], Similar::Fill), yellows);
+        assert_eq!(run(vec![y3], Similar::Fill), yellows);
+        // An outline without a fill: the other outlines, not the group.
+        assert_eq!(run(vec![o1], Similar::Fill), sorted(vec![o1, o2]));
+        // The group stands for its yellow and purple squares.
+        assert_eq!(
+            run(vec![g], Similar::Fill),
+            sorted(vec![y1, y2, p1, y3, p2, e])
+        );
+        // Object Type: rectangles in the group too; a group finds groups.
+        assert_eq!(
+            run(vec![y1], Similar::Kind),
+            sorted(vec![y1, y2, p1, y3, p2, o1, o2])
+        );
+        assert_eq!(run(vec![g], Similar::Kind), vec![g]);
+    }
+
     #[test]
     fn selection_steps_undo_in_order_and_end_with_a_drawing_change() {
         let mut s = scene();
@@ -542,5 +744,78 @@ mod tests {
         assert_eq!(app.selection.len(), 4);
         assert!(!app.selection.contains(&s.red_a));
         let _ = (s.red_b, s.red_e);
+    }
+
+    fn fill_of(app: &App, id: ShapeId) -> Option<Fill> {
+        app.doc().find_shape(id).map(|s| s.fill.clone())
+    }
+
+    /// A fill change of one red rectangle, repeated on the objects with
+    /// the fill it had (red), not on the blue one; one undo step; the
+    /// objects it was done to become the selection.
+    #[test]
+    fn repeat_on_similar_fill_uses_the_fill_before_the_change() {
+        let mut s = scene();
+        let app = &mut s.app;
+        let green = Fill::Solid(Color::rgb8(0, 200, 0));
+        app.select(vec![s.red_a]);
+        app.apply_fill(green.clone());
+        let steps = app.engine.history_labels().0.len();
+        assert_eq!(app.repeat_on_similar(Similar::Fill), 2);
+        assert_eq!(fill_of(app, s.red_b), Some(green.clone()));
+        assert_eq!(fill_of(app, s.red_e), Some(green.clone()));
+        assert_eq!(fill_of(app, s.blue_r), Some(blue()));
+        assert_eq!(app.engine.history_labels().0.len(), steps + 1);
+        assert_eq!(
+            sorted(app.selection.clone()),
+            sorted(vec![s.red_b, s.red_e])
+        );
+        app.undo();
+        assert_eq!(fill_of(app, s.red_b), Some(red()));
+        assert_eq!(fill_of(app, s.red_a), Some(green), "the first change stays");
+    }
+
+    /// By object type: a move of one rectangle moves the other
+    /// rectangles, each by the same distance; the ellipse stays.
+    #[test]
+    fn repeat_on_similar_kind_moves_each_object() {
+        let mut s = scene();
+        let app = &mut s.app;
+        let x = |app: &App, id| {
+            app.doc()
+                .find_shape(id)
+                .map(|s| s.bounds().x0)
+                .unwrap_or(0.0)
+        };
+        let (b0, blue0, e0) = (x(app, s.red_b), x(app, s.blue_r), x(app, s.red_e));
+        app.select(vec![s.red_a]);
+        app.run(tracedraw_core::Command::TransformShapes {
+            shapes: vec![s.red_a],
+            transform: tracedraw_core::geometry::Affine::translate((5.0, 0.0)),
+        });
+        assert_eq!(app.repeat_on_similar(Similar::Kind), 2);
+        assert!((x(app, s.red_b) - b0 - 5.0).abs() < 1e-6);
+        assert!((x(app, s.blue_r) - blue0 - 5.0).abs() < 1e-6);
+        assert!((x(app, s.red_e) - e0).abs() < 1e-6);
+    }
+
+    /// A Recolor of one object repeats on the others with its colours,
+    /// and nothing like it leaves the drawing as it was.
+    #[test]
+    fn repeat_on_similar_recolor_and_nothing_similar() {
+        let mut s = scene();
+        let app = &mut s.app;
+        app.select(vec![s.blue_r]);
+        let r = tracedraw_core::recolor::Recolor {
+            hue: 90.0,
+            ..Default::default()
+        };
+        assert!(app.recolor_shapes(vec![s.blue_r], r));
+        assert_eq!(app.repeat_on_similar(Similar::Fill), 0, "no other blue");
+        app.select(vec![s.red_a]);
+        assert!(app.recolor_shapes(vec![s.red_a], r));
+        assert_eq!(app.repeat_on_similar(Similar::Fill), 2);
+        assert_eq!(fill_of(app, s.red_b), fill_of(app, s.red_a));
+        assert_ne!(fill_of(app, s.red_b), Some(red()));
     }
 }

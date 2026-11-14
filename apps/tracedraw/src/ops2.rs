@@ -51,6 +51,14 @@ pub struct StepRepeat {
     /// 0 = offset, 1 = spacing between copies (uses object size).
     pub mode_x: u8,
     pub mode_y: u8,
+    /// Copies are made across / up and down (#2572): with one of them
+    /// off the copies go along the other axis only.
+    pub use_x: bool,
+    pub use_y: bool,
+    /// The copies go to the left (else right) and up (else down) of the
+    /// selection; the distances typed are taken that way (#2572).
+    pub left: bool,
+    pub up: bool,
     /// Fill page (#1255): the selection tiled over the page instead of
     /// `copies` copies one after another (see [`crate::fill_page`]).
     pub fill: bool,
@@ -86,6 +94,10 @@ impl Default for StepRepeat {
             dy: 0.0,
             mode_x: 0,
             mode_y: 0,
+            use_x: true,
+            use_y: true,
+            left: false,
+            up: false,
             fill: false,
             area_custom: false,
             area: Rect::new(0.0, 0.0, 210.0, 297.0),
@@ -252,6 +264,60 @@ impl App {
             return;
         }
         self.fit_pages_to(&fits, "Fit Page to Drawing");
+    }
+
+    /// The commands that give `page` the size `size` about its centre:
+    /// the new size, and the page's objects moved by half of what the
+    /// page grew or shrank, so what sat in the middle of the page stays
+    /// in the middle (#2356). Nothing when the page already has the size.
+    pub fn resize_page_cmds(
+        &self,
+        page: tracedraw_core::PageId,
+        size: tracedraw_core::geometry::Size,
+    ) -> Vec<Command> {
+        use tracedraw_core::geometry::{Affine, Vec2};
+        let Ok(p) = self.doc().page(page) else {
+            return Vec::new();
+        };
+        let shift = Vec2::new(
+            (size.width - p.size.width) / 2.0,
+            (size.height - p.size.height) / 2.0,
+        );
+        if !shift.x.is_finite() || !shift.y.is_finite() || shift.hypot() < 1e-9 {
+            return Vec::new();
+        }
+        let shapes: Vec<ShapeId> = p
+            .layers
+            .iter()
+            .flat_map(|l| l.shapes.iter().map(|s| s.id))
+            .collect();
+        let mut cmds = vec![Command::ResizePage { page, size }];
+        if !shapes.is_empty() {
+            cmds.push(Command::TransformShapes {
+                shapes,
+                transform: Affine::translate(shift),
+            });
+        }
+        cmds
+    }
+
+    /// Resize `pages` to `size`, each about its centre, as one undo step.
+    pub fn resize_pages_about_centre(
+        &mut self,
+        pages: &[tracedraw_core::PageId],
+        size: tracedraw_core::geometry::Size,
+        label: &'static str,
+    ) {
+        let cmds: Vec<Command> = pages
+            .iter()
+            .flat_map(|&page| self.resize_page_cmds(page, size))
+            .collect();
+        if cmds.is_empty() {
+            return;
+        }
+        if let Err(e) = self.engine.run_batch(label, &cmds) {
+            self.status = e.to_string();
+        }
     }
 
     /// Size each page to its rectangle and move the page's objects so the
@@ -602,6 +668,38 @@ impl App {
             return;
         }
         self.effect_edit_step = Some((self.engine.revision(), key.1, key.2));
+    }
+
+    /// The first selected object's inner shadow: its offset and its
+    /// style (#2473).
+    pub fn selected_inner_shadow_at(
+        &self,
+    ) -> Option<(tracedraw_core::geometry::Vec2, crate::app::InnerShadowStyle)> {
+        self.selected_shapes().first().and_then(|s| {
+            s.effects.iter().find_map(|e| match e {
+                Effect::InnerShadow {
+                    offset,
+                    color,
+                    opacity,
+                    blur,
+                    merge,
+                } => Some((
+                    *offset,
+                    crate::app::InnerShadowStyle {
+                        color: *color,
+                        opacity: *opacity,
+                        blur: *blur,
+                        merge: *merge,
+                    },
+                )),
+                _ => None,
+            })
+        })
+    }
+
+    /// The style of the first selected object's inner shadow.
+    pub fn selected_inner_shadow(&self) -> Option<crate::app::InnerShadowStyle> {
+        self.selected_inner_shadow_at().map(|(_, s)| s)
     }
 
     pub fn remove_effects_of_kind(&mut self, like: &Effect) {
@@ -1617,6 +1715,71 @@ impl App {
         }
     }
 
+    /// Copy Fill on the Interactive Fill bar (#2471): the next click
+    /// picks the object whose fill the selected objects take.
+    pub fn start_copy_fill(&mut self) {
+        if self.selection.is_empty() {
+            return;
+        }
+        self.pending_copy_fill = true;
+        self.status = tr("status.click_fill_source");
+    }
+
+    /// The selected objects, other than `source` and `src`, take the fill
+    /// `src` shows (a colour, a gradient with its stops and angle, a
+    /// pattern, a texture, a mesh fitted to each object), one undo step
+    /// (#2471). `src` is the object clicked, inside the group or clip
+    /// frame `source` or `source` itself.
+    pub fn copy_fill_from_shape(&mut self, source: ShapeId, src: &Shape) {
+        let targets: Vec<Shape> = self
+            .selected_shapes()
+            .into_iter()
+            .filter(|s| s.id != source && s.id != src.id)
+            .collect();
+        self.give_fill(src, &targets);
+    }
+
+    /// `targets` take the fill `src` shows, one undo step "Copy Fill".
+    fn give_fill(&mut self, src: &Shape, targets: &[Shape]) {
+        if targets.is_empty() {
+            return;
+        }
+        let fill = crate::copy_props::shown_fill(src);
+        let cmds = crate::copy_props::fill_commands(&fill, src, targets);
+        if cmds.is_empty() {
+            return;
+        }
+        if let Err(e) = self.engine.run_batch("Copy Fill", &cmds) {
+            self.status = e.to_string();
+        }
+    }
+
+    /// The object a fill dragged from the Interactive Fill bar's swatch
+    /// would go to at `at` (screen): the one under the pointer, inside it
+    /// or on its outline, other than the object it came from (#2523).
+    pub fn fill_swatch_target(&self, at: egui::Pos2, from: ShapeId) -> Option<ShapeId> {
+        use crate::color_drop::ColorTarget;
+        match self.color_target(at) {
+            ColorTarget::Fill(id) | ColorTarget::Outline(id) if id != from => Some(id),
+            _ => None,
+        }
+    }
+
+    /// Drop the fill of `src`, dragged from the Interactive Fill bar's
+    /// swatch, on the object at `at` (screen): it takes the whole fill,
+    /// one undo step, and the selection stays as it was (#2523). False
+    /// when nothing took it.
+    pub fn drop_swatch_fill(&mut self, src: &Shape, at: egui::Pos2) -> bool {
+        let Some(id) = self.fill_swatch_target(at, src.id) else {
+            return false;
+        };
+        let Some(target) = self.doc().find_shape(id).cloned() else {
+            return false;
+        };
+        self.give_fill(src, &[target]);
+        true
+    }
+
     /// Copy Properties From: the properties ticked in its dialog
     /// (outline pen, outline colour, fill, text) from `source` to the
     /// other selected objects, one undo step. A group gives the
@@ -2016,12 +2179,45 @@ impl App {
             crate::bitmap_fx::ColorMode::Cmyk => {
                 Some(tracedraw_core::color_convert::ColorTarget::Cmyk)
             }
-            crate::bitmap_fx::ColorMode::Grayscale => None,
+            crate::bitmap_fx::ColorMode::Grayscale
+            | crate::bitmap_fx::ColorMode::Paletted
+            | crate::bitmap_fx::ColorMode::Lab => None,
         };
         if let Some(to) = to {
             let shapes: Vec<ShapeId> = self.bitmap_shapes().into_iter().map(|b| b.0).collect();
             if shapes.is_empty() {
                 return;
+            }
+            // A grayscale, indexed or Lab bitmap made RGB is stored with
+            // three channels and no mark again, so it reads as RGB (#2330,
+            // #2605, #2607).
+            if mode == crate::bitmap_fx::ColorMode::Rgb {
+                let cmds: Vec<Command> = self
+                    .selected_shapes()
+                    .iter()
+                    .filter(|s| !s.cmyk_bitmap)
+                    .filter_map(|s| {
+                        let ShapeKind::Bitmap { png, .. } = &s.kind else {
+                            return None;
+                        };
+                        if !crate::bitmap_fx::png_is_gray(png)
+                            && !crate::bitmap_fx::png_is_paletted(png)
+                            && !crate::bitmap_fx::png_is_lab(png)
+                        {
+                            return None;
+                        }
+                        let img = crate::bitmap_fx::decode(png)?;
+                        bitmap_with_png(s, crate::bitmap_fx::encode(&img)?)
+                    })
+                    .collect();
+                if !cmds.is_empty() {
+                    if let Err(e) = self.engine.run_batch("RGB Color", &cmds) {
+                        self.status = e.to_string();
+                    }
+                }
+                if !self.selected_shapes().iter().any(|s| s.cmyk_bitmap) {
+                    return;
+                }
             }
             self.convert_colors(&crate::ui::convert_colors::ConvertColorsState {
                 to,
@@ -2030,12 +2226,70 @@ impl App {
             });
             return;
         }
-        for (id, rect, _, _, png) in self.bitmap_shapes() {
-            let Some(img) = crate::bitmap_fx::decode(&png) else {
+        // Grayscale (8-bit) converts the bitmaps: their pixels stored as
+        // one grey channel (with alpha when they have it), no longer CMYK
+        // nor keeping ink channels, so the status bar and the Mode menu
+        // show them grayscale. The pixels only turned grey before, the
+        // picture staying RGB or CMYK (#2330). Lab Color goes the same
+        // way: the pixels through Lab and back, the PNG marked Lab; the
+        // pixels went through Lab and nothing else changed (#2605).
+        match mode {
+            crate::bitmap_fx::ColorMode::Lab => self.recode_bitmaps("Lab Color", |img| {
+                crate::bitmap_fx::encode_lab(&crate::bitmap_modes::lab_mode(img))
+            }),
+            crate::bitmap_fx::ColorMode::Paletted => {
+                let s = crate::bitmap_modes::PalettedSettings::default();
+                self.paletted_bitmaps(&s);
+            }
+            _ => self.recode_bitmaps("Grayscale", |img| {
+                crate::bitmap_fx::encode_gray(&crate::bitmap_fx::convert_mode(img, mode))
+            }),
+        }
+    }
+
+    /// Image > Mode > Indexed (8-bit): every selected bitmap takes the
+    /// colours of its palette and is stored as an indexed PNG, so it is an
+    /// indexed bitmap, no longer RGB or CMYK; one undo step. A bitmap
+    /// left with more than 256 colours (its see-through levels counted)
+    /// stays RGB with the palette's colours (#2607).
+    pub fn paletted_bitmaps(&mut self, settings: &crate::bitmap_modes::PalettedSettings) {
+        self.recode_bitmaps("Paletted", |img| {
+            let out = crate::bitmap_modes::paletted(img, settings);
+            crate::bitmap_fx::encode_indexed(&out).or_else(|| crate::bitmap_fx::encode(&out))
+        });
+    }
+
+    /// Store each selected bitmap as the PNG `recode` makes of its pixels,
+    /// no longer CMYK nor keeping ink channels; one undo step `label`.
+    fn recode_bitmaps(
+        &mut self,
+        label: &'static str,
+        recode: impl Fn(&image::RgbaImage) -> Option<Vec<u8>>,
+    ) {
+        let mut cmds = Vec::new();
+        for s in self.selected_shapes() {
+            let ShapeKind::Bitmap { png, .. } = &s.kind else {
                 continue;
             };
-            let out = crate::bitmap_fx::convert_mode(&img, mode);
-            self.replace_bitmap(id, rect, &out);
+            let Some(img) = crate::bitmap_fx::decode(png) else {
+                continue;
+            };
+            let Some(cmd) = recode(&img).and_then(|g| bitmap_with_png(&s, g)) else {
+                continue;
+            };
+            cmds.push(cmd);
+            if s.cmyk_bitmap || s.picture_inks.is_some() {
+                cmds.push(Command::SetPictureInks {
+                    shape: s.id,
+                    cmyk: false,
+                    inks: None,
+                });
+            }
+        }
+        if !cmds.is_empty() {
+            if let Err(e) = self.engine.run_batch(label, &cmds) {
+                self.status = e.to_string();
+            }
         }
     }
 
@@ -2145,11 +2399,34 @@ impl App {
         transparent: bool,
         anti_alias: bool,
     ) -> Option<(Vec<u8>, u32, u32, Rect)> {
+        let bounds = self.selection_bounds()?;
+        self.render_selection_area_png(dpi, transparent, anti_alias, bounds)
+    }
+
+    /// The area `bounds` (page space) of the selection drawn alone into a
+    /// PNG at `dpi`: [`App::render_selection_png_with`] for an area that
+    /// may be larger than the selection's box.
+    fn render_selection_area_png(
+        &self,
+        dpi: f64,
+        transparent: bool,
+        anti_alias: bool,
+        bounds: Rect,
+    ) -> Option<(Vec<u8>, u32, u32, Rect)> {
+        let tmp = self.selection_alone(bounds)?;
+        let (png, w, h) = render_alone_png(&tmp, dpi, transparent, anti_alias)?;
+        Some((png, w, h, bounds))
+    }
+
+    /// The selection alone in a document of its own whose page is the
+    /// area `bounds` (page space), moved so the area's corner is the
+    /// page's: what [`render_alone_png`] draws, also on another thread
+    /// (the picture a copy offers, #2288). `None` with nothing selected.
+    pub fn selection_alone(&self, bounds: Rect) -> Option<tracedraw_core::Document> {
         let shapes = self.selected_shapes();
         if shapes.is_empty() {
             return None;
         }
-        let bounds = self.selection_bounds()?;
         // Render only the selection: a temporary document with those shapes.
         let mut tmp = tracedraw_core::Document::new(
             "tmp",
@@ -2164,44 +2441,7 @@ impl App {
                 layer.shapes.push(c);
             }
         }
-        let page = tmp.pages[0].id;
-        let zoom = dpi / 25.4;
-        let w = (bounds.width() * zoom).ceil().max(1.0) as u32;
-        let h = (bounds.height() * zoom).ceil().max(1.0) as u32;
-        let view = tracedraw_render::ViewTransform {
-            zoom,
-            origin_x: 0.0,
-            origin_y: h as f64,
-        };
-        let mut pm = tracedraw_render::render_page(
-            &tmp,
-            page,
-            &tracedraw_render::RenderOptions {
-                width: w,
-                height: h,
-                view,
-                preview: None,
-                wireframe: false,
-                anti_alias,
-                draft: false,
-                focus: None,
-                ..tracedraw_render::RenderOptions::default()
-            },
-        )?;
-        if !transparent {
-            let mut white = tiny_skia_white(w, h);
-            white.draw_pixmap(
-                0,
-                0,
-                pm.as_ref(),
-                &Default::default(),
-                tiny_skia::Transform::identity(),
-                None,
-            );
-            pm = white;
-        }
-        let png = pm.encode_png().ok()?;
-        Some((png, w, h, bounds))
+        Some(tmp)
     }
 
     #[cfg(test)]
@@ -2226,24 +2466,63 @@ impl App {
         } else {
             300.0
         };
-        let Some((png, w, h, bounds)) =
-            self.render_selection_png_with(dpi, o.transparent, o.anti_alias)
-        else {
+        // The whole of what the selection draws: a drop shadow reaches
+        // past the objects' box and was cut off at it (#2351), and so did
+        // a thick outline, its outer half or all of it (#2369).
+        let Some(area) = self.selection_bounds().map(|b| {
+            shapes
+                .iter()
+                .filter_map(|s| shadow_reach(s, Affine::IDENTITY))
+                .chain(
+                    shapes
+                        .iter()
+                        .filter_map(|s| outline_area(s, Affine::IDENTITY)),
+                )
+                .fold(b, |a, r| a.union(r))
+        }) else {
             return;
         };
+        let Some(tmp) = self.selection_alone(area) else {
+            return;
+        };
+        let Some((png, w, h)) = render_alone_png(&tmp, dpi, o.transparent, o.anti_alias) else {
+            return;
+        };
+        let bounds = area;
         // The colour mode asked for (#1777): a grayscale picture is stored
         // as a grayscale PNG; a CMYK one shows its pixels as the inks
         // print them and is marked CMYK, as Image > Mode > CMYK does
         // (#1254).
         use crate::bitmap_modes::ConvertMode;
+        let mut inks = None;
         let png = match o.mode {
             ConvertMode::Rgb => png,
             mode => match crate::bitmap_fx::decode(&png).and_then(|img| match mode {
-                ConvertMode::Cmyk => {
-                    crate::bitmap_fx::encode(&crate::bitmap_fx::through_cmyk(&img))
-                }
+                // A CMYK bitmap keeps the inks the objects print with
+                // beside its screen pixels, and shows the pixels those
+                // inks print: taken back from the screen pixels, a red of
+                // C0 M100 Y100 came out C2 M99 Y96 (#2381).
+                ConvertMode::Cmyk => match ink_planes(&tmp, dpi, o.anti_alias, w, h)
+                    .and_then(|planes| cmyk_picture(&img, planes))
+                {
+                    Some((png, planes)) => {
+                        inks = Some(Box::new(tracedraw_core::picture_inks::PictureInks::cmyk(
+                            &png,
+                            planes.into(),
+                        )));
+                        Some(png)
+                    }
+                    None => crate::bitmap_fx::encode(&crate::bitmap_fx::through_cmyk(&img)),
+                },
                 ConvertMode::Grayscale => {
                     crate::bitmap_fx::encode_gray(&crate::bitmap_modes::convert_pixels(&img, o))
+                }
+                // Indexed: a PNG with a palette while the colours fit one
+                // (#2607).
+                ConvertMode::Paletted => {
+                    let out = crate::bitmap_modes::convert_pixels(&img, o);
+                    crate::bitmap_fx::encode_indexed(&out)
+                        .or_else(|| crate::bitmap_fx::encode(&out))
                 }
                 _ => crate::bitmap_fx::encode(&crate::bitmap_modes::convert_pixels(&img, o)),
             }) {
@@ -2266,18 +2545,66 @@ impl App {
         bitmap.stroke = None;
         bitmap.overprint_fill = o.overprint_black;
         bitmap.cmyk_bitmap = o.mode == ConvertMode::Cmyk;
+        bitmap.picture_inks = inks;
         let ids: Vec<ShapeId> = shapes.iter().map(|s| s.id).collect();
-        let cmds = vec![
-            Command::DeleteShapes { shapes: ids },
+        let mut cmds = vec![
+            Command::DeleteShapes {
+                shapes: ids.clone(),
+            },
             Command::AddShape {
                 layer,
                 shape: bitmap,
             },
         ];
+        // The picture takes the place of the topmost object it was made
+        // of, not the top of the layer: put there, its shadow covered the
+        // objects that were above the selection (#2220).
+        if let Some((at_layer, index)) = self.stack_place_of(&ids) {
+            cmds.push(Command::Reorder {
+                shape: id,
+                layer: at_layer,
+                index,
+            });
+        }
         if let Err(e) = self.engine.run_batch("Convert to Bitmap", &cmds) {
             self.status = e.to_string();
         }
         self.selection = vec![id];
+    }
+
+    /// Where an object that replaces `ids` goes in the stack: the layer of
+    /// the topmost of them (each counted by its object on the layer, the
+    /// group or clip frame it is in), at the place it has once `ids` are
+    /// deleted: above the objects that stay under it. `None` when none of
+    /// them is on the current page.
+    fn stack_place_of(&self, ids: &[ShapeId]) -> Option<(tracedraw_core::LayerId, usize)> {
+        let doc = self.doc();
+        let tops: Vec<ShapeId> = ids
+            .iter()
+            .map(|id| doc.ancestors(*id).first().copied().unwrap_or(*id))
+            .collect();
+        let mut best: Option<(usize, usize)> = None;
+        let layers = self.page_layers();
+        for (li, l) in layers.iter().enumerate() {
+            for (i, s) in l.shapes.iter().enumerate() {
+                if tops.contains(&s.id) {
+                    best = Some((li, i));
+                }
+            }
+        }
+        let (li, i) = best?;
+        let l = layers.get(li)?;
+        let top = l.shapes.get(i)?;
+        // The objects that stay below it; the top object itself stays
+        // too when only some of its contents were taken.
+        let below = l
+            .shapes
+            .iter()
+            .take(i)
+            .filter(|s| !ids.contains(&s.id))
+            .count();
+        let stays = usize::from(!ids.contains(&top.id));
+        Some((l.id, below + stays))
     }
 
     /// Object > Create > Pattern Fill: the selection becomes a bitmap pattern
@@ -3075,6 +3402,7 @@ impl App {
             return;
         }
         self.finish_text();
+        self.bar_to_new_text_style();
         let (path, closed) = path_for_text_at(&curve.page_path(), at);
         let (align, offset) = if begin && closed && at.is_some() {
             (tracedraw_core::TextAlign::Left, 0.0)
@@ -3984,7 +4312,7 @@ impl App {
         }
     }
 
-    fn colors_of(shapes: &[Shape], out: &mut Vec<Color>) {
+    pub(crate) fn colors_of(shapes: &[Shape], out: &mut Vec<Color>) {
         for s in shapes {
             if let Some(c) = s.fill.preview_color() {
                 if !out.contains(&c) {
@@ -4058,8 +4386,20 @@ impl App {
     }
 
     /// Ctrl+click on a palette colour: a tenth of it goes into the uniform
-    /// fill of each selected object.
+    /// fill of each selected object, or into the chosen mesh nodes.
     pub fn mix_into_fill(&mut self, c: Color) {
+        // With the Mesh Fill, Shape or Interactive Fill tool and mesh
+        // nodes chosen, the colour mixes into those nodes, as a plain
+        // click colours them (#2616).
+        if matches!(
+            self.tool,
+            crate::tools::Tool::MeshFill
+                | crate::tools::Tool::Shape
+                | crate::tools::Tool::InteractiveFill
+        ) && self.mix_into_mesh_nodes(c)
+        {
+            return;
+        }
         let cmds: Vec<Command> = self
             .selected_shapes()
             .iter()
@@ -4186,6 +4526,159 @@ impl App {
         }
         self.selection = new_sel;
     }
+}
+
+/// The CMYK inks of `tmp`'s page as [`render_alone_png`] draws it at
+/// `dpi` (`w` x `h` pixels): each process plate drawn as the coverage of
+/// its ink, so a colour given in CMYK keeps its values, as one grey PNG
+/// of the cyan, magenta, yellow and black planes one under the other
+/// (255 full ink, [`tracedraw_core::picture_inks::PictureInks`]), the
+/// coverage of the edges in them as on white paper.
+fn ink_planes(
+    tmp: &tracedraw_core::Document,
+    dpi: f64,
+    anti_alias: bool,
+    w: u32,
+    h: u32,
+) -> Option<image::GrayImage> {
+    let page = tmp.pages.first()?;
+    let mut planes = image::GrayImage::new(w, h.checked_mul(4)?);
+    for k in 0..4u32 {
+        let mut doc = tmp.clone();
+        *doc.pages.first_mut()? =
+            crate::export::plate_page(page, crate::export::Plate::Process(k as usize));
+        let (png, pw, ph) = render_alone_png(&doc, dpi, false, anti_alias)?;
+        if (pw, ph) != (w, h) {
+            return None;
+        }
+        let img = crate::bitmap_fx::decode(&png)?;
+        for (x, y, p) in img.enumerate_pixels() {
+            planes.put_pixel(x, y + k * h, image::Luma([255 - p[0]]));
+        }
+    }
+    Some(planes)
+}
+
+/// Most different inks a CMYK bitmap's pixels are worked out from one by
+/// one; past it the pixels go through the profiles and back as a whole.
+const CMYK_PIXEL_INKS: usize = 1 << 16;
+
+/// The pixels and the ink planes (PNGs) of a CMYK bitmap rendered as
+/// `img`, with `planes` from [`ink_planes`]: the inks of each pixel taken
+/// to its full opacity (the planes hold them as on white paper, an edge
+/// pixel half covered at half its ink), and the pixel the colour of its
+/// inks, so a CMYK colour shows as it does as a vector. A picture with
+/// more different inks than [`CMYK_PIXEL_INKS`] shows its pixels through
+/// the profiles and back (`bitmap_fx::through_cmyk`).
+fn cmyk_picture(
+    img: &image::RgbaImage,
+    mut planes: image::GrayImage,
+) -> Option<(Vec<u8>, Vec<u8>)> {
+    let (w, h) = img.dimensions();
+    if planes.dimensions() != (w, h.checked_mul(4)?) {
+        return None;
+    }
+    let mut colors: std::collections::HashMap<[u8; 4], [u8; 3]> = std::collections::HashMap::new();
+    let mut out = img.clone();
+    let mut many = false;
+    for y in 0..h {
+        for x in 0..w {
+            let a = u32::from(img.get_pixel(x, y)[3]);
+            let mut ink = [0u8; 4];
+            for (k, v) in ink.iter_mut().enumerate() {
+                let at = (x, y + k as u32 * h);
+                let on_paper = u32::from(planes.get_pixel(at.0, at.1)[0]);
+                *v = if a == 0 {
+                    0
+                } else {
+                    ((on_paper * 255 + a / 2) / a).min(255) as u8
+                };
+                planes.put_pixel(at.0, at.1, image::Luma([*v]));
+            }
+            if many || a == 0 {
+                continue;
+            }
+            let rgb = match colors.get(&ink) {
+                Some(c) => *c,
+                None if colors.len() >= CMYK_PIXEL_INKS => {
+                    many = true;
+                    continue;
+                }
+                None => {
+                    let f = |v: u8| f32::from(v) / 255.0;
+                    let c = Color::Cmyk {
+                        c: f(ink[0]),
+                        m: f(ink[1]),
+                        y: f(ink[2]),
+                        k: f(ink[3]),
+                    }
+                    .to_rgb8();
+                    colors.insert(ink, c);
+                    c
+                }
+            };
+            let p = out.get_pixel_mut(x, y);
+            p[0] = rgb[0];
+            p[1] = rgb[1];
+            p[2] = rgb[2];
+        }
+    }
+    if many {
+        out = crate::bitmap_fx::through_cmyk(img);
+    }
+    let png = crate::bitmap_fx::encode(&out)?;
+    let mut buf = std::io::Cursor::new(Vec::new());
+    planes.write_to(&mut buf, image::ImageFormat::Png).ok()?;
+    Some((png, buf.into_inner()))
+}
+
+/// The first page of `tmp` ([`App::selection_alone`]) drawn into a PNG
+/// at `dpi`: its bytes and pixel size.
+pub fn render_alone_png(
+    tmp: &tracedraw_core::Document,
+    dpi: f64,
+    transparent: bool,
+    anti_alias: bool,
+) -> Option<(Vec<u8>, u32, u32)> {
+    let page = tmp.pages.first()?;
+    let size = page.size;
+    let zoom = dpi / 25.4;
+    let w = (size.width * zoom).ceil().max(1.0) as u32;
+    let h = (size.height * zoom).ceil().max(1.0) as u32;
+    let view = tracedraw_render::ViewTransform {
+        zoom,
+        origin_x: 0.0,
+        origin_y: h as f64,
+    };
+    let mut pm = tracedraw_render::render_page(
+        tmp,
+        page.id,
+        &tracedraw_render::RenderOptions {
+            width: w,
+            height: h,
+            view,
+            preview: None,
+            wireframe: false,
+            anti_alias,
+            draft: false,
+            focus: None,
+            ..tracedraw_render::RenderOptions::default()
+        },
+    )?;
+    if !transparent {
+        let mut white = tiny_skia_white(w, h);
+        white.draw_pixmap(
+            0,
+            0,
+            pm.as_ref(),
+            &Default::default(),
+            tiny_skia::Transform::identity(),
+            None,
+        );
+        pm = white;
+    }
+    let png = pm.encode_png().ok()?;
+    Some((png, w, h))
 }
 
 fn tiny_skia_white(w: u32, h: u32) -> tiny_skia::Pixmap {
@@ -4760,6 +5253,110 @@ pub use crate::fit_path::{
     FitRotation, FitSpacing, FitSpin,
 };
 
+/// The command that gives bitmap `s` the pixels `png` (same size), its
+/// place and live effects kept. `None` for another kind of object.
+fn bitmap_with_png(s: &Shape, png: Vec<u8>) -> Option<Command> {
+    let ShapeKind::Bitmap {
+        rect,
+        width_px,
+        height_px,
+        fx,
+        ..
+    } = &s.kind
+    else {
+        return None;
+    };
+    Some(Command::SetShapeKind {
+        shape: s.id,
+        kind: ShapeKind::Bitmap {
+            rect: *rect,
+            width_px: *width_px,
+            height_px: *height_px,
+            png: png.into(),
+            fx: fx.clone(),
+        },
+    })
+}
+
+/// The area the outlines of `s` (placed on the page by `parent`) cover,
+/// as the renderer draws them: out to their reach from the path (half
+/// the width, all of it outside or inside, the widest node of a
+/// variable width, scaled with the object when they scale with it),
+/// their mitred corners and their arrowheads; those of a group's objects
+/// and of a clip frame's frame too. `None` without an outline (#2369).
+fn outline_area(s: &Shape, parent: Affine) -> Option<Rect> {
+    if !s.visible {
+        return None;
+    }
+    let to_page = parent * s.transform;
+    match &s.kind {
+        ShapeKind::Group { children } => children
+            .iter()
+            .filter_map(|c| outline_area(c, to_page))
+            .reduce(|a, b| a.union(b)),
+        ShapeKind::ClipFrame { frame, .. } => outline_area(frame, to_page),
+        _ => {
+            let st = s.stroke.as_ref()?;
+            let reach = crate::interaction::outline_reach(s, to_page);
+            let mut placed = s.clone();
+            placed.transform = to_page;
+            let path = placed.page_path();
+            let finite = |r: &Rect| {
+                r.x0.is_finite() && r.y0.is_finite() && r.x1.is_finite() && r.y1.is_finite()
+            };
+            let mut area = placed.bounds().inflate(reach, reach);
+            if reach > 0.0 {
+                // The same reach on both sides of the path, with the
+                // outline's joins: a mitred corner reaches further.
+                let mut band = st.clone();
+                band.width = 2.0 * reach;
+                band.widths.clear();
+                band.dash.clear();
+                band.position = tracedraw_core::OutlinePosition::Center;
+                let b = tracedraw_core::shaping::stroke_area(&path, &band).bounding_box();
+                if finite(&b) && b.area() > 0.0 {
+                    area = area.union(b);
+                }
+            }
+            for head in tracedraw_core::style::arrowhead_paths(&path, st) {
+                let b = head.bounding_box();
+                if finite(&b) {
+                    area = area.union(b);
+                }
+            }
+            finite(&area).then_some(area)
+        }
+    }
+}
+
+/// The area the drop shadows of `s` (inside `parent`) and of the objects
+/// in it cover, in page space: the shadow's box grown by its feathering.
+/// `None` when nothing in it casts a shadow.
+fn shadow_reach(s: &Shape, parent: Affine) -> Option<Rect> {
+    if !s.visible {
+        return None;
+    }
+    let to_page = parent * s.transform;
+    let own = s.shadow.filter(|sh| sh.opacity > 0.0).and_then(|sh| {
+        let mut placed = s.clone();
+        placed.transform = to_page;
+        let r = sh.bounds(placed.bounds());
+        (r.x0.is_finite() && r.y0.is_finite() && r.x1.is_finite() && r.y1.is_finite()).then_some(r)
+    });
+    let inner = match &s.kind {
+        ShapeKind::Group { children } => children
+            .iter()
+            .filter_map(|c| shadow_reach(c, to_page))
+            .reduce(|a, b| a.union(b)),
+        ShapeKind::ClipFrame { frame, .. } => shadow_reach(frame, to_page),
+        _ => None,
+    };
+    match (own, inner) {
+        (Some(a), Some(b)) => Some(a.union(b)),
+        (a, b) => a.or(b),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4782,6 +5379,43 @@ mod tests {
             ShapeKind::SymbolInstance { index } => index,
             ref k => panic!("{k:?}"),
         }
+    }
+
+    /// A page is resized about its centre: an object in the middle of
+    /// the page stays in the middle, on every page resized, and one undo
+    /// brings back both the size and the place (#2356).
+    #[test]
+    fn a_page_is_resized_about_its_centre() {
+        use tracedraw_core::geometry::Size;
+        let mut app = App::headless();
+        let first = app.page;
+        let old = app.page_size();
+        let (cx, cy) = (old.width / 2.0, old.height / 2.0);
+        let id = app
+            .new_shape(ShapeKind::Rect {
+                rect: kurbo::Rect::new(cx - 10.0, cy - 5.0, cx + 10.0, cy + 5.0),
+                radius: 0.0,
+                corners: None,
+            })
+            .expect("rect");
+        app.insert_page(true);
+        let second = app.page;
+        let size = Size::new(old.width + 100.0, old.height - 40.0);
+        app.resize_pages_about_centre(&[first, second], size, "Page Size");
+        assert_eq!(app.doc().page(first).expect("page").size, size);
+        assert_eq!(app.doc().page(second).expect("page").size, size);
+        app.select(vec![id]);
+        let c = app.selection_bounds().expect("bounds").center();
+        assert!((c.x - size.width / 2.0).abs() < 1e-6, "{c:?}");
+        assert!((c.y - size.height / 2.0).abs() < 1e-6, "{c:?}");
+        // One step back: the size and the object as they were.
+        app.undo();
+        assert_eq!(app.doc().page(first).expect("page").size, old);
+        app.select(vec![id]);
+        let c = app.selection_bounds().expect("bounds").center();
+        assert!((c.x - cx).abs() < 1e-6 && (c.y - cy).abs() < 1e-6, "{c:?}");
+        // The same size again changes nothing and makes no undo step.
+        assert!(app.resize_page_cmds(first, old).is_empty());
     }
 
     /// The Repeat Copies values stay as typed: after an Apply (its copies
@@ -4943,7 +5577,7 @@ mod tests {
     /// the pages get nothing of their own.
     #[test]
     fn a_page_number_on_the_master_layer_numbers_every_page() {
-        let mut app = App::headless();
+        let mut app = crate::ui::objects_docker::tests::without_desktop();
         app.add_page();
         app.add_page();
         crate::ui::objects_docker::new_master_layer(&mut app, tracedraw_core::MasterScope::All);
@@ -4981,7 +5615,7 @@ mod tests {
     /// field; one undo takes both away (#1709).
     #[test]
     fn page_numbers_for_odd_pages_go_on_a_master_layer_of_their_own() {
-        let mut app = App::headless();
+        let mut app = crate::ui::objects_docker::tests::without_desktop();
         app.add_page();
         app.add_page();
         assert!(app.doc().master.is_empty());
@@ -5460,6 +6094,131 @@ mod tests {
         assert_eq!(apply_case("aBc", CaseMode::Toggle), "AbC");
     }
 
+    /// #2220: a ring with a shadow converted to a bitmap went to the top
+    /// of the layer, so its shadow covered the text that was above it.
+    /// The picture takes the place of the topmost object it was made of.
+    #[test]
+    fn convert_to_bitmap_keeps_the_place_in_the_stack() {
+        let mut app = App::headless();
+        for id in app.selectable_ids() {
+            app.select(vec![id]);
+            app.delete_selection();
+        }
+        let square = |app: &mut App, x: f64| {
+            app.new_shape(ShapeKind::Rect {
+                rect: Rect::new(x, 0.0, x + 20.0, 20.0),
+                radius: 0.0,
+                corners: None,
+            })
+            .expect("rect")
+        };
+        let below = square(&mut app, 0.0);
+        let ring = square(&mut app, 5.0);
+        let middle = square(&mut app, 8.0);
+        let above = square(&mut app, 10.0);
+        app.run(Command::SetFill {
+            shapes: vec![ring, middle],
+            fill: Fill::Solid(Color::rgb8(0, 0, 0)),
+        });
+        let order = |app: &App| -> Vec<ShapeId> {
+            app.page_layers()
+                .iter()
+                .flat_map(|l| l.shapes.iter().map(|s| s.id))
+                .collect()
+        };
+        // One object: the picture stands where it stood.
+        app.select(vec![ring]);
+        app.convert_to_bitmap(72.0, true);
+        let pic = app.selection[0];
+        assert_eq!(order(&app), vec![below, pic, middle, above]);
+        // Two objects: where the topmost of them stood, under the one
+        // that was above both.
+        app.select(vec![below, middle]);
+        app.convert_to_bitmap(72.0, true);
+        let pic2 = app.selection[0];
+        assert_eq!(order(&app), vec![pic, pic2, above]);
+        // One undo step gives the objects back in their places.
+        app.undo();
+        assert_eq!(order(&app), vec![below, pic, middle, above]);
+    }
+
+    /// Convert to Bitmap of an object with a drop shadow takes the whole
+    /// shadow: the picture was cut at the object's box, so the shadow's
+    /// part beyond it ended in a straight edge (#2351).
+    #[test]
+    fn convert_to_bitmap_keeps_the_whole_drop_shadow() {
+        let mut app = App::headless();
+        for id in app.selectable_ids() {
+            app.select(vec![id]);
+            app.delete_selection();
+        }
+        let circle = app
+            .new_shape(ShapeKind::Ellipse {
+                rect: Rect::new(0.0, 0.0, 40.0, 40.0),
+                arc: None,
+            })
+            .expect("circle");
+        app.run(Command::SetFill {
+            shapes: vec![circle],
+            fill: Fill::Solid(Color::rgb8(220, 0, 30)),
+        });
+        let shadow = tracedraw_core::Shadow {
+            offset: tracedraw_core::geometry::Vec2::new(6.0, -6.0),
+            opacity: 0.8,
+            blur: 2.0,
+            ..Default::default()
+        };
+        app.run(Command::SetShadow {
+            shapes: vec![circle],
+            shadow: Some(shadow),
+        });
+        let object = app.doc().find_shape(circle).expect("circle").bounds();
+        let reach = shadow.bounds(object);
+        // The circle's own outline reaches past its path too (#2369).
+        let line = crate::interaction::outline_reach(
+            app.doc().find_shape(circle).expect("circle"),
+            Affine::IDENTITY,
+        );
+        app.select(vec![circle]);
+        app.convert_to_bitmap(150.0, true);
+        let pic = app.selection[0];
+        let s = app.doc().find_shape(pic).expect("picture");
+        let ShapeKind::Bitmap {
+            rect,
+            width_px,
+            height_px,
+            png,
+            ..
+        } = &s.kind
+        else {
+            panic!("a bitmap");
+        };
+        let want = object.inflate(line, line).union(reach);
+        assert!(
+            (rect.x0 - want.x0).abs() < 1e-6
+                && (rect.y0 - want.y0).abs() < 1e-6
+                && (rect.x1 - want.x1).abs() < 1e-6
+                && (rect.y1 - want.y1).abs() < 1e-6,
+            "the picture covers {rect:?}, the object and its shadow {want:?}"
+        );
+        // The shadow shows past the object's box: below and right of it
+        // (y up), half way across the shadow's offset, there is ink.
+        let img = crate::bitmap_fx::decode(png).expect("png");
+        assert_eq!((img.width(), img.height()), (*width_px, *height_px));
+        let px = |x: f64, y: f64| {
+            let u = ((x - rect.x0) / rect.width() * *width_px as f64) as u32;
+            let v = ((rect.y1 - y) / rect.height() * *height_px as f64) as u32;
+            img.get_pixel(u.min(width_px - 1), v.min(height_px - 1))[3]
+        };
+        assert!(px(41.5, 20.0) > 40, "shadow right of the box");
+        assert!(px(20.0, -1.5) > 40, "shadow below the box");
+        assert_eq!(
+            px(rect.x0 + 0.1, rect.y1 - 0.1),
+            0,
+            "nothing in the far corner"
+        );
+    }
+
     #[test]
     fn convert_to_bitmap_applies_mode_dither_and_overprint() {
         use crate::bitmap_modes::{ConvertMode, ConvertOptions};
@@ -5591,8 +6350,280 @@ mod tests {
         let (c, r) = (middle(&cmyk), middle(&rgb));
         assert_eq!(r, image::Rgba([0, 255, 0, 255]));
         assert_ne!(c, r, "the pixels go through the inks");
+        // The colour the green prints as (from the inks the bitmap keeps,
+        // in 8 bits each, #2381): the green through the inks and back.
         let expected = crate::bitmap_fx::through_cmyk(&image::RgbaImage::from_pixel(1, 1, r));
-        assert_eq!(c, *expected.get_pixel(0, 0));
+        let e = expected.get_pixel(0, 0);
+        for i in 0..4 {
+            assert!(
+                (i32::from(c[i]) - i32::from(e[i])).abs() <= 3,
+                "{c:?} {e:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn image_mode_grayscale_converts_the_bitmap() {
+        // #2330: Image > Mode > Grayscale (8-bit) only turned the pixels
+        // grey; the bitmap stayed RGB in the status bar and the Mode menu.
+        use crate::bitmap_fx::ColorMode;
+        let mut app = App::headless();
+        let img =
+            image::RgbaImage::from_fn(8, 4, |x, _| image::Rgba([(x * 30) as u8, 200, 40, 255]));
+        let png = crate::bitmap_fx::encode(&img).expect("png");
+        let id = app
+            .new_shape(ShapeKind::Bitmap {
+                rect: Rect::new(0.0, 0.0, 8.0, 4.0),
+                width_px: 8,
+                height_px: 4,
+                png: png.into(),
+                fx: None,
+            })
+            .expect("bitmap");
+        app.select(vec![id]);
+        let mode = |app: &App| {
+            let s = app.doc().find_shape(id).expect("bitmap");
+            let ShapeKind::Bitmap { png, .. } = &s.kind else {
+                panic!("a bitmap");
+            };
+            crate::bitmap_fx::mode_of(s.cmyk_bitmap, png)
+        };
+        assert_eq!(mode(&app), ColorMode::Rgb);
+        app.set_bitmap_mode(ColorMode::Grayscale);
+        assert_eq!(mode(&app), ColorMode::Grayscale);
+        let info = crate::ui::status::object_info(&app);
+        assert!(info.contains(&tr("convert_colors.gray")), "{info}");
+        let s = app.doc().find_shape(id).expect("bitmap");
+        let ShapeKind::Bitmap { png, .. } = &s.kind else {
+            panic!("a bitmap");
+        };
+        let p = *crate::bitmap_fx::decode(png)
+            .expect("pixels")
+            .get_pixel(3, 1);
+        assert!(p[0] == p[1] && p[1] == p[2], "{p:?}");
+        // One undo step back to RGB.
+        app.undo();
+        assert_eq!(mode(&app), ColorMode::Rgb);
+        // A CMYK bitmap turns grayscale too, no longer CMYK; RGB again
+        // stores three channels.
+        app.set_bitmap_mode(ColorMode::Cmyk);
+        assert_eq!(mode(&app), ColorMode::Cmyk);
+        app.set_bitmap_mode(ColorMode::Grayscale);
+        assert_eq!(mode(&app), ColorMode::Grayscale);
+        app.set_bitmap_mode(ColorMode::Rgb);
+        assert_eq!(mode(&app), ColorMode::Rgb);
+        let info = crate::ui::status::object_info(&app);
+        assert!(info.contains(&tr("convert_colors.rgb")), "{info}");
+    }
+
+    #[test]
+    fn image_mode_lab_and_indexed_convert_the_bitmap() {
+        // #2605: Image > Mode > Lab Color left the bitmap RGB; #2607:
+        // Indexed (8-bit) gave back an RGB bitmap, not one with a palette.
+        use crate::bitmap_fx::ColorMode;
+        let mut app = App::headless();
+        let img = image::RgbaImage::from_fn(16, 8, |x, y| {
+            image::Rgba([
+                (x * 15) as u8,
+                (y * 30) as u8,
+                90,
+                if x == 0 { 0 } else { 255 },
+            ])
+        });
+        let png = crate::bitmap_fx::encode(&img).expect("png");
+        let id = app
+            .new_shape(ShapeKind::Bitmap {
+                rect: Rect::new(0.0, 0.0, 16.0, 8.0),
+                width_px: 16,
+                height_px: 8,
+                png: png.into(),
+                fx: None,
+            })
+            .expect("bitmap");
+        app.select(vec![id]);
+        let png_of = |app: &App| {
+            let s = app.doc().find_shape(id).expect("bitmap");
+            let ShapeKind::Bitmap { png, .. } = &s.kind else {
+                panic!("a bitmap");
+            };
+            (s.cmyk_bitmap, png.to_vec())
+        };
+        let mode = |app: &App| {
+            let (cmyk, png) = png_of(app);
+            crate::bitmap_fx::mode_of(cmyk, &png)
+        };
+        app.set_bitmap_mode(ColorMode::Lab);
+        assert_eq!(mode(&app), ColorMode::Lab);
+        let info = crate::ui::status::object_info(&app);
+        assert!(info.contains(&tr("convert_colors.lab")), "{info}");
+        // The pixels survive the trip through Lab within rounding.
+        let lab = crate::bitmap_fx::decode(&png_of(&app).1).expect("pixels");
+        for (a, b) in lab.pixels().zip(img.pixels()) {
+            assert_eq!(a[3], b[3]);
+            for i in 0..3 {
+                assert!(
+                    (i32::from(a[i]) - i32::from(b[i])).abs() <= 1,
+                    "{a:?} {b:?}"
+                );
+            }
+        }
+        app.undo();
+        assert_eq!(mode(&app), ColorMode::Rgb);
+        // A CMYK bitmap made Lab is no longer CMYK.
+        app.set_bitmap_mode(ColorMode::Cmyk);
+        app.set_bitmap_mode(ColorMode::Lab);
+        assert_eq!(mode(&app), ColorMode::Lab, "no longer CMYK");
+        app.undo();
+        assert_eq!(mode(&app), ColorMode::Cmyk);
+        app.undo();
+        assert_eq!(mode(&app), ColorMode::Rgb);
+
+        // Indexed: a PNG with a palette (colour type 3), see-through
+        // pixels kept, every colour one of the palette's.
+        let settings = crate::bitmap_modes::PalettedSettings::default();
+        app.paletted_bitmaps(&settings);
+        assert_eq!(mode(&app), ColorMode::Paletted);
+        let (_, png) = png_of(&app);
+        assert!(crate::bitmap_fx::png_is_paletted(&png));
+        let info = crate::ui::status::object_info(&app);
+        assert!(info.contains(&tr("dialog.convert_mode_paletted")), "{info}");
+        let want = crate::bitmap_modes::paletted(&img, &settings);
+        let got = crate::bitmap_fx::decode(&png).expect("pixels");
+        for (g, w) in got.pixels().zip(want.pixels()) {
+            if w[3] == 0 {
+                assert_eq!(g[3], 0);
+            } else {
+                assert_eq!(g, w);
+            }
+        }
+        // RGB again stores three channels and no palette.
+        app.set_bitmap_mode(ColorMode::Rgb);
+        assert_eq!(mode(&app), ColorMode::Rgb);
+        assert!(!crate::bitmap_fx::png_is_paletted(&png_of(&app).1));
+        app.set_bitmap_mode(ColorMode::Lab);
+        app.set_bitmap_mode(ColorMode::Rgb);
+        assert!(!crate::bitmap_fx::png_is_lab(&png_of(&app).1));
+    }
+
+    #[test]
+    fn convert_to_bitmap_keeps_the_whole_thick_outline() {
+        // #2369: a circle with a thick outline came out cut at the
+        // circle's own box, the outer half of the outline gone.
+        let mut app = App::headless();
+        let id = app
+            .new_shape(ShapeKind::Ellipse {
+                rect: Rect::new(10.0, 10.0, 30.0, 30.0),
+                arc: None,
+            })
+            .expect("circle");
+        let mut st = Stroke::new(Color::rgb8(0, 0, 0), 4.0);
+        st.scale_with_object = false;
+        app.run(Command::SetStroke {
+            shapes: vec![id],
+            stroke: Some(st.clone()),
+        });
+        app.select(vec![id]);
+        app.convert_to_bitmap(72.0, true);
+        let s = app.selected_shapes().into_iter().next().expect("bitmap");
+        let ShapeKind::Bitmap { png, .. } = &s.kind else {
+            panic!("not a bitmap");
+        };
+        let b = s.bounds();
+        // 2 mm of outline each way past the 20 mm circle.
+        assert!((b.width() - 24.0).abs() < 0.5, "{b:?}");
+        assert!((b.height() - 24.0).abs() < 0.5, "{b:?}");
+        assert!(
+            (b.x0 - 8.0).abs() < 0.5 && (b.y0 - 8.0).abs() < 0.5,
+            "{b:?}"
+        );
+        // The outline's outer edge is inside the picture: its edge pixels
+        // in the middle of each side are ink, not cut.
+        let img = crate::bitmap_fx::decode(png).expect("png");
+        let (w, h) = (img.width(), img.height());
+        for (x, y) in [(w / 2, 1), (w / 2, h - 2), (1, h / 2), (w - 2, h / 2)] {
+            assert!(img.get_pixel(x, y)[3] > 0, "ink at ({x}, {y})");
+        }
+        // An outline outside the path reaches its whole width out.
+        let mut app = App::headless();
+        let id = app
+            .new_shape(ShapeKind::Rect {
+                rect: Rect::new(0.0, 0.0, 20.0, 10.0),
+                radius: 0.0,
+                corners: None,
+            })
+            .expect("rectangle");
+        st.position = tracedraw_core::OutlinePosition::Outside;
+        app.run(Command::SetStroke {
+            shapes: vec![id],
+            stroke: Some(st),
+        });
+        app.select(vec![id]);
+        app.convert_to_bitmap(72.0, true);
+        let b = app.selected_shapes()[0].bounds();
+        assert!((b.width() - 28.0).abs() < 0.5, "{b:?}");
+        assert!((b.height() - 18.0).abs() < 0.5, "{b:?}");
+    }
+
+    #[test]
+    fn convert_to_cmyk_bitmap_keeps_the_cmyk_values() {
+        // #2381: a red of C0 M100 Y100 K0 converted to a CMYK bitmap read
+        // C2 M99 Y96, the inks taken back from the screen pixels.
+        use crate::bitmap_modes::{ConvertMode, ConvertOptions};
+        for (c, m, y, k) in [(0.0, 1.0, 1.0, 0.0), (0.2, 0.5, 0.0, 0.3)] {
+            let mut app = App::headless();
+            let id = app
+                .new_shape(ShapeKind::Rect {
+                    rect: Rect::new(0.0, 0.0, 20.0, 20.0),
+                    radius: 0.0,
+                    corners: None,
+                })
+                .expect("rectangle");
+            app.run(Command::SetFill {
+                shapes: vec![id],
+                fill: Fill::Solid(Color::Cmyk { c, m, y, k }),
+            });
+            app.select(vec![id]);
+            app.convert_to_bitmap_with(&ConvertOptions {
+                dpi: 72.0,
+                mode: ConvertMode::Cmyk,
+                transparent: false,
+                ..Default::default()
+            });
+            let s = app.selected_shapes().into_iter().next().expect("bitmap");
+            assert!(s.cmyk_bitmap);
+            let ShapeKind::Bitmap { png, .. } = &s.kind else {
+                panic!("not a bitmap");
+            };
+            let inks = s.picture_inks.as_deref().expect("the inks kept");
+            assert!(inks.fits(png.as_slice()));
+            // It shows as the vector did: the pixels the colour of the
+            // inks.
+            let img = crate::bitmap_fx::decode(png).expect("pixels");
+            let px = img.get_pixel(img.width() / 2, img.height() / 2);
+            let want = Color::Cmyk { c, m, y, k }.to_rgb8();
+            for i in 0..3 {
+                assert!(
+                    (i32::from(px[i]) - i32::from(want[i])).abs() <= 2,
+                    "{px:?} {want:?}"
+                );
+            }
+            let got = app.sample_color_at(Point::new(10.0, 10.0), false);
+            let Some(Color::Cmyk {
+                c: gc,
+                m: gm,
+                y: gy,
+                k: gk,
+            }) = got
+            else {
+                panic!("{got:?}");
+            };
+            for (a, b) in [(gc, c), (gm, m), (gy, y), (gk, k)] {
+                assert!(
+                    (a - b).abs() <= 1.0 / 255.0 + 1e-6,
+                    "{got:?} for {c} {m} {y} {k}"
+                );
+            }
+        }
     }
 
     #[test]

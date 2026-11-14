@@ -150,7 +150,9 @@ enum Res {
     Enum(String),
     EnumType(usize, usize),
     Module(usize),
-    Declared(String),
+    /// A declared Windows API procedure: its name and, lowercase, the
+    /// library's name for it (its alias, or its name).
+    Declared(String, String),
     BuiltinFn(String),
     BuiltinConst(String),
     Err,
@@ -696,12 +698,12 @@ impl<'a> Gen<'a> {
                     Res::StdProp(m, key.to_string())
                 });
             }
-            if let Some((n, _)) = a
+            if let Some((n, _, alias)) = a
                 .declares
                 .iter()
-                .find(|(n, p)| low(n) == key && (own || *p))
+                .find(|(n, p, _)| low(n) == key && (own || *p))
             {
-                return Some(Res::Declared(n.clone()));
+                return Some(Res::Declared(n.clone(), low(alias.as_deref().unwrap_or(n))));
             }
         }
         for e in &a.enums {
@@ -1572,6 +1574,9 @@ impl<'a> Gen<'a> {
             (Expr::Call(..), Some(args)) => Expr::Call(Box::new(e.clone()), args.to_vec()),
             (_, Some(_)) => return self.err(cx, "Expected a procedure call"),
         };
+        if let Some(js) = self.out_args_call(cx, &call)? {
+            return Ok(js);
+        }
         let js = match &call {
             Expr::Member(base, name) => {
                 if let Expr::Ident(b) = base.as_ref() {
@@ -1598,12 +1603,70 @@ impl<'a> Gen<'a> {
         Ok(format!("{js};"))
     }
 
+    /// A call to an object method that hands its results back through
+    /// the variables it is given (`s.GetBoundingBox x, y, w, h, True`):
+    /// the object model returns them as an array, and each one goes into
+    /// its variable. Without this the variables kept 0, and a crop-marks
+    /// macro drew its marks around the page's corner (#2165).
+    fn out_args_call(&mut self, cx: &mut Ctx, call: &Expr) -> R<Option<String>> {
+        let Expr::Call(callee, args) = call else {
+            return Ok(None);
+        };
+        let Expr::Member(_, name) = callee.as_ref() else {
+            return Ok(None);
+        };
+        // The argument each item of the returned array goes into.
+        let outs: &[usize] = match low(name).as_str() {
+            "getboundingbox" => &[0, 1, 2, 3],
+            "getposition" | "getsize" => &[0, 1],
+            "getdashandgaplength" => &[1, 2],
+            _ => return Ok(None),
+        };
+        let js = self.expr(cx, call)?;
+        let mut sets = String::new();
+        for (i, &at) in outs.iter().enumerate() {
+            let Some(Arg {
+                value: Some(target @ Expr::Ident(_)),
+                name: None,
+                ..
+            }) = args.get(at)
+            else {
+                continue;
+            };
+            if !matches!(target, Expr::Ident(n) if matches!(self.resolve(cx, n), Res::Var { .. })) {
+                continue;
+            }
+            sets.push_str(&self.assign(cx, target, format!("__o[{i}]"), false)?);
+        }
+        Ok(Some(format!(
+            "{{const __o={js};if(Array.isArray(__o)){{{sets}}}}}"
+        )))
+    }
+
     // ----- Expressions ------------------------------------------------------
 
     fn plain_args(&mut self, cx: &mut Ctx, args: &[Arg]) -> R<String> {
         let mut out = Vec::new();
         for a in args {
             out.push(match &a.value {
+                Some(v) => self.expr(cx, v)?,
+                None => "__v.Missing".into(),
+            });
+        }
+        Ok(out.join(","))
+    }
+
+    /// Arguments to a declared function that writes into a string it is
+    /// given (as Windows does with a buffer passed by value): variables
+    /// go by reference, so it can.
+    fn declared_args(&mut self, cx: &mut Ctx, args: &[Arg]) -> R<String> {
+        let mut out = Vec::new();
+        for a in args {
+            out.push(match &a.value {
+                Some(Expr::Ident(n)) => match self.resolve(cx, n) {
+                    Res::Var { js, .. } => format!("__v.ref(()=>{js},(__x)=>{{{js}=__x;}})"),
+                    _ => self.expr(cx, a.value.as_ref().unwrap())?,
+                },
                 Some(v) => self.expr(cx, v)?,
                 None => "__v.Missing".into(),
             });
@@ -1820,10 +1883,7 @@ impl<'a> Gen<'a> {
                     return self.err(cx, format!("Expected a value, not the module {n}"));
                 }
             }
-            Res::Declared(name) => format!(
-                "__v.unsupported({})",
-                js_string(&format!("Windows API function {name}"))
-            ),
+            Res::Declared(name, api) => declared_call(&name, &api, ""),
             Res::BuiltinFn(f) => format!("__b.{f}()"),
             Res::BuiltinConst(c) => format!("__b.{c}"),
             Res::Err => "__v.Err".into(),
@@ -1922,10 +1982,14 @@ impl<'a> Gen<'a> {
                             Ok(format!("__v.callf(__b.{f},[{pos}],{named})"))
                         }
                     }
-                    Res::Declared(name) => Ok(format!(
-                        "__v.unsupported({})",
-                        js_string(&format!("Windows API function {name}"))
-                    )),
+                    Res::Declared(name, api) => {
+                        let a = if writes_back(&api) {
+                            self.declared_args(cx, args)?
+                        } else {
+                            self.plain_args(cx, args)?
+                        };
+                        Ok(declared_call(&name, &api, &a))
+                    }
                     Res::Unknown => {
                         let h = self.host(cx, n);
                         let (pos, named) = self.dyn_args(cx, args)?;
@@ -2180,4 +2244,31 @@ fn check_jumps(
     }
     inner.pop();
     Ok(())
+}
+
+/// Whether declared function `api` writes into a string argument.
+fn writes_back(api: &str) -> bool {
+    api.starts_with("urldownloadtocachefile")
+}
+
+/// A call of a declared Windows API procedure (`api` the library's name
+/// for it, lowercase) with the arguments `args`: ShellExecute opens a web
+/// address with the system (`__v.shellexecute`, #2165), as macros do to
+/// show their makers' pages; the others are not supported here.
+fn declared_call(name: &str, api: &str, args: &str) -> String {
+    match api {
+        "shellexecute" | "shellexecutea" | "shellexecutew" => {
+            format!("__v.shellexecute([{args}])")
+        }
+        "urldownloadtofile" | "urldownloadtofilea" | "urldownloadtofilew" => {
+            format!("__v.urldownload([{args}],false)")
+        }
+        "urldownloadtocachefile" | "urldownloadtocachefilea" | "urldownloadtocachefilew" => {
+            format!("__v.urldownload([{args}],true)")
+        }
+        _ => format!(
+            "__v.unsupported({})",
+            js_string(&format!("Windows API function {name}"))
+        ),
+    }
 }

@@ -395,18 +395,7 @@ impl<N: Numeric> NumField<'_, N> {
         }
         // Typing does not change the value; applying it does.
         resp.flags.set(egui::response::Flags::CHANGED, false);
-        if resp.has_focus() && stored.is_none() {
-            // Just focused: the whole value is selected, ready to be typed
-            // over.
-            if let Some(mut state) = TextEdit::load_state(ui.ctx(), id) {
-                let all = egui::text::CCursorRange::two(
-                    egui::text::CCursor::new(0),
-                    egui::text::CCursor::new(buf.chars().count()),
-                );
-                state.cursor.set_char_range(Some(all));
-                state.store(ui.ctx(), id);
-            }
-        }
+        select_all_when_focused(ui, &resp, stored.is_none(), &buf);
         if resp.has_focus() {
             ui.data_mut(|d| d.insert_temp(id, buf.clone()));
         } else if stored.is_some() || resp.lost_focus() {
@@ -428,6 +417,25 @@ impl<N: Numeric> NumField<'_, N> {
             }
         }
         with_arrows(resp, spin_resp)
+    }
+}
+
+/// A number box just focused (`fresh`: nothing typed in it yet) has its
+/// whole value selected, ready to be typed over, as every number box of
+/// the bars does: a click put the caret where it landed, so "2" typed
+/// into "0.57 pt" made it "0.572 pt" and the width seemed not to change
+/// (#1329).
+pub fn select_all_when_focused(ui: &Ui, resp: &Response, fresh: bool, text: &str) {
+    if !resp.has_focus() || !fresh {
+        return;
+    }
+    if let Some(mut state) = TextEdit::load_state(ui.ctx(), resp.id) {
+        let all = egui::text::CCursorRange::two(
+            egui::text::CCursor::new(0),
+            egui::text::CCursor::new(text.chars().count()),
+        );
+        state.cursor.set_char_range(Some(all));
+        state.store(ui.ctx(), resp.id);
     }
 }
 

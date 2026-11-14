@@ -23,6 +23,9 @@ With the panel:
 
 Groups and bitmaps cannot take a contour.
 
+An open curve's contour runs round both sides of it: each step is a closed
+band, cut straight across at the curve's ends.
+
 ## Handles on the drawing {#handles}
 
 With the contour tool, an object with a contour shows a line from the

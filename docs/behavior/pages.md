@@ -41,6 +41,12 @@ orientation. Custom... opens the Page Size dialog with the page's width
 and height, to type any size (#650, #1092); the page width and height fields
 next to the list also take any size at once. Both resize the current
 page or every page as the All Pages / Current Page buttons say.
+A page is resized about its centre: its objects move by half of what
+the page grew or shrank, in the same undo step, so a drawing centred on
+the page stays centred. The Page Size dialog, Document Setup and Switch
+Page Orientation do the same; guidelines keep their place
+(`ops2::tests::a_page_is_resized_about_its_centre`, #2356).
+page or every page as the All Pages / Current Page buttons say.
 Edit This List... opens Document Setup > Page Size, where the
 save button next to Size keeps a custom size under a typed name and the
 delete button forgets the saved size shown; saved sizes are kept in the

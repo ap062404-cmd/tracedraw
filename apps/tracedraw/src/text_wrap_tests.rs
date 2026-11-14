@@ -202,8 +202,8 @@ fn a_file_without_paragraph_formats_gives_every_paragraph_the_object_ones() {
     let json = app.doc().to_json().expect("json");
     // An older file: the object's alignment and spacing.
     let old = json
-        .replace("\"align\": \"left\"", "\"align\": \"center\"")
-        .replace("\"space_after\": 0.0", "\"space_after\": 2.0");
+        .replace("\"align\":\"left\"", "\"align\":\"center\"")
+        .replace("\"space_after\":0.0", "\"space_after\":2.0");
     let doc = Document::from_json(&old).expect("opens");
     let ShapeKind::Text {
         spans, align, para, ..

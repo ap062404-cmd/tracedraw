@@ -17,8 +17,12 @@ off too and is lit while it is on (#1019).
   (`multipage::tests::the_cells_are_as_far_apart_as_the_spacing`).
 - Every page shows its number and name below it; the current page's in
   the normal text colour, the others dimmed.
-- Objects outside a page's edges are not shown on the other pages; the
-  current page shows them as always.
+- Objects outside a page's edges show for every page, where they lie
+  beside it on the desktop: each other page's picture covers its paper
+  and what its visible objects cover, measured once a change of the
+  drawing (#2055, `multipage::tests::objects_off_another_page_are_drawn`).
+  They showed only while their page was current, so they seemed to
+  vanish when another page became current.
 - Every page shows its own guidelines: the current page's across the
   whole window, as always, and each other page's within that page,
   where it sits in the grid (#1448,
@@ -84,8 +88,24 @@ off too and is lit while it is on (#1019).
 
 - The current page is edited as in the normal view: rulers, guides,
   grids and the status bar refer to it.
-- A press on another page makes it current before the tool acts, so a
-  click selects there and a drag draws there. Nothing moves on screen.
+- A press picks the object that shows there, whatever page holds it
+  (#2055): an object of the current page (drawn over the other pages'
+  objects) keeps the page, even over another page's paper or on the
+  desktop; else an object of another page under the pointer (the object
+  itself, not its box, as for the current page), on its page or off it,
+  makes that page current before the tool acts, so the same click
+  selects it; else a press on another page's paper makes it current, so
+  a click selects there and a drag draws there. Nothing moves on screen
+  (`multipage::tests::a_press_picks_the_object_shown_whatever_page_holds_it`).
+- A move of the Pick tool let go with the middle of the moved objects'
+  box over another page's paper gives them to that page: they stay where
+  they show, now in that page's own place, on its topmost visible,
+  unlocked layer, and that page becomes current with them selected, as
+  one undo step with the move (Move to Page). Let go on the desktop or
+  on the current page, they stay the current page's. Not with facing
+  pages, nor for an object chosen inside a group or one on a master
+  layer (#2055,
+  `pick_drag_tests::an_object_dropped_on_another_page_of_the_multipage_view_becomes_that_page_s`).
 - The page tabs and the navigator change the current page the same way.
 - Zoom to Fit (F4) and turning the view on fit every page in the window.
 - Page Overview and Multipage View exclude each other.

@@ -9,7 +9,7 @@ use crate::snap_points::{self, Geo, Target};
 use tracedraw_core::{
     document::GuideLine,
     geometry::{Affine, Point, Rect, Vec2},
-    Shape, ShapeId,
+    Shape, ShapeId, ShapeKind,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -291,7 +291,7 @@ impl App {
                 if exclude.contains(&sh.id) {
                     continue;
                 }
-                let b = sh.bounds();
+                let b = self.snap_bounds(sh);
                 xs.extend([b.x0, b.x1, b.center().x]);
                 ys.extend([b.y0, b.y1, b.center().y]);
             }
@@ -410,7 +410,7 @@ impl App {
             }
             // Only the objects whose box comes near the line (and, for a
             // side, near its stretch).
-            let b = sh.bounds();
+            let b = self.snap_bounds(sh);
             let ((lo, hi), (o0, o1)) = if x_axis {
                 ((b.x0, b.x1), (b.y0, b.y1))
             } else {
@@ -424,7 +424,7 @@ impl App {
                     continue;
                 }
             }
-            snap_points::object_geometry(sh, &text_baselines, &mut g);
+            snap_points::object_geometry(&self.snap_shape(sh), &text_baselines, &mut g);
         }
         snap_points::axis_stops(&g, &self.settings.snap.modes, x_axis, span, tol)
             .into_iter()
@@ -492,10 +492,10 @@ impl App {
                 if exclude.contains(&sh.id) || !sh.visible {
                     continue;
                 }
-                if !sh.bounds().inflate(tol, tol).contains(p) {
+                if !self.snap_bounds(sh).inflate(tol, tol).contains(p) {
                     continue;
                 }
-                snap_points::object_geometry(sh, &text_baselines, &mut g);
+                snap_points::object_geometry(&self.snap_shape(sh), &text_baselines, &mut g);
             }
         }
         g
@@ -544,7 +544,7 @@ impl App {
             if !b.inflate(tol, tol).contains(p) {
                 continue;
             }
-            snap_points::object_geometry(s, &text_baselines, &mut g);
+            snap_points::object_geometry(&self.snap_shape(s), &text_baselines, &mut g);
         }
         // Several objects: the middle of them all too, so a move can
         // carry the selection by its centre (#2004).
@@ -563,7 +563,67 @@ impl App {
     /// left its start (#1765): the document keeps the selection there
     /// until the move ends.
     pub fn selection_start_geometry(&self) -> StillGeometry {
-        StillGeometry::of_shapes(&self.selected_rc())
+        let shapes = self.selected_rc();
+        if !shapes
+            .iter()
+            .any(|s| matches!(s.kind, ShapeKind::SymbolInstance { .. }))
+        {
+            return StillGeometry::of_shapes(&shapes);
+        }
+        let shapes: Vec<Shape> = shapes
+            .iter()
+            .map(|s| self.snap_shape(s).into_owned())
+            .collect();
+        StillGeometry::of_shapes(&shapes)
+    }
+
+    /// `s` (a top-level object) as snapping reads it: a symbol instance
+    /// as a group of its symbol's objects where the instance shows them
+    /// (#2135). An instance alone knows neither its symbol's outline nor
+    /// its box (a 10 x 10 mm box at its origin stands for both), so a
+    /// symbol offered no node, edge or midpoint to snap to or to be
+    /// carried by, only the middle of that box by its lower left corner.
+    /// Every other object is read as it is.
+    pub(crate) fn snap_shape<'a>(&self, s: &'a Shape) -> std::borrow::Cow<'a, Shape> {
+        if !matches!(s.kind, ShapeKind::SymbolInstance { .. }) {
+            return std::borrow::Cow::Borrowed(s);
+        }
+        let mut group = Shape::new(
+            s.id,
+            ShapeKind::Group {
+                children: s.expand(&self.doc().symbols),
+            },
+        );
+        group.transform = s.transform;
+        group.visible = s.visible;
+        std::borrow::Cow::Owned(group)
+    }
+
+    /// The box of `s` (an object of the drawing) for snapping: a symbol
+    /// instance's is its symbol's, placed by the instance (see
+    /// [`Self::snap_shape`]). It is asked for every object of the page on
+    /// every pointer move, so an instance's box is measured once per
+    /// change of the drawing and kept with the other measured boxes.
+    fn snap_bounds(&self, s: &Shape) -> Rect {
+        if !matches!(s.kind, ShapeKind::SymbolInstance { .. }) {
+            return s.bounds();
+        }
+        let revision = self.engine.revision();
+        let Ok(mut cache) = self.visual_cache.try_borrow_mut() else {
+            return self.visual_bounds(s);
+        };
+        if cache.0 != revision {
+            cache.0 = revision;
+            cache.1.clear();
+        }
+        if let Some(b) = cache.1.get(&s.id) {
+            return *b;
+        }
+        // An instance's box comes straight from its symbol: nothing here
+        // asks for the cache again.
+        let b = self.visual_bounds(s);
+        cache.1.insert(s.id, b);
+        b
     }
 
     /// Snap a pointer position (drawing tools, text placement).
@@ -746,43 +806,49 @@ impl App {
         }));
     }
 
-    /// Where the centre of rotation goes for the pointer at `p`: when
-    /// snapping is on, the nearest within the snap radius of the
-    /// selection's box (corners, middles of the sides, centre) and of the
-    /// points the pointer snaps to (nodes and points of every object, the
-    /// selection's own included, guidelines, the grid, the page).
+    /// Where the centre of rotation goes for the pointer at `p`. Unless
+    /// snapping is off, it takes the nearest point within the snap radius
+    /// of the selection's box (corners, middles of the sides, centre) and
+    /// of the objects of the page, the selection's own included (nodes,
+    /// midpoints, quadrants, centres), whether or not Snap to Objects is
+    /// on, so it can be put on the centre or an edge of an object
+    /// exactly (#2352); the point it takes is marked with its name. Else
+    /// it snaps as the pointer does (guidelines, the grid, the page).
     pub fn snap_pivot(&self, p: Point) -> Point {
+        if self.snap.off {
+            return p;
+        }
+        let tol = self.snap_tolerance();
+        let mut g = Vec::new();
+        if let Some(b) = self.selection_bounds() {
+            if b.inflate(tol, tol).contains(p) {
+                g.push(Geo::Outline {
+                    path: tracedraw_core::geometry::Shape::to_path(&b, 0.01),
+                    points: true,
+                });
+                g.push(Geo::Center(b.center()));
+            }
+        }
+        for sh in self
+            .page_layers()
+            .into_iter()
+            .filter(|l| l.visible)
+            .flat_map(|l| &l.shapes)
+        {
+            if !sh.visible || !self.snap_bounds(sh).inflate(tol, tol).contains(p) {
+                continue;
+            }
+            snap_points::object_geometry(&self.snap_shape(sh), &text_baselines, &mut g);
+        }
+        let found = snap_points::targets(&g, p, tol, None, &self.settings.snap.modes);
+        if let Some(t) = snap_points::best(&found, true, false) {
+            self.snap_mark.set(Some(t));
+            return t.point;
+        }
         if !self.snap_enabled() {
             return p;
         }
-        let snapped = self.snap_point(p);
-        let tol = self.snap_tolerance();
-        let boxed = self.selection_bounds().and_then(|b| {
-            let (x0, x1, y0, y1) = (b.x0, b.x1, b.y0, b.y1);
-            let c = b.center();
-            [
-                Point::new(x0, y0),
-                Point::new(x1, y0),
-                Point::new(x0, y1),
-                Point::new(x1, y1),
-                Point::new(c.x, y0),
-                Point::new(c.x, y1),
-                Point::new(x0, c.y),
-                Point::new(x1, c.y),
-                c,
-            ]
-            .into_iter()
-            .map(|q| (q, (q - p).hypot()))
-            .filter(|(_, d)| *d <= tol)
-            .min_by(|a, b| a.1.total_cmp(&b.1))
-        });
-        match boxed {
-            Some((q, d)) if snapped == p || d < (snapped - p).hypot() => {
-                self.snap_mark.set(None);
-                q
-            }
-            _ => snapped,
-        }
+        self.snap_point(p)
     }
 
     /// Where the point of the selection box that a scale handle stands for
@@ -1387,7 +1453,7 @@ fn circle_crossing(
 mod tests {
     use super::*;
     use crate::snap_points::SnapMode;
-    use tracedraw_core::{document::Guide, Command, ShapeKind};
+    use tracedraw_core::{document::Guide, Command};
 
     /// A headless app at 1 px per mm: the 10 px radius is 10 mm.
     fn app() -> App {
@@ -1590,6 +1656,50 @@ mod tests {
         assert_ne!(q, Point::new(100.0, 120.0));
     }
 
+    /// The centre of rotation snaps to the centre, the corners and the
+    /// middles of the sides of the selection and to the centre of another
+    /// object, even with Snap to Objects off as on a first start, and
+    /// names the point it took; with snapping off it goes where it is
+    /// put (#2352).
+    #[test]
+    fn the_centre_of_rotation_snaps_to_object_centres_and_edges() {
+        let mut app = app();
+        app.snap = SnapSettings::default();
+        app.settings.snap = crate::settings::SnapPrefs::default();
+        let page = app.page_rect();
+        let (x, y) = (page.x0 + 60.0, page.y0 + 60.0);
+        let square = rect(&mut app, x, y, x + 30.0, y + 30.0);
+        let circle = app
+            .new_shape(ShapeKind::Ellipse {
+                rect: Rect::new(x, y + 60.0, x + 30.0, y + 90.0),
+                arc: None,
+            })
+            .expect("circle");
+        app.select(vec![square]);
+        app.rotate_mode = true;
+        // The other object's centre.
+        let c = Point::new(x + 15.0, y + 75.0);
+        assert_eq!(app.snap_pivot(c + Vec2::new(3.0, -2.0)), c);
+        assert_eq!(app.snap_mark.get().map(|m| m.mode), Some(SnapMode::Center));
+        // The selection's own centre, a corner and the middle of a side.
+        app.snap_mark.set(None);
+        let mid = Point::new(x + 15.0, y + 15.0);
+        assert_eq!(app.snap_pivot(mid + Vec2::new(-2.0, 2.5)), mid);
+        assert!(app.snap_mark.get().is_some(), "the point is named");
+        let corner = Point::new(x + 30.0, y);
+        assert_eq!(app.snap_pivot(corner + Vec2::new(2.0, -1.0)), corner);
+        let side = Point::new(x + 15.0, y + 30.0);
+        assert_eq!(app.snap_pivot(side + Vec2::new(1.5, 2.0)), side);
+        // Far from every point it stays where it is put.
+        let free = Point::new(x + 7.0, y + 45.0);
+        assert_eq!(app.snap_pivot(free), free);
+        // Snapping off: no snap at all.
+        app.snap.off = true;
+        let near = c + Vec2::new(3.0, -2.0);
+        assert_eq!(app.snap_pivot(near), near);
+        let _ = circle;
+    }
+
     #[test]
     fn snapping_to_objects_turns_off_but_the_page_stays() {
         let mut app = app();
@@ -1619,6 +1729,65 @@ mod tests {
         let d = app.snap_move_from(src, b, Vec2::new(107.0, 88.0), None);
         assert_eq!(Point::new(30.0, 30.0) + d, Point::new(140.0, 120.0));
         assert_eq!(app.snap_mark.get().map(|m| m.mode), Some(SnapMode::Node));
+    }
+
+    /// A symbol snaps as the objects it shows (#2135): the pointer over
+    /// a selected symbol names its corner, a move carries that corner
+    /// onto another symbol's corner, and a point drawn near a symbol's
+    /// edge lands on it. A symbol offered only the middle of a 10 x 10 mm
+    /// box at its lower left corner, whatever it showed.
+    #[test]
+    fn symbols_snap_by_what_they_show() {
+        let mut app = app();
+        app.settings.snap.threshold_px = 3.0;
+        let symbol = |app: &mut App, x0: f64, y0: f64, x1: f64, y1: f64| {
+            let id = rect(app, x0, y0, x1, y1);
+            app.select(vec![id]);
+            app.create_symbol_from_selection();
+            assert_eq!(app.selection.len(), 1);
+            app.selection[0]
+        };
+        let still = symbol(&mut app, 100.0, 100.0, 160.0, 140.0);
+        let moving = symbol(&mut app, 20.0, 20.0, 50.0, 40.0);
+        assert!(matches!(
+            app.doc().find_shape(moving).map(|s| &s.kind),
+            Some(ShapeKind::SymbolInstance { .. })
+        ));
+        app.select(vec![moving]);
+        // Its own points: the top right corner, the middle of a side, its
+        // centre.
+        let at = |app: &App, x: f64, y: f64| {
+            app.selection_hover_target(Point::new(x, y))
+                .map(|t| (t.mode, t.point))
+        };
+        assert_eq!(
+            at(&app, 49.0, 39.0),
+            Some((SnapMode::Node, Point::new(50.0, 40.0)))
+        );
+        assert_eq!(
+            at(&app, 20.5, 30.0),
+            Some((SnapMode::Midpoint, Point::new(20.0, 30.0)))
+        );
+        assert_eq!(
+            at(&app, 35.0, 30.5),
+            Some((SnapMode::Center, Point::new(35.0, 30.0)))
+        );
+        // Nothing where the instance's unit box has its middle.
+        assert_eq!(at(&app, 25.0, 25.0), None);
+        // Carried by its top right corner next to the other symbol: the
+        // corner lands on that symbol's top left corner.
+        let src = app.selection_snap_source(Point::new(49.0, 39.0));
+        let b = app.selection_bounds().unwrap();
+        let d = app.snap_move_from(src, b, Vec2::new(51.0, 99.0), None);
+        assert_eq!(Point::new(50.0, 40.0) + d, Point::new(100.0, 140.0));
+        assert_eq!(app.snap_mark.get().map(|m| m.mode), Some(SnapMode::Node));
+        // A point near the still symbol's right edge lands on the edge.
+        let p = app.snap_point_excluding(Point::new(161.5, 112.0), &[moving]);
+        assert!(
+            (p.x - 160.0).abs() < 1e-9 && (p.y - 112.0).abs() < 1e-9,
+            "{p:?}"
+        );
+        let _ = still;
     }
 
     #[test]

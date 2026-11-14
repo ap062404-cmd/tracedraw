@@ -14,32 +14,71 @@ use tracedraw_core::{
     Command, Document, ShapeId, TextSpan,
 };
 
+/// Document limited to the selection, sized to what it covers, and that
+/// box. Empty selection: the page, as it was.
+///
+/// One reading of what "the selection" means for an export, used by the
+/// Export dialog and by the MCP server's `export` with `selection`, so the
+/// two cannot come out different.
+pub(crate) fn selection_document(app: &App) -> (Document, Rect) {
+    let doc = app.engine.document();
+    let bounds = selection_export_bounds(app).unwrap_or(app.page_rect());
+    let mut tmp = Document::new(
+        doc.title.clone(),
+        Size::new(bounds.width().max(0.1), bounds.height().max(0.1)),
+    );
+    tmp.symbols = doc.symbols.clone();
+    // The drawing's spot inks and colour profile go along: without
+    // its ink, a spot colour exports as its process stand-in.
+    tmp.inks = doc.inks.clone();
+    tmp.cmyk_profile = doc.cmyk_profile.clone();
+    tmp.color_styles = doc.color_styles.clone();
+    let l = tmp.pages[0].layers[0].id;
+    for s in app.selected_shapes() {
+        let mut c = s.clone();
+        let shift = Affine::translate((-bounds.x0, -bounds.y0));
+        c.transform_by(shift);
+        carry_blend_ends(&mut c, shift);
+        if let Ok(layer) = tmp.layer_mut(l) {
+            layer.shapes.push(c);
+        }
+    }
+    (tmp, bounds)
+}
+
+/// The box a selection exported alone is sized to: what each selected
+/// object draws, its outline included. The selection's own box leaves the
+/// outline out (an outline straddles the path), so a selected rectangle
+/// came out of an SVG, PDF or PNG export with half its outline cut off at
+/// every edge (#2290).
+fn selection_export_bounds(app: &App) -> Option<Rect> {
+    app.selected_shapes()
+        .iter()
+        .map(|s| {
+            let r = outline_reach_within(s, s.transform);
+            app.own_visual_bounds(s).inflate(r, r)
+        })
+        .reduce(|a, b| a.union(b))
+}
+
+/// How far the outline of `s`, or of any object inside it (a group's),
+/// reaches past its path on the page ([`crate::interaction::outline_reach`]).
+fn outline_reach_within(s: &tracedraw_core::Shape, to_page: Affine) -> f64 {
+    let own = crate::interaction::outline_reach(s, to_page);
+    match &s.kind {
+        ShapeKind::Group { children } => children
+            .iter()
+            .map(|c| outline_reach_within(c, to_page * c.transform))
+            .fold(own, f64::max),
+        _ => own,
+    }
+}
+
 /// Document limited to the selection or the current page, for exports.
 pub(crate) fn export_document(app: &App, st: &ExportState) -> (Document, Rect) {
     let doc = app.engine.document();
     if st.selection_only {
-        let bounds = app.selection_bounds().unwrap_or(app.page_rect());
-        let mut tmp = Document::new(
-            doc.title.clone(),
-            Size::new(bounds.width().max(0.1), bounds.height().max(0.1)),
-        );
-        tmp.symbols = doc.symbols.clone();
-        // The drawing's spot inks and colour profile go along: without
-        // its ink, a spot colour exports as its process stand-in.
-        tmp.inks = doc.inks.clone();
-        tmp.cmyk_profile = doc.cmyk_profile.clone();
-        tmp.color_styles = doc.color_styles.clone();
-        let l = tmp.pages[0].layers[0].id;
-        for s in app.selected_shapes() {
-            let mut c = s.clone();
-            let shift = Affine::translate((-bounds.x0, -bounds.y0));
-            c.transform_by(shift);
-            carry_blend_ends(&mut c, shift);
-            if let Ok(layer) = tmp.layer_mut(l) {
-                layer.shapes.push(c);
-            }
-        }
-        (tmp, bounds)
+        selection_document(app)
     } else {
         // Facing pages (#1972): each spread as one page, or each page
         // with what its facing page holds across the spine (and in the
@@ -208,7 +247,7 @@ fn page_file(
         "dxf" => tracedraw_io::dxf::page_to_dxf(doc, k).into_bytes(),
         "emf" => tracedraw_io::emf::page_to_emf(doc, k),
         "wmf" => tracedraw_io::emf::page_to_wmf(doc, k),
-        "plt" => tracedraw_io::plt::page_to_plt(doc, k).into_bytes(),
+        "plt" => tracedraw_io::plt::page_to_plt_with(doc, k, &st.plt_options()).into_bytes(),
         "psd" => tracedraw_io::psd::page_to_psd(doc, k, st.render_dpi()).ok_or("render failed")?,
         _ => {
             let pid = doc.pages.get(k).ok_or("no page")?.id;
@@ -1758,6 +1797,8 @@ pub fn print_layout(app: &App, st: &PrintState, doc: &Document) -> crate::imposi
         // clip, clear of the printer's margins (#536, #595).
         page_offset: st.art_offset,
         page_stretch: st.art_stretch,
+        page_rotation: st.art_rotation,
+        cell_rotation: st.cell_rotation.clone(),
         stretch_fit: st.stretch_fit,
         booklet: st.booklet(),
         marks: crate::imposition::Marks {
@@ -2207,7 +2248,7 @@ pub fn parse_csv(text: &str) -> (Vec<String>, Vec<Vec<String>>) {
 
 // ----- find and replace ----------------------------------------------------------
 
-fn matches_text(hay: &str, needle: &str, match_case: bool, whole_word: bool) -> bool {
+pub(crate) fn matches_text(hay: &str, needle: &str, match_case: bool, whole_word: bool) -> bool {
     if needle.is_empty() {
         return false;
     }
@@ -2334,7 +2375,7 @@ pub fn replace_text(
     }
 }
 
-fn replace_in(
+pub(crate) fn replace_in(
     text: &str,
     needle: &str,
     replacement: &str,
@@ -3563,9 +3604,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The bitmap size in the Export dialog: in pixels it sets the
-    /// resolution as before, in a length it sets the scale; the other side
-    /// follows and nonsense is ignored (#617).
+    /// The bitmap size in the Export dialog: typed in pixels or in a
+    /// length it sets the scale, the resolution staying (#2640: pixels
+    /// set the resolution); the other side follows and nonsense is
+    /// ignored (#617).
     #[test]
     fn the_export_size_is_typed_in_pixels_or_lengths() {
         use crate::ui::dialogs::{export_size_in_unit, set_export_size};
@@ -3589,7 +3631,7 @@ mod tests {
             (2000.0, 1000.0)
         ));
         set_export_size(&mut st, 254.0, 1000.0);
-        assert!((st.dpi - 50.0).abs() < 1e-3 && (st.scale - 2.0).abs() < 1e-9);
+        assert!(st.dpi == 100.0 && (st.scale - 1.0).abs() < 1e-6, "{st:?}");
         assert!(near(
             export_size_in_unit(254.0, 127.0, &st),
             (1000.0, 500.0)
@@ -3606,6 +3648,46 @@ mod tests {
         assert_eq!(st, before);
         st.scale = f64::NAN;
         assert_eq!(st.scale_or_one(), 1.0);
+    }
+
+    /// A resolution typed or picked in the Export dialog leaves the size
+    /// shown: in pixels as many pixels come out, at the new resolution;
+    /// in a length the printed size stays and the pixels follow. A size
+    /// typed leaves the resolution (#2640).
+    #[test]
+    fn the_export_resolution_and_size_change_one_at_a_time() {
+        use crate::ui::dialogs::{export_size_in_unit, set_export_dpi, set_export_size};
+        let mut st = ExportState {
+            dpi: 300.0,
+            size_unit: 0,
+            ..ExportState::default()
+        };
+        // An A4 page: 2481 x 3508 pixels at 300 dpi.
+        let (w, h) = (210.0, 297.0);
+        let before = export_size_in_unit(w, h, &st);
+        assert_eq!(before, (2481.0, 3508.0));
+        set_export_dpi(&mut st, 72.0);
+        assert_eq!(st.dpi, 72.0);
+        assert_eq!(export_size_in_unit(w, h, &st), before, "{st:?}");
+        // A size typed: the resolution stays.
+        set_export_size(&mut st, w, 1000.0);
+        assert_eq!(st.dpi, 72.0);
+        assert_eq!(export_size_in_unit(w, h, &st).0, 1000.0);
+        // In millimetres the printed size stays and the pixels follow.
+        st = ExportState {
+            dpi: 300.0,
+            size_unit: 1,
+            ..ExportState::default()
+        };
+        set_export_dpi(&mut st, 150.0);
+        assert_eq!(export_size_in_unit(w, h, &st), (210.0, 297.0));
+        assert!((st.render_dpi() - 150.0).abs() < 1e-9);
+        // Nonsense changes nothing.
+        let kept = st.clone();
+        for d in [0.0, -1.0, f64::NAN] {
+            set_export_dpi(&mut st, d);
+        }
+        assert_eq!(st, kept);
     }
 
     #[test]
@@ -4658,6 +4740,54 @@ mod tests {
         // from the start's centre (30, 110) to the end's (220, 140).
         let want = tracedraw_core::geometry::Point::new(172.5 - bounds.x0, 132.5 - bounds.y0);
         assert!((last - want).hypot() < 1e-6, "{last:?}, not {want:?}");
+    }
+
+    /// A rectangle with a 2 mm outline exported alone: the export takes
+    /// the whole outline, 1 mm past the path on every side, where the SVG's
+    /// box was the path's and cut half the outline off at each edge
+    /// (#2290). Also inside a group.
+    #[test]
+    fn a_selection_exported_alone_keeps_its_whole_outline() {
+        use tracedraw_core::{Color, Stroke};
+        let mut app = App::headless();
+        let layer = app.active_layer().expect("layer");
+        let id = app.engine.new_shape_id();
+        let mut s = tracedraw_core::Shape::new(
+            id,
+            ShapeKind::Rect {
+                rect: tracedraw_core::Rect::new(10.0, 10.0, 40.0, 30.0),
+                radius: 0.0,
+                corners: None,
+            },
+        );
+        s.stroke = Some(Stroke::new(Color::rgb8(0, 0, 255), 2.0));
+        app.run(Command::AddShape { layer, shape: s });
+        app.selection = vec![id];
+        let st = ExportState {
+            selection_only: true,
+            ..ExportState::default()
+        };
+        let (doc, bounds) = export_document(&app, &st);
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-6;
+        assert!(
+            near(bounds.x0, 9.0)
+                && near(bounds.y0, 9.0)
+                && near(bounds.x1, 41.0)
+                && near(bounds.y1, 31.0),
+            "{bounds:?}"
+        );
+        let svg = tracedraw_io::svg::page_to_svg(&doc, 0);
+        assert!(svg.contains("viewBox=\"0 0 32 22\""), "{svg}");
+
+        // Grouped: the group has no outline of its own, its rectangle has.
+        app.selection = vec![id];
+        app.group_selection();
+        assert_eq!(app.selection.len(), 1);
+        let (_, grouped) = export_document(&app, &st);
+        assert!(
+            near(grouped.x0, 9.0) && near(grouped.x1, 41.0),
+            "{grouped:?}"
+        );
     }
 
     /// Selected objects exported alone keep their spot inks: a PDF of the

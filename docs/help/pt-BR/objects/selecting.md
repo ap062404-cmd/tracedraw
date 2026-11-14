@@ -124,8 +124,10 @@ parecidos com os selecionados:
   curvas, texto artístico, texto de parágrafo, grupos, bitmaps...).
 
 Com vários objetos selecionados, vale um objeto parecido com qualquer um
-deles. Só os objetos da própria página são comparados, não os de dentro de
-grupos; objetos em camadas bloqueadas ficam de fora, como em
+deles. Os objetos de dentro de grupos também são comparados, cada um por
+si, e um grupo selecionado vale pelos objetos que ele tem (com
+[[menu.edit.similar_kind]], um grupo selecionado acha os outros grupos).
+Objetos em camadas bloqueadas ficam de fora, como em
 [[menu.edit.select_all]].
 
 Cada um desses comandos é um passo de [[menu.edit.undo]]: logo depois dele,

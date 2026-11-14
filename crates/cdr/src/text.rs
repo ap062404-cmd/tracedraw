@@ -123,6 +123,51 @@ pub(crate) fn decode_charset(b: &[u8], charset: u8) -> String {
     }
 }
 
+/// The Unicode block of the letters a character set adds to the Latin
+/// ones, for the sets whose script is not written with Latin letters.
+fn charset_script(charset: u8) -> Option<std::ops::RangeInclusive<char>> {
+    Some(match charset {
+        161 => '\u{370}'..='\u{3ff}',
+        177 => '\u{590}'..='\u{5ff}',
+        178 => '\u{600}'..='\u{6ff}',
+        204 => '\u{400}'..='\u{4ff}',
+        222 => '\u{e00}'..='\u{e7f}',
+        _ => return None,
+    })
+}
+
+/// The text of a run in the code page of its character set, or in
+/// Windows-1252 when that reading shows the run is Latin text set in a
+/// font of another script (#2047: Spanish text in a font recorded with
+/// the Arabic set opened with an Arabic letter for each a, i, o and u
+/// acute, inside words of Latin letters). The run is Latin when more of
+/// its words mix Latin letters with the set's own than are written in
+/// the set's letters alone; a lone letter decides nothing.
+pub(crate) fn decode_run(b: &[u8], charset: u8) -> String {
+    let text = decode_charset(b, charset);
+    let Some(script) = charset_script(charset) else {
+        return text;
+    };
+    let latin = |c: char| c < '\u{250}' && c.is_alphabetic();
+    let (mut mixed, mut own) = (0usize, 0usize);
+    for word in text.split(|c: char| !(latin(c) || script.contains(&c))) {
+        let letters = word.chars().filter(|c| script.contains(c)).count();
+        if letters == 0 {
+            continue;
+        }
+        if word.chars().any(latin) {
+            mixed += 1;
+        } else if letters > 1 {
+            own += 1;
+        }
+    }
+    if mixed > own {
+        decode_charset(b, 0)
+    } else {
+        text
+    }
+}
+
 /// The character set is one whose text differs from Windows-1252.
 pub(crate) fn is_non_latin_charset(charset: u8) -> bool {
     charset == 2 || charset_encoding(charset).is_some()
@@ -214,8 +259,12 @@ pub(crate) struct RunStyle {
     /// Line spacing as a distance between baselines, mm (set instead of
     /// `line_spacing`).
     pub line_spacing_mm: Option<f64>,
-    /// Extra character spacing as a fraction of the em (0 = none).
+    /// Character spacing as a fraction of the width of the space
+    /// character (0 = none).
     pub char_spacing: Option<f64>,
+    /// Word spacing as a fraction of the width of the space character
+    /// (1 = the space as the font has it).
+    pub word_spacing: Option<f64>,
     /// Paragraph indents in points: (left, first line, right).
     pub indent_pt: Option<(f64, f64, f64)>,
     /// The paragraph's tab stops (the style table's tab entries before
@@ -225,8 +274,8 @@ pub(crate) struct RunStyle {
     /// Version 16+ style strings: the space before and after a paragraph
     /// as factors of the character height (`beforeParaSpacing` 1.0 is no
     /// extra space, `afterParaSpacing` 0.0 none), and the unit they and
-    /// the line spacing are given in (`spacingMethod`; only 0, the
-    /// character height, is read).
+    /// the line spacing are given in (`spacingMethod`: 0 the character
+    /// height, 1 points, 2 the point size; read in `paragraph_spacing`).
     pub para_before: Option<f64>,
     pub para_after: Option<f64>,
     pub spacing_method: Option<u32>,
@@ -390,6 +439,7 @@ impl RunStyle {
                 base.line_spacing_mm
             },
             char_spacing: self.char_spacing.or(base.char_spacing),
+            word_spacing: self.word_spacing.or(base.word_spacing),
             indent_pt: self.indent_pt.or(base.indent_pt),
             tabs: self.tabs.clone().or_else(|| base.tabs.clone()),
             para_before: self.para_before.or(base.para_before),
@@ -623,8 +673,10 @@ fn read_stlt_set11(
         r.skip(n * size);
         Some(())
     };
-    // Intervals: id, 8 unknown, character spacing i32 (millionths), 8
-    // unknown, line spacing, 20 unknown, the line spacing's unit u32: 0
+    // Intervals: id, 8 unknown, character spacing i32 (millionths), 4
+    // unknown, word spacing i32 (millionths, 1 000 000 the space as it
+    // is; #2586: 1 107 391 beside a character spacing of 107 391 in a
+    // version 18 file), line spacing, 20 unknown, the line spacing's unit u32: 0
     // (and 2) millionths of the character height, 1 a distance in
     // coordinate units (7 pt stored as 24 694 in a version 12 file whose
     // multi-line text otherwise collapses onto one line).
@@ -633,14 +685,15 @@ fn read_stlt_set11(
         return Vec::new();
     };
     let ni = (ni as usize).min(r.remaining() / 52);
-    let mut intervals: std::collections::HashMap<u32, (f64, LineSpacing)> =
+    let mut intervals: std::collections::HashMap<u32, (f64, Option<f64>, LineSpacing)> =
         std::collections::HashMap::with_capacity(ni);
     for _ in 0..ni {
-        let (Some(id), _, Some(ch), _, Some(ln), _, Some(unit)) = (
+        let (Some(id), _, Some(ch), _, Some(word), Some(ln), _, Some(unit)) = (
             r.u32(),
             r.skip(8),
             r.u32(),
-            r.skip(8),
+            r.skip(4),
+            r.u32(),
             r.u32(),
             r.skip(20),
             r.u32(),
@@ -652,7 +705,10 @@ fn read_stlt_set11(
         } else {
             LineSpacing::Factor(ln as i32 as f64 / 1_000_000.0)
         };
-        intervals.insert(id, (ch as i32 as f64 / 1_000_000.0, line));
+        // Zero is taken as not given (files that leave the field empty).
+        let word = word as i32 as f64 / 1_000_000.0;
+        let word = (word > 0.0 && word <= 20.0).then_some(word);
+        intervals.insert(id, (ch as i32 as f64 / 1_000_000.0, word, line));
     }
     if skip_table(&mut r, 152).is_none() {
         return Vec::new();
@@ -751,7 +807,7 @@ fn read_stlt_set11(
             else {
                 break;
             };
-            if let Some((ch, ln)) = intervals.get(&interval_ref) {
+            if let Some((ch, word, ln)) = intervals.get(&interval_ref) {
                 match *ln {
                     LineSpacing::Factor(f) if f > 0.0 && f.is_finite() => {
                         style.line_spacing = Some(f);
@@ -764,6 +820,7 @@ fn read_stlt_set11(
                 if ch.is_finite() && ch.abs() <= 20.0 {
                     style.char_spacing = Some(*ch);
                 }
+                style.word_spacing = *word;
             }
             if has_set11 {
                 r.skip(4);
@@ -2262,6 +2319,24 @@ pub(crate) fn object_transparency_is_uniform_fill(style: &str) -> bool {
         .is_some_and(|n| n == 1.0)
 }
 
+/// The merge mode code of an object's version 16+ style string
+/// transparency (`transparency` > `mode`), when it is not 0. Every
+/// file seen so far holds 0 there (#1666: 126 files attached to issues,
+/// versions 16 to 27, all with Normal merging), so the other codes are
+/// not known yet; the reader names the code in a warning and draws the
+/// object as Normal.
+pub(crate) fn object_transparency_merge_code(style: &str) -> Option<i64> {
+    let t = style.trim_matches(|c: char| c == '\0' || c.is_whitespace());
+    let Some(Json::Obj(items)) = parse_json(t) else {
+        return None;
+    };
+    let (_, Json::Obj(tr)) = items.iter().find(|(k, _)| k == "transparency")? else {
+        return None;
+    };
+    let n = tr.iter().find(|(k, _)| k == "mode")?.1.num()?;
+    (n.is_finite() && n != 0.0).then_some(n as i64)
+}
+
 /// A graded transparency from an object's version 16+ style string: its
 /// `transparency` section with a fountain `fill` (`type` 2) becomes a
 /// mask whose lightness is the opacity, with the target it applies to
@@ -2722,6 +2797,46 @@ mod tests {
     }
 
     #[test]
+    fn latin_runs_in_a_font_of_another_script_read_as_latin() {
+        // "Economia" with i acute, "manana" with n tilde, "mas" with a
+        // acute: Windows-1256 has an Arabic letter or mark at each.
+        let es = [b'E', b'c', b'o', b'n', b'o', b'm', 0xed, b'a'];
+        assert_eq!(decode_charset(&es, 178), "Econom\u{64a}a");
+        assert_eq!(decode_run(&es, 178), "Econom\u{ed}a");
+        assert_eq!(
+            decode_run(&[b'm', b'a', 0xf1, b'a', b'n', b'a'], 178),
+            "ma\u{f1}ana"
+        );
+        // The same in a font of the Cyrillic, Greek or Hebrew set.
+        assert_eq!(decode_run(&[b'c', b'a', b'f', 0xe9], 204), "caf\u{e9}");
+        assert_eq!(decode_run(&[b'm', 0xe1, b's'], 161), "m\u{e1}s");
+        assert_eq!(decode_run(&[b'm', 0xe1, b's'], 177), "m\u{e1}s");
+        // Text of the set's own script stays, with Latin words beside it
+        // and even one joined to a word.
+        let ar = [0xe3, 0xd1, 0xcd, 0xc8, 0xc7];
+        assert_eq!(decode_run(&ar, 178), "\u{645}\u{631}\u{62d}\u{628}\u{627}");
+        let mut both = ar.to_vec();
+        both.extend_from_slice(b" PDF ");
+        both.extend_from_slice(&ar);
+        both.extend_from_slice(b"PDF");
+        assert_eq!(decode_run(&both, 178), decode_charset(&both, 178));
+        assert_eq!(
+            decode_run(
+                &[0xcf, 0xf0, 0xe8, 0xe2, 0xe5, 0xf2, b' ', b'c', b'a', b'f'],
+                204
+            ),
+            "\u{41f}\u{440}\u{438}\u{432}\u{435}\u{442} caf"
+        );
+        // Scripts written with Latin letters are read in their code page.
+        assert_eq!(
+            decode_run(&[0xa3, 0xf3, 0x64, 0x9f], 238),
+            decode_charset(&[0xa3, 0xf3, 0x64, 0x9f], 238)
+        );
+        // A lone letter decides nothing.
+        assert_eq!(decode_run(&[0xe1], 178), "\u{644}");
+    }
+
+    #[test]
     fn old_text_reads_in_the_code_page_of_its_character_set() {
         // Cyrillic, Central European, Greek, Turkish, Baltic, Japanese.
         assert_eq!(
@@ -2831,6 +2946,21 @@ mod tests {
         assert!((o.unwrap() - 0.5).abs() < 1e-9);
         assert_eq!(object_opacity(r#"{"transparency":{},"fill":{}}"#), None);
         assert_eq!(object_opacity(r#"{"fill":{}}"#), None);
+    }
+
+    #[test]
+    fn a_merge_mode_other_than_normal_is_named() {
+        // Normal (0), as every file seen holds it, or no mode: nothing.
+        for normal in [
+            r#"{"transparency":{"mode":"0","uniformTransparency":"0.3"}}"#,
+            r#"{"transparency":{}}"#,
+            r#"{"fill":{"mode":"3"}}"#,
+            "not json",
+        ] {
+            assert_eq!(object_transparency_merge_code(normal), None, "{normal}");
+        }
+        let s = r#"{"transparency":{"fill":{"type":"1"},"mode":"4","uniformTransparency":"0"}}"#;
+        assert_eq!(object_transparency_merge_code(s), Some(4));
     }
 
     #[test]

@@ -68,6 +68,7 @@ pub enum Tool {
     AnchorEditing,
     // Effect group
     DropShadow,
+    InnerShadow,
     Contour,
     Blend,
     Distort,
@@ -192,6 +193,7 @@ pub const GROUPS: &[ToolGroup] = &[
     ToolGroup {
         tools: &[
             Tool::DropShadow,
+            Tool::InnerShadow,
             Tool::Contour,
             Tool::Blend,
             Tool::Distort,
@@ -220,7 +222,7 @@ pub const GROUPS: &[ToolGroup] = &[
 ];
 
 impl Tool {
-    pub const ALL: [Tool; 64] = [
+    pub const ALL: [Tool; 65] = [
         Tool::Pick,
         Tool::FreeformPick,
         Tool::FreeTransform,
@@ -271,6 +273,7 @@ impl Tool {
         Tool::RoundedConnector,
         Tool::AnchorEditing,
         Tool::DropShadow,
+        Tool::InnerShadow,
         Tool::Contour,
         Tool::Blend,
         Tool::Distort,
@@ -340,6 +343,7 @@ impl Tool {
             Tool::RoundedConnector => "rounded_connector",
             Tool::AnchorEditing => "anchor_editing",
             Tool::DropShadow => "drop_shadow",
+            Tool::InnerShadow => "inner_shadow",
             Tool::Contour => "contour",
             Tool::Blend => "blend",
             Tool::Distort => "distort",
@@ -468,6 +472,7 @@ impl Tool {
                     | Tool::RoundedConnector
                     | Tool::Blend
                     | Tool::BlockShadow
+                    | Tool::InnerShadow
                     | Tool::ShapeRecognition
                     | Tool::Sketch
                     | Tool::Smooth
@@ -505,6 +510,20 @@ impl Tool {
                 | Tool::GraphPaper
                 | Tool::ActionLines
         )
+    }
+
+    /// Drawing tools whose drag from a handle of the selection resizes it
+    /// instead of starting a new shape (the handles show right after a
+    /// shape is drawn).
+    pub fn resizes_by_handles(self) -> bool {
+        self.is_box_tool()
+            || matches!(
+                self,
+                Tool::ThreePointRectangle
+                    | Tool::ThreePointEllipse
+                    | Tool::Spiral
+                    | Tool::CommonShapes
+            )
     }
 
     /// Tools that are listed but not implemented yet (shown greyed).

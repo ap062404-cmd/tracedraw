@@ -26,6 +26,9 @@ subsetter = "0.2"
 web-time = "1"
 zip.workspace = true
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+# The raw inks of a CMYK JPEG in a PDF, which the image decoder above
+# turns into RGB as if they were stored inverted (#2322).
+zune-jpeg = "0.5"
 # PDF password protection (AES-256, revision 6) and its random keys;
 # reading protected files also needs RC4 keys made with MD5.
 aes = "0.8"

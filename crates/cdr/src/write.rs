@@ -633,6 +633,17 @@ fn cp1252(s: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
+/// The one byte a letter of a version 12+ text record takes, or `None`
+/// when it must go out as a marked UTF-16 unit: the byte is the letter's
+/// own code point, so only U+0000 to U+00FF have one. The program that
+/// reads the files takes such a byte as that code point, not as a
+/// Windows-1252 byte: curly quotes written as Windows-1252 0x92 and 0x94
+/// showed as missing glyphs in its version 18 reader and vanished in
+/// its version 21 one (#2124).
+fn text_byte(c: char) -> Option<u8> {
+    u8::try_from(u32::from(c)).ok()
+}
+
 /// A layer or object name: UTF-16 from version 12, 8-bit before.
 fn name_bytes(v: Ver, s: &str) -> Vec<u8> {
     if v.unicode() {
@@ -1943,13 +1954,150 @@ fn outl(v: Ver, id: u32, s: Option<&Stroke>) -> Vec<u8> {
 /// 9 program stops after the matrix: 56 and 80 bytes, what TraceDraw
 /// wrote until 2026-10-29).
 fn trfd(v: Ver, m: Affine) -> Vec<u8> {
-    let c = m.as_coeffs();
-    let mut rec = Buf::default();
+    trfd_of(&[trfd_matrix(v, m)])
+}
+
+/// A `trfd` of the entries `entries` in order (each from [`trfd_matrix`]
+/// or [`trfd_envelope`]): the length, the entry count, the start of the
+/// offsets table (16), 0xffff, the entries' offsets and the end.
+fn trfd_of(entries: &[Vec<u8>]) -> Vec<u8> {
+    let mut start = 16 + 4 * (entries.len() as u32 + 1);
+    let mut offsets = Vec::with_capacity(entries.len());
+    for e in entries {
+        offsets.push(start);
+        start += e.len() as u32;
+    }
+    let mut b = Buf::default();
+    b.u32(start).u32(entries.len() as u32).u32(16).u32(0xffff);
+    for o in offsets {
+        b.u32(o);
+    }
+    b.u32(start);
+    for e in entries {
+        b.bytes(e);
+    }
+    b.done()
+}
+
+/// The tag a `trfd` entry of `v` starts with, for a body of `len` bytes
+/// (the type and what follows it, without the 8 trailing zeros).
+fn trfd_tag(v: Ver, rec: &mut Buf, len: u32) {
     if v.0 >= 18 {
-        rec.u32(TRFD_SINCE_18).u32(56);
+        rec.u32(TRFD_SINCE_18).u32(len);
     } else if v.tagged() {
         rec.u32(SINCE_13).u32(0);
     }
+}
+
+/// An envelope written as files hold one on an object (#2432): the
+/// object's own record stays as it is, its `trfd` holds the envelope
+/// after the matrix that places it and an `envd` after the `trfd` holds
+/// the frame. In page space here; [`trfd_envelope`] and [`envd`] take it
+/// to the file's.
+#[derive(Debug, Clone)]
+struct NativeEnvelope {
+    /// The box the envelope maps from (the box of the letters).
+    rect: Rect,
+    frame: tracedraw_core::envelope::Frame,
+}
+
+/// The `envd` outline of `frame` (already in file space, `m` applied):
+/// the nodes run clockwise from the bottom-left corner up the left side,
+/// every segment a cubic (node, two handles), the last node back on the
+/// first; with the point index of each corner (bottom-left, top-left,
+/// top-right, bottom-right).
+fn envelope_outline(frame: &tracedraw_core::envelope::Frame) -> (Vec<Point>, Vec<u8>, [u32; 4]) {
+    let k = frame.nodes.len();
+    let [bl, br, tr, tl] = frame.corners;
+    // The frame runs the other way round, from its bottom-left corner
+    // `bl`: file node i is frame node bl - i, and the segment from it
+    // runs back along the frame's segment from node bl - i - 1.
+    let at = |i: usize| (bl + k - i % k) % k;
+    let mut pts = vec![frame.nodes[at(0)]];
+    let mut types = vec![0x0c];
+    for i in 0..k {
+        let [h1, h2] = frame.handles[at(i + 1)];
+        pts.extend([h2, h1, frame.nodes[at(i + 1)]]);
+        types.extend([
+            0xd0,
+            0xd0,
+            if i + 1 == k {
+                0x88
+            } else if frame.is_corner(at(i + 1)) {
+                0x84
+            } else {
+                0x94
+            },
+        ]);
+    }
+    let point = |c: usize| ((bl + k - c) % k * 3) as u32;
+    (pts, types, [point(bl), point(tl), point(tr), point(br)])
+}
+
+/// The `trfd` entry (type 1) of envelope number `serial` (from 1) in the
+/// file, `rect` and the outline's corners from [`envelope_outline`] in
+/// file space: as the version 27 files of #1668 hold them, 8 bytes that
+/// differ from file to file (written from the outline here) and 6 zero
+/// bytes, the box (left, top, right, bottom), the corners' point
+/// indexes, the number, 0, the point count and three numbers that rise
+/// through the file.
+fn trfd_envelope(v: Ver, serial: u32, rect: Rect, corners: [u32; 4], points: &[Point]) -> Vec<u8> {
+    let mut rec = Buf::default();
+    trfd_tag(v, &mut rec, 72);
+    rec.u16(1);
+    let mut h: u32 = 0x811c_9dc5;
+    for p in points {
+        for b in units(p.x)
+            .to_le_bytes()
+            .into_iter()
+            .chain(units(p.y).to_le_bytes())
+        {
+            h = (h ^ u32::from(b)).wrapping_mul(0x0100_0193);
+        }
+    }
+    rec.u32(h).u16((h >> 7) as u16).u16(2).zeros(6);
+    rec.i32(units(rect.x0))
+        .i32(units(rect.y1))
+        .i32(units(rect.x1))
+        .i32(units(rect.y0));
+    for c in corners {
+        rec.u32(c);
+    }
+    let id = 4 + 3 * serial;
+    rec.u32(serial)
+        .u32(0)
+        .u32(points.len() as u32)
+        .u32(id)
+        .u32(id + 1)
+        .u32(id + 2);
+    rec.zeros(8);
+    rec.done()
+}
+
+/// The `envd` record of an outline from [`envelope_outline`] in file
+/// space: a header like a `loda`'s (its length, 2 arguments, the offsets
+/// table at 60, the types table at 72) with the point count at byte 16,
+/// the node types (argument type 30), then the points (type 40).
+fn envd(points: &[Point], types: &[u8]) -> Vec<u8> {
+    let n = points.len() as u32;
+    let types_at = 80u32;
+    let points_at = types_at + n;
+    let end = points_at + 8 * n;
+    let mut b = Buf::default();
+    b.u32(end).u32(2).u32(60).u32(72).u32(n).zeros(40);
+    b.u32(types_at).u32(points_at).u32(end).u32(30).u32(40);
+    b.bytes(types);
+    for p in points {
+        b.i32(units(p.x)).i32(units(p.y));
+    }
+    b.done()
+}
+
+/// A `trfd` matrix entry (type 8).
+fn trfd_matrix(v: Ver, m: Affine) -> Vec<u8> {
+    let c = m.as_coeffs();
+    let mut rec = Buf::default();
+    trfd_tag(v, &mut rec, 56);
     rec.u16(8).zeros(6);
     for x in [
         c[0],
@@ -1962,18 +2110,7 @@ fn trfd(v: Ver, m: Affine) -> Vec<u8> {
         rec.f64(if x.is_finite() { x } else { 0.0 });
     }
     rec.zeros(if v.tagged() { 8 } else { 104 });
-    let rec = rec.done();
-    let start = 24u32;
-    let end = start + rec.len() as u32;
-    let mut b = Buf::default();
-    b.u32(end)
-        .u32(1)
-        .u32(16)
-        .u32(0xffff)
-        .u32(start)
-        .u32(end)
-        .bytes(&rec);
-    b.done()
+    rec.done()
 }
 
 /// `txtj`: the line breaking tables that follow every `txsm` from version
@@ -2794,7 +2931,8 @@ fn stlt(v: Ver, uses: StyleUses) -> Vec<u8> {
 /// 8): "RI", its length, 0, a 78-byte header (model 99, 1, size, 1 plane,
 /// 8 bits, stride, bytes, 64 at 62) and one byte per pixel, 255 opaque,
 /// rows bottom-up padded to 4 bytes.
-fn bmp_record(id: u32, png: &[u8], size_mm: (f64, f64)) -> Option<Vec<u8>> {
+/// Returns the record and the image's width and height in pixels.
+pub(crate) fn bmp_record(id: u32, png: &[u8], size_mm: (f64, f64)) -> Option<(Vec<u8>, u32, u32)> {
     let pm = tiny_skia::Pixmap::decode_png(png).ok()?;
     let (w, h) = (pm.width(), pm.height());
     if w == 0 || h == 0 {
@@ -2889,7 +3027,7 @@ fn bmp_record(id: u32, png: &[u8], size_mm: (f64, f64)) -> Option<Vec<u8>> {
             .zeros(12);
         b.bytes(&mask);
     }
-    Some(b.done())
+    Some((b.done(), w, h))
 }
 
 /// `loda`: header (length, argument count, offsets table, types table,
@@ -3711,6 +3849,10 @@ struct Writer<'a> {
     /// How deep inside [`Self::drawn_as`] the writer is: what an object
     /// with effects is drawn as is kept by that object's entry.
     drawing_effects: usize,
+    /// The envelope the next text [`Self::place`] writes holds as the
+    /// files' own (#2432), and how many such envelopes were written.
+    native_envelope: Option<NativeEnvelope>,
+    envelopes: u32,
     shadow_pictures: HashMap<tracedraw_core::ShapeId, &'a ShadowPicture>,
     /// Clip containers (#1222): the groups of the document's `LIST clpt`
     /// holding the contents of the clip frames written; the number the
@@ -3879,6 +4021,8 @@ impl<'a> Writer<'a> {
             split_families: HashMap::new(),
             drawn_styles: HashMap::new(),
             drawing_effects: 0,
+            native_envelope: None,
+            envelopes: 0,
             tech: fonts::FaceTech::new(),
             run_faces: Vec::new(),
             layer_slots: Vec::new(),
@@ -4029,12 +4173,14 @@ impl<'a> Writer<'a> {
         id
     }
 
-    fn bitmap_id(&mut self, png: &[u8], size_mm: (f64, f64)) -> Option<u32> {
+    /// A new `bmp ` record for `png`: its id and the image's size in
+    /// pixels.
+    fn bitmap_id(&mut self, png: &[u8], size_mm: (f64, f64)) -> Option<(u32, u32, u32)> {
         let id = self.next_bitmap;
-        let rec = bmp_record(id, png, size_mm)?;
+        let (rec, w, h) = bmp_record(id, png, size_mm)?;
         self.next_bitmap += 1;
         self.bitmaps.push(rec);
-        Some(id)
+        Some((id, w, h))
     }
 
     /// The whole file: version chunks, bitmaps, the document tables, the
@@ -4707,6 +4853,15 @@ impl<'a> Writer<'a> {
         // The frame's effects would make it several objects; the first
         // would take the container's arguments.
         f.effects.clear();
+        // The clip frame's transparency is the container's: a frame is
+        // drawn at the clip frame's opacity, its own ignored, so the
+        // container takes that (and a graded transparency kept for it).
+        // The frame's own was written, so a transparent picture in a
+        // frame was saved opaque (#2513).
+        f.opacity = s.opacity;
+        if let Some(g) = self.graded.get(&s.id).cloned() {
+            self.graded.insert(f.id, g);
+        }
         if f.name.is_none() {
             f.name = s.name.clone();
         }
@@ -5001,25 +5156,20 @@ impl<'a> Writer<'a> {
                 bounds: None,
             };
         };
-        let (sx, sy) = {
-            let c = s.transform.as_coeffs();
-            (c[0].hypot(c[1]), c[2].hypot(c[3]))
-        };
-        let Some(image) = self.bitmap_id(png, (rect.width() * sx, rect.height() * sy)) else {
+        // The image's resolution gives it the size of the object's box,
+        // which the object's transform places and scales, as every bitmap
+        // of the files seen holds it; the picture's pixel size is the
+        // image's own (#1222). The resolution was taken from the size on
+        // the page, so a scaled picture's box and image disagreed, and the
+        // pixel size from the shape, which need not match its picture.
+        let Some((image, width_px, height_px)) = self.bitmap_id(png, (rect.width(), rect.height()))
+        else {
             return Placed {
                 nodes: Vec::new(),
                 bounds: None,
             };
         };
         let v = self.v;
-        let (width_px, height_px) = match &s.kind {
-            ShapeKind::Bitmap {
-                width_px,
-                height_px,
-                ..
-            } => (*width_px, *height_px),
-            _ => (0, 0),
-        };
         // The page box is the shape's as it stands; the record then
         // speaks in the image's own space, from the origin.
         let page_box = match crop {
@@ -5226,6 +5376,11 @@ impl<'a> Writer<'a> {
         // keep it.
         let mut body = Vec::new();
         let mut flags = [0, 2, 0, 8];
+        // A locked object stays locked in the program that reads the
+        // file, as its own locked objects are flagged (#2347).
+        if s.locked {
+            flags[0] |= crate::parse::OBJECT_LOCKED;
+        }
         if container.is_some() {
             flags[2] = CLIP_CONTAINER_FLAG;
         }
@@ -5238,12 +5393,30 @@ impl<'a> Writer<'a> {
         }
         body.extend(self.head(flags, page_box, outline, centre));
         let recenter = Affine::translate(-centre.to_vec2());
+        let mut trfl = vec![chunk(b"trfd", trfd(v, recenter * transform))];
+        // A text's envelope written as the files' own (#2432): after the
+        // matrix, with its outline in an `envd` after the `trfd`.
+        if let Some(e) = text.as_ref().and_then(|_| self.native_envelope.take()) {
+            self.envelopes += 1;
+            let (points, types, corners) = envelope_outline(&e.frame.transformed(recenter));
+            let rect = recenter.transform_rect_bbox(e.rect);
+            trfl = vec![
+                chunk(
+                    b"trfd",
+                    trfd_of(&[
+                        trfd_matrix(v, recenter * transform),
+                        trfd_envelope(v, self.envelopes, rect, corners, &points),
+                    ]),
+                ),
+                chunk(b"envd", envd(&points, &types)),
+            ];
+        }
         body.push(list(
             b"lgob",
             vec![
                 chunk(b"loda", loda(kind, args)),
                 chunk(b"ftil", ftil()),
-                list(b"trfl", vec![chunk(b"trfd", trfd(v, recenter * transform))]),
+                list(b"trfl", trfl),
             ],
         ));
         if let Some((t, _, _)) = text {
@@ -5359,6 +5532,51 @@ impl<'a> Writer<'a> {
         }
     }
 
+    /// The envelope artistic text `s` keeps as the files' own (#2432):
+    /// from version 16, for text under one envelope and nothing else,
+    /// mapped as putty without keeping lines straight (as files' envelopes
+    /// on text read back), placed by a matrix that only moves and scales
+    /// it. Other text goes out as the curves its effects draw.
+    fn native_text_envelope(&self, s: &Shape) -> Option<NativeEnvelope> {
+        use tracedraw_core::{envelope::Mapping, live::Effect};
+        if self.v.0 < 16 || s.shadow.is_some() || !s.visible {
+            return None;
+        }
+        let [e @ Effect::Envelope {
+            keep_lines: false,
+            mapping: Mapping::Putty,
+            ..
+        }] = s.effects.as_slice()
+        else {
+            return None;
+        };
+        let ShapeKind::Text {
+            frame: None,
+            on_path: None,
+            para,
+            ..
+        } = &s.kind
+        else {
+            return None;
+        };
+        if para.vertical {
+            return None;
+        }
+        let [a, b, c, d, _, _] = s.transform.as_coeffs();
+        if b.abs() > 1e-9 || c.abs() > 1e-9 || a.abs() < 1e-9 || d.abs() < 1e-9 {
+            return None;
+        }
+        let frame = e.envelope_frame()?;
+        let rect = s.local_path().bounding_box();
+        if !(rect.width() > 0.0 && rect.height() > 0.0) {
+            return None;
+        }
+        Some(NativeEnvelope {
+            rect: s.transform.transform_rect_bbox(rect),
+            frame: frame.transformed(s.transform),
+        })
+    }
+
     fn object(&mut self, s: &Shape, centre: Point, depth: usize) -> Placed {
         let none = || Placed {
             nodes: Vec::new(),
@@ -5388,6 +5606,32 @@ impl<'a> Writer<'a> {
             let mut plain = s.clone();
             plain.shadow = None;
             return self.drawn_as(s, vec![plain], 0, shadow, centre, depth);
+        }
+        // Artistic text under an envelope alone goes out as text holding
+        // the envelope as the files' own, so it stays text there (#2432);
+        // the package's member keeps the object, so it opens here with
+        // its envelope as it was.
+        if let Some(e) = self.native_text_envelope(s) {
+            let mut plain = s.clone();
+            plain.effects.clear();
+            let usdn_before = self.next_usdn;
+            let kept_before = self.effects.len();
+            self.native_envelope = Some(e);
+            let placed = self.object(&plain, centre, depth);
+            self.native_envelope = None;
+            if self.v.zip() && self.drawing_effects == 0 && self.next_usdn > usdn_before {
+                // It replaces the entry upright text written for a slant
+                // takes (#1733): the object holds both.
+                let usdn = self.next_usdn - 1;
+                self.effects.truncate(kept_before);
+                self.effects.push(crate::kept_effects::Written {
+                    objects: vec![usdn],
+                    main: 0,
+                    bounds: s.bounds(),
+                    source: s.clone(),
+                });
+            }
+            return placed;
         }
         if !s.effects.is_empty() {
             let ev = tracedraw_core::live::evaluate(s);
@@ -5535,6 +5779,8 @@ impl<'a> Writer<'a> {
                 let clip = bm.transform.inverse() * frame.page_path();
                 let mut b = bm.clone();
                 b.transform = s.transform * bm.transform;
+                // The clip frame's transparency covers the picture (#2513).
+                b.absorb_opacity(s.opacity);
                 return self.bitmap_object(&b, centre, Some(&clip));
             }
             ShapeKind::ClipFrame { frame, contents } => {
@@ -5543,6 +5789,10 @@ impl<'a> Writer<'a> {
                 // unclipped.
                 let mut f = (**frame).clone();
                 f.absorb(s.transform);
+                // The clip frame's transparency is on each of them, as a
+                // group's is (#2513); the frame's own is not drawn.
+                f.opacity = 1.0;
+                f.absorb_opacity(s.opacity);
                 let mut kids = Vec::new();
                 if !matches!(f.fill, Fill::None) {
                     let mut under = f.clone();
@@ -5552,6 +5802,7 @@ impl<'a> Writer<'a> {
                 for c in contents {
                     let mut c = c.clone();
                     c.absorb(s.transform);
+                    c.absorb_opacity(s.opacity);
                     kids.push(c);
                 }
                 if f.stroke.is_some() {
@@ -5650,9 +5901,32 @@ impl<'a> Writer<'a> {
                 // A paragraph frame hangs from the object's (0, 0), its
                 // top left (`writes_frame` let only such frames through).
                 let frame = frame.filter(|_| self.writes_frame(s));
+                // Vertical text with its columns from the right goes out
+                // as files hold it (#1544): a horizontal line turned a
+                // quarter clockwise, set in the vertical form of its face,
+                // the family's name with a leading `@`.
+                let at_spans: Option<Vec<TextSpan>> =
+                    (para.vertical && para.columns_from_right() && frame.is_none()).then(|| {
+                        spans
+                            .iter()
+                            .map(|sp| {
+                                let mut sp = sp.clone();
+                                if !sp.font_family.starts_with('@') {
+                                    sp.font_family = format!("@{}", sp.font_family);
+                                }
+                                sp
+                            })
+                            .collect()
+                    });
+                let turn = if at_spans.is_some() {
+                    tracedraw_core::document::vertical_line_frame()
+                } else {
+                    Affine::IDENTITY
+                };
+                let spans = at_spans.as_deref().unwrap_or(spans);
                 let t = match frame {
                     Some(f) => s.transform * Affine::translate((origin.x, origin.y + f.height)),
-                    None => s.transform * Affine::translate(origin.to_vec2()),
+                    None => s.transform * Affine::translate(origin.to_vec2()) * turn,
                 };
                 self.has_text = true;
                 let record = if v.0 >= 16 {
@@ -5711,7 +5985,13 @@ impl<'a> Writer<'a> {
                 // The character settings of the first run, the width of
                 // the lines as the frame's one column (files give artistic
                 // text its line width there) and the alignment.
-                let width = s.local_path().bounding_box().width();
+                let lines_box = s.local_path().bounding_box();
+                // (A turned line runs down the box of the columns.)
+                let width = if at_spans.is_some() {
+                    lines_box.height()
+                } else {
+                    lines_box.width()
+                };
                 let character = format!(
                     r#"{},"frame":{{"equalWidthColumns":"1","rtlColumns":"0","columns":"{},0"}},"paragraph":{{"justify":"{}"}}"#,
                     spans
@@ -5904,7 +6184,8 @@ impl<'a> Writer<'a> {
     /// `txsm` of versions 7 to 15: one frame, a paragraph per line, one
     /// style per run (font, encoding, style flags, size and, when it
     /// differs from the object's, the fill), the text in UTF-16 from
-    /// version 12 and in Windows-1252 before.
+    /// version 12 (one byte for U+0000 to U+00FF) and in Windows-1252
+    /// before.
     /// The style id of a text format (versions 7 to 15), adding it to
     /// the style table when new.
     fn text_style(&mut self, f: TextFormat) -> u32 {
@@ -6009,24 +6290,30 @@ impl<'a> Writer<'a> {
             // own look first, each counting the letters that wear it and
             // the first the paragraph's end too; every letter names its
             // record. The files of versions 7 to 13 saved by the program
-            // that reads them are so ("Runs: bold red and italic" as
-            // records of 17 and 8 letters, the red letters numbered 1), and
-            // its 14 and 15 saves too, but the files of 14 and 15 written
-            // with one record per run open there and stay as they were.
-            // Overrides of the font and the style flags are written in no
-            // version: no file of 7 to 15 shows them, so a run whose weight
-            // or slant differs from the paragraph's takes the paragraph's.
+            // that reads them are so, and its 14 and 15 saves too, but the
+            // files of 14 and 15 written with one record per run open
+            // there and stay as they were. A run whose weight or slant
+            // differs from the paragraph's carries its style flags (flag
+            // 0x02, the face code as the text styles hold it): "Runs: bold
+            // red and italic" saved by that program in version 7 is a
+            // record of 12 letters with no override, one of 6 with the
+            // italic code (0x80) and one of 8 with the bold code (0x1000)
+            // and the red fill (#1139). Overrides of the font are written
+            // in no version: no file of 7 to 15 shows them.
             let by_look = n < 14;
             let last_run = runs.len().saturating_sub(1);
-            // (size, fill, letters) of each record, and each run's record.
-            let mut records: Vec<(i32, u32, usize)> = Vec::new();
+            // (size, fill, style flags, letters) of each record, and each
+            // run's record.
+            let mut records: Vec<(i32, u32, u32, usize)> = Vec::new();
             let mut record_of_run: Vec<usize> = Vec::with_capacity(runs.len());
             if by_look {
-                records.push((base.size, base.fill, 1));
+                records.push((base.size, base.fill, base.flags, 1));
             }
             for (ri, sp) in runs.iter().enumerate() {
                 let look = format_of(self, sp);
-                let same = |r: &(i32, u32, usize)| (r.0, r.1) == (look.size, look.fill);
+                let same = |r: &(i32, u32, u32, usize)| {
+                    (r.0, r.1, r.2) == (look.size, look.fill, look.flags)
+                };
                 // The last run counts the paragraph's end too, as files
                 // count it.
                 let end = usize::from(!by_look && ri == last_run);
@@ -6036,18 +6323,21 @@ impl<'a> Writer<'a> {
                     // the 128th record take the first one's look.
                     None if records.len() > MAX_RUN_STYLES => 0,
                     None => {
-                        records.push((look.size, look.fill, 0));
+                        records.push((look.size, look.fill, look.flags, 0));
                         records.len() - 1
                     }
                 };
                 if let Some(r) = records.get_mut(index) {
-                    r.2 += sp.text.chars().count() + end;
+                    r.3 += sp.text.chars().count() + end;
                 }
                 record_of_run.push(index);
             }
             t.u32(records.len() as u32);
-            for (size, fill_id, letters) in &records {
+            for (size, fill_id, style, letters) in &records {
                 let mut flags = 0u8;
+                if *style != base.flags {
+                    flags |= 0x02;
+                }
                 if *size != base.size {
                     flags |= 0x04;
                 }
@@ -6057,6 +6347,15 @@ impl<'a> Writer<'a> {
                 t.u16((*letters).min(65535) as u16).u8(flags);
                 if n >= 8 {
                     t.u8(0);
+                }
+                if flags & 0x02 != 0 {
+                    t.u32(*style);
+                    // The face it names has its font record, as the file
+                    // above lists Arial's italic and bold faces.
+                    let face = (base.font, *style & 0x3_ffff);
+                    if !self.run_faces.contains(&face) {
+                        self.run_faces.push(face);
+                    }
                 }
                 if flags & 0x04 != 0 {
                     t.i32(*size);
@@ -6079,19 +6378,21 @@ impl<'a> Writer<'a> {
             }
             let chars = text.chars().count();
             if v.unicode() {
-                // From version 12 a letter is one byte in Windows-1252
-                // unless bit 0 of the first byte of its 8-byte record marks
-                // it as a UTF-16 unit in two bytes. Text all in UTF-16 with
-                // no letter marked made the program that wrote the samples
-                // crash.
+                // From version 12 a letter of U+0000 to U+00FF is one byte
+                // (its code point) unless bit 0 of the first byte of its
+                // 8-byte record marks it as a UTF-16 unit in two bytes.
+                // Text all in UTF-16 with no letter marked made the
+                // program that wrote the samples crash. Letters Windows-1252
+                // holds above 0x7f but Latin-1 does not (curly quotes,
+                // dashes, the euro) go out marked too (#2124).
                 let mut descriptions = Buf::default();
                 let mut bytes = Vec::new();
                 for (i, c) in text.chars().enumerate() {
                     let number = record_of_letter.get(i).copied().unwrap_or(0);
-                    match cp1252(&c.to_string()) {
+                    match text_byte(c) {
                         Some(b) => {
                             descriptions.u8(0).u8(0).u8(number << 1).zeros(5);
-                            bytes.extend_from_slice(&b);
+                            bytes.push(b);
                         }
                         None => {
                             let unit = if (c as u32) <= 0xffff {
@@ -6131,9 +6432,9 @@ impl<'a> Writer<'a> {
     /// versions 16 to 18 and 1800 from 19 (#1698), one frame with the
     /// text's matrix, then a paragraph per line with the default style
     /// string (the first run's style and the alignment) and one record
-    /// per run whose style string the letters select; text in UTF-16
-    /// (16) or one byte per letter (17 on: Windows-1252, or UTF-8 for
-    /// letters it lacks).
+    /// per run whose style string the letters select; text one byte per
+    /// letter of U+0000 to U+00FF (its code point), other letters as
+    /// marked UTF-16 units.
     fn txsm16(
         &mut self,
         spans: &[TextSpan],
@@ -6282,24 +6583,22 @@ impl<'a> Writer<'a> {
             // The letters are one byte each from version 16 (files saved
             // for 16 hold them so, while their style strings are UTF-16;
             // UTF-16 letters in a version 16 file are read as half the
-            // text by the program that opens it), Windows-1252, except a
-            // letter Windows-1252 lacks (Cyrillic, Greek, most of Central
-            // European): bit 0 of its record's flags marks it as a UTF-16
-            // unit of two bytes, as from version 12 (#368). A letter beyond
-            // the 16-bit range goes out as "?".
+            // text by the program that opens it), the letter's code point
+            // for U+0000 to U+00FF, except a letter beyond them (Cyrillic,
+            // Greek, most of Central European, and the curly quotes,
+            // dashes and euro Windows-1252 puts in 0x80 to 0x9f, #2124):
+            // bit 0 of its record's flags marks it as a UTF-16 unit of two
+            // bytes, as from version 12 (#368). A letter beyond the 16-bit
+            // range goes out as "?".
             let mut bytes = Vec::new();
             for (c, k) in text.chars().zip(&index) {
-                let one = if v.0 >= 16 {
-                    cp1252(&c.to_string())
-                } else {
-                    None
-                };
+                let one = if v.0 >= 16 { text_byte(c) } else { None };
                 let wide = one.is_none();
                 t.u16(u16::from(wide && v.0 >= 16))
                     .u8(k.saturating_mul(2))
                     .zeros(5);
                 match one {
-                    Some(b) => bytes.extend_from_slice(&b),
+                    Some(b) => bytes.push(b),
                     None => {
                         let unit = if (c as u32) <= 0xffff {
                             c as u16

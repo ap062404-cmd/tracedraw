@@ -934,13 +934,10 @@ fn document_section(app: &mut App, ui: &mut Ui) {
             ui.spacing_mut().item_spacing = vec2(1.0, 1.0);
             for c in colors {
                 let (r, resp) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::click());
-                let resp = resp.rich_tip_with(|| {
-                    format!(
-                        "{}\n{}",
-                        crate::app::color_description(c),
-                        tr("docker.palette_chip_desc")
-                    )
-                });
+                // A spot colour by its ink's name (#2186).
+                let what = crate::app::color_description_in(app.doc(), c);
+                let resp =
+                    resp.rich_tip_with(|| format!("{what}\n{}", tr("docker.palette_chip_desc")));
                 ui.painter()
                     .rect_filled(r, 0.0, crate::canvas::to_color32(c));
                 ui.painter().rect_stroke(

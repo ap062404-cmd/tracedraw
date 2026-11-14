@@ -47,6 +47,15 @@ pub fn is_mesh_handle(index: usize) -> bool {
     index >= MESH_HANDLE_BASE
 }
 
+/// The mesh node an effect node number stands for, if it is a node's
+/// (not a handle's or a perspective node's).
+pub fn mesh_node_of(index: usize) -> Option<usize> {
+    if is_mesh_handle(index) {
+        return None;
+    }
+    index.checked_sub(MESH_NODE_BASE)
+}
+
 impl App {
     /// The selected mesh node of a selected object: (object, node).
     pub fn selected_mesh_node(&self) -> Option<(ShapeId, usize)> {
@@ -59,6 +68,113 @@ impl App {
             Fill::Mesh(m) if i < m.nodes.len() => Some((id, i)),
             _ => None,
         }
+    }
+
+    /// Every chosen mesh node of the object of the chosen one: that node
+    /// first, then those chosen with it by Shift+click or a marquee
+    /// (discussion #2387).
+    pub fn selected_mesh_nodes(&self) -> Option<(ShapeId, Vec<usize>)> {
+        let (id, i) = self.selected_mesh_node()?;
+        let count = match &self.doc().find_shape(id)?.fill {
+            Fill::Mesh(m) => m.nodes.len(),
+            _ => 0,
+        };
+        let mut out = vec![i];
+        if let Some((key, more)) = &self.mesh_more_nodes {
+            if *key == (id, MESH_NODE_BASE + i) {
+                for &k in more {
+                    if k < count && !out.contains(&k) {
+                        out.push(k);
+                    }
+                }
+            }
+        }
+        Some((id, out))
+    }
+
+    /// Choose the mesh nodes `nodes` of object `id`, the first the one
+    /// the handles show on; none chooses no node.
+    pub fn choose_mesh_nodes(&mut self, id: ShapeId, nodes: &[usize]) {
+        let Some((&first, more)) = nodes.split_first() else {
+            self.selected_effect_node = None;
+            self.mesh_more_nodes = None;
+            return;
+        };
+        let key = (id, MESH_NODE_BASE + first);
+        self.selected_effect_node = Some(key);
+        self.mesh_more_nodes = Some((key, more.to_vec()));
+    }
+
+    /// Shift+click on mesh node `i` of object `id`: it joins the chosen
+    /// nodes, or leaves them when it was chosen. A node of another
+    /// object starts a new choice.
+    pub fn toggle_mesh_node(&mut self, id: ShapeId, i: usize) {
+        let mut nodes = match self.selected_mesh_nodes() {
+            Some((sid, nodes)) if sid == id => nodes,
+            _ => Vec::new(),
+        };
+        match nodes.iter().position(|&k| k == i) {
+            Some(at) => {
+                nodes.remove(at);
+            }
+            None => nodes.push(i),
+        }
+        self.choose_mesh_nodes(id, &nodes);
+    }
+
+    /// The mesh nodes of the selected meshes inside `area` (page space):
+    /// a marquee with the Mesh Fill tool chooses them, with `add` (Shift)
+    /// they join those chosen. The first mesh with nodes inside wins.
+    pub fn choose_mesh_nodes_in(&mut self, area: tracedraw_core::geometry::Rect, add: bool) {
+        let found = self.selected_shapes().iter().find_map(|s| {
+            let Fill::Mesh(m) = &s.fill else {
+                return None;
+            };
+            let inside: Vec<usize> = m
+                .nodes
+                .iter()
+                .enumerate()
+                .filter(|(_, n)| area.contains(s.transform * n.pos))
+                .map(|(k, _)| k)
+                .collect();
+            (!inside.is_empty()).then_some((s.id, inside))
+        });
+        let Some((id, inside)) = found else {
+            if !add {
+                self.choose_mesh_nodes(ShapeId(0), &[]);
+            }
+            return;
+        };
+        let mut nodes = match self.selected_mesh_nodes() {
+            Some((sid, nodes)) if add && sid == id => nodes,
+            _ => Vec::new(),
+        };
+        for k in inside {
+            if !nodes.contains(&k) {
+                nodes.push(k);
+            }
+        }
+        self.choose_mesh_nodes(id, &nodes);
+    }
+
+    /// The colour the Mesh Fill bar's eyedropper reads at `p`: a selected
+    /// mesh's own colour there, else what the Colour Eyedropper reads
+    /// (a picture's pixel, a fill, an outline).
+    pub fn mesh_color_at(&self, p: Point) -> Option<Color> {
+        for s in self.selected_shapes() {
+            let Fill::Mesh(m) = &s.fill else {
+                continue;
+            };
+            let lp = s.transform.inverse() * p;
+            if let Some((r, c, u, v)) = m.locate(lp) {
+                let gu = (c as f64 + u) / m.cols.max(1) as f64;
+                let gv = (r as f64 + v) / m.rows.max(1) as f64;
+                if let Some(n) = m.sample(gu, gv) {
+                    return Some(n.color);
+                }
+            }
+        }
+        self.sample_color_at(p, false)
     }
 
     /// The first selected object with a mesh fill, and its mesh.
@@ -97,7 +213,35 @@ impl App {
 
     /// The Mesh Fill tool's clicks and drags.
     pub fn mesh_tool_input(&mut self, response: &Response, p: Point) {
+        // The bar's eyedropper: the click samples a colour for the chosen
+        // nodes (discussion #2387).
+        if self.mesh_eyedropper && response.clicked_by(PointerButton::Primary) {
+            self.mesh_eyedropper = false;
+            match self.mesh_color_at(p) {
+                Some(c) if self.color_mesh_node(c) => {
+                    self.status = crate::i18n::trf(
+                        "status.sampled_color",
+                        &[("c", &crate::app::color_description(c))],
+                    );
+                }
+                _ => {}
+            }
+            return;
+        }
         if self.effect_node_input(response, p) {
+            return;
+        }
+        // A drag from outside the nodes of a selected mesh: a marquee
+        // that chooses the nodes inside it, Shift adding them (the box
+        // follows the pointer and ends in `finish_node_marquee`).
+        if response.drag_started_by(PointerButton::Primary) && self.selected_mesh().is_some() {
+            let start = response
+                .ctx
+                .input(|i| i.pointer.press_origin())
+                .map(|o| self.view.to_page(o))
+                .unwrap_or(p);
+            self.node_lasso_keeps = response.ctx.input(|i| i.modifiers.shift);
+            self.drag = crate::app::Drag::NodeMarquee { start, current: p };
             return;
         }
         if response.clicked_by(PointerButton::Primary) {
@@ -171,9 +315,9 @@ impl App {
         self.edit_meshes("Smooth Mesh Colour", |_, m| m.smooth = on);
     }
 
-    /// The selected node's opacity (1 opaque).
+    /// The chosen nodes' opacity (1 opaque).
     pub fn set_mesh_node_alpha(&mut self, alpha: f32) {
-        let Some((sid, i)) = self.selected_mesh_node() else {
+        let Some((sid, nodes)) = self.selected_mesh_nodes() else {
             return;
         };
         let alpha = if alpha.is_finite() {
@@ -183,23 +327,48 @@ impl App {
         };
         self.edit_meshes("Mesh Node Transparency", |id, m| {
             if id == sid {
-                if let Some(n) = m.nodes.get_mut(i) {
-                    n.alpha = alpha;
+                for &i in &nodes {
+                    if let Some(n) = m.nodes.get_mut(i) {
+                        n.alpha = alpha;
+                    }
                 }
             }
         });
     }
 
-    /// A palette colour for the selected mesh node (with the Mesh Fill or
-    /// Shape tool). False when no node is selected.
+    /// A palette colour for the chosen mesh nodes, all of them in one
+    /// undo step (with the Mesh Fill or Shape tool). False when no node
+    /// is chosen.
     pub fn color_mesh_node(&mut self, c: Color) -> bool {
-        let Some((sid, i)) = self.selected_mesh_node() else {
+        let Some((sid, nodes)) = self.selected_mesh_nodes() else {
             return false;
         };
         self.edit_meshes("Mesh Node Colour", |id, m| {
             if id == sid {
-                if let Some(n) = m.nodes.get_mut(i) {
-                    n.color = c;
+                for &i in &nodes {
+                    if let Some(n) = m.nodes.get_mut(i) {
+                        n.color = c;
+                    }
+                }
+            }
+        });
+        true
+    }
+
+    /// Ctrl+click on a palette colour with mesh nodes chosen: a tenth of
+    /// the colour mixed into each chosen node's own colour, all of them
+    /// in one undo step, so repeated clicks move them towards it (#2616).
+    /// False when no node is chosen.
+    pub fn mix_into_mesh_nodes(&mut self, c: Color) -> bool {
+        let Some((sid, nodes)) = self.selected_mesh_nodes() else {
+            return false;
+        };
+        self.edit_meshes("Mesh Node Colour", |id, m| {
+            if id == sid {
+                for &i in &nodes {
+                    if let Some(n) = m.nodes.get_mut(i) {
+                        n.color = crate::ui::palette::mix(n.color, c, 0.1);
+                    }
                 }
             }
         });
@@ -313,5 +482,42 @@ mod tests {
         assert_eq!((mesh(&app, id).rows, mesh(&app, id).cols), (5, 3));
         app.clear_mesh();
         assert_eq!(app.doc().find_shape(id).expect("shape").fill, Fill::None);
+    }
+
+    /// Ctrl+click on a palette colour with mesh nodes chosen mixes a
+    /// tenth of it into each of them, one undo step a click; the other
+    /// nodes and the fill's kind stay (#2616).
+    #[test]
+    fn ctrl_click_on_a_colour_mixes_it_into_the_chosen_mesh_nodes() {
+        let mut app = App::headless();
+        let id = square(&mut app);
+        app.tool = crate::tools::Tool::MeshFill;
+        app.mesh_rows = 2;
+        app.mesh_cols = 2;
+        app.apply_mesh_fill(id);
+        let white = Color::cmyk_pct(0.0, 0.0, 0.0, 0.0);
+        let cyan = Color::cmyk_pct(100.0, 0.0, 0.0, 0.0);
+        // Nodes 0 and 4 white, the rest left as they were.
+        app.choose_mesh_nodes(id, &[0, 4]);
+        app.apply_fill(Fill::Solid(white));
+        let before = mesh(&app, id);
+        assert_eq!(before.nodes[0].color, white);
+        app.mix_into_fill(cyan);
+        let m = mesh(&app, id);
+        let tenth = crate::ui::palette::mix(white, cyan, 0.1);
+        assert_eq!(m.nodes[0].color, tenth);
+        assert_eq!(m.nodes[4].color, tenth);
+        assert_eq!(m.nodes[1].color, before.nodes[1].color);
+        // Again: another tenth of the way.
+        app.mix_into_fill(cyan);
+        let twice = crate::ui::palette::mix(tenth, cyan, 0.1);
+        assert_eq!(mesh(&app, id).nodes[0].color, twice);
+        // Each click is one undo step.
+        app.undo();
+        assert_eq!(mesh(&app, id).nodes[0].color, tenth);
+        // No node chosen: nothing to mix into, the mesh stays a mesh.
+        app.choose_mesh_nodes(id, &[]);
+        app.mix_into_fill(cyan);
+        assert_eq!(mesh(&app, id).nodes[0].color, tenth);
     }
 }

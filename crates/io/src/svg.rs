@@ -927,8 +927,8 @@ fn fmt(v: f64) -> String {
 pub fn svg_blend_mode(merge: tracedraw_core::live::MergeMode) -> Option<&'static str> {
     use tracedraw_core::live::MergeMode as M;
     Some(match merge {
-        M::Multiply | M::Texturize => "multiply",
-        M::Subtract | M::Difference => "difference",
+        M::Multiply | M::Texturize | M::Subtract => "multiply",
+        M::Difference => "difference",
         M::Divide | M::Screen => "screen",
         M::IfLighter => "lighten",
         M::IfDarker => "darken",

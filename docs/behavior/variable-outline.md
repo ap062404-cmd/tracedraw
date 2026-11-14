@@ -31,6 +31,12 @@ length with width nodes.
   click picks one alone. A drag that starts on a picked node changes
   every picked node the same way, and the property bar's widths set
   them all (`shift_and_ctrl_pick_nodes_and_shift_drags_one_side`).
+- A press on the open path's end cap, within the outline's reach of an
+  end, puts the node on the end itself (or takes the node already
+  there), so a widened end keeps a cap as wide as the end. A node a
+  little short of the end let the reach fall back to half the outline
+  width past it, a bulb with a small cap on a neck (#2547,
+  `a_press_on_the_end_cap_widens_the_end_itself`).
 - Each drag is one undo step.
 - Delete (or Backspace) removes the picked nodes, one step. An object with no
   outline gets a hairline one when its first node is added.
@@ -48,8 +54,17 @@ length with width nodes.
 - A node sits at `t` (0 to 1) of the path's length over all its
   subpaths. A new node takes the reach the outline already has there.
 - The ends of the path keep half the outline width on each side unless
-  a node sits on them. Between neighbouring nodes `a` and `b` the reach
-  eases with `s = u^2 (3 - 2u)`, `u = (t - t_a) / (t_b - t_a)`.
+  a node sits on them. The reach runs through the nodes (and those ends)
+  on a monotone cubic (Fritsch and Carlson): between neighbouring nodes
+  `a` and `b` a cubic Hermite curve with, at each node, the weighted
+  harmonic mean of the slopes to its neighbours when they rise or fall
+  the same way, else 0, and 0 at the ends of an open path. Through a run
+  of nodes, each wider than the last, the reach sweeps on smoothly and
+  never overshoots; at a node wider or narrower than both neighbours it
+  is flat, so with one or two nodes it eases as `s = u^2 (3 - 2u)`,
+  `u = (t - t_a) / (t_b - t_a)`. Each span eased that way on its own
+  made a run of nodes a staircase, more bumps with every node added
+  (#2547, `style::tests::a_run_of_width_nodes_widens_in_one_sweep`).
   A closed path (one closed subpath) has no ends: the last node and the
   first are neighbours across the path's start, and the reach eases
   between them the same way (the last node a turn back before the first,
@@ -73,7 +88,13 @@ length with width nodes.
   split at
   the nodes; corners get round joins on their outer side, the arc in
   steps of `2 acos(1 - 0.005 / r)` for a reach `r` (at most 256), so it
-  stays within 0.005 mm of the circle; ends are butt. The inner side of
+  stays within 0.005 mm of the circle. The ends of an open path take the
+  outline's line cap (Outline Pen, Caps): butt ends stop at the end, a
+  round cap is a half circle across the reach there (left plus right, so
+  an uneven reach gets a cap spanning both sides), a square cap a box as
+  deep as half that reach; a closed path has no ends and no caps. The
+  band used to end square whatever the cap (#2390,
+  `shaping::tests::a_variable_outline_keeps_the_line_caps`). The inner side of
   a corner is covered by the pieces either side: a round join there, as
   wide as the reach at the corner, stood out where the reach falls away
   after the corner and left a notch where it met the band (#776,
@@ -118,6 +139,14 @@ length with width nodes.
 - The outline's colour, or its gradient, pattern or texture fill, paints
   the band. Convert Outline to Object (Ctrl+Shift+Q) gives the band as an
   object: built from the path flattened to 0.005 mm and fitted to a few
-  curves, its butt ends straight lines (#627,
+  curves, its butt ends straight lines and its round caps kept (#627,
   `tools2::tests::a_variable_outline_becomes_a_band_of_few_curves`). SVG and PDF exports write the band as a filled path; `.cdr`
   files are written with the plain width.
+- A reach on the inner side of a bend that comes near the bend's radius
+  (90 % of it or more) brings the two sides of the inner edge to a point:
+  the hole of a ring turns heart-shaped. That is the shape, as in any
+  offset, but it is taken for a fault, so while a drag changes a node's
+  reach a note beside the pointer says why it happens and that dragging
+  back rounds it off (`status_hint.variable_outline_fold`;
+  `variable_outline::tests::the_tool_knows_when_the_inside_comes_to_a_point`,
+  `variable_outline::tests::a_drag_past_the_centre_of_a_circle_brings_the_note`).

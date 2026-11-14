@@ -137,9 +137,17 @@ stand for a distance in the world (`drawing_scale.rs`):
   guidelines edited (the row is highlighted): new guidelines, from the
   rulers, the Guidelines panel or presets, go there; only those are
   picked, moved, locked and deleted, the others are drawn as they are
-  and still snapped to. The padlock of a row locks or unlocks all of its
-  guidelines, its eye shows or hides all guidelines. Each change is one
-  undo step (`Command::SetMasterGuides`). In `.tdraw` files they are
+  and still snapped to. When TraceDraw starts the master guidelines
+  are the ones chosen, so guidelines
+  dragged from the rulers are on every page; a click on a page's own
+  "Guides" row makes new ones that page's only (#1775). The padlock of
+  a row locks or unlocks all of its guidelines; its eye shows or hides
+  that row's guidelines only, the others staying (hidden ones are not
+  picked or snapped to; with guidelines off, opening an eye turns them
+  on), and the drawing keeps it (`master_guides_hidden`,
+  `page_guides_hidden` in `.tdraw`; `Command::SetGuidesShown`; #1775,
+  `guides::tests::guidelines_are_shared_at_first_and_each_set_has_its_own_eye`).
+  Each change is one undo step (`Command::SetMasterGuides`). In `.tdraw` files they are
   `master_guides`; in `.cdr` files they go on the master page's guides
   layer with the guidelines every page has (on each page's own layer
   when the pages differ in size).
@@ -153,6 +161,11 @@ stand for a distance in the world (`drawing_scale.rs`):
   step "Move Guidelines"; a right click during the drag leaves copies
   where it ends and the guidelines where they were ("Copy Guidelines",
   the copies selected); dropped outside the window they all go (#376).
+- A guideline across an unselected picture takes the press: the pointer
+  shows the arrows across it and a drag moves the guideline, not the
+  picture (pictures often fill the page behind the guidelines). Other
+  unselected objects, and a selected picture, still take the press
+  (#2640, `pick_drag_tests::a_guideline_over_a_picture_is_dragged_and_the_picture_stays`).
 - Edit > Duplicate (Ctrl+D) with guidelines and no objects selected
   copies them, moved by the duplicate offset (unlocked), the copies
   selected; the Guidelines docker's Duplicate does the same, and its
@@ -185,6 +198,13 @@ stand for a distance in the world (`drawing_scale.rs`):
   where it is; a guideline turned about a pivot off it keeps its
   distance from the pivot. A click on the pivot keeps the handles
   (#1850, `guides::tests::a_guides_rotation_centre_drags_and_snaps_to_a_node`).
+- The pivot stays with its guideline: deselected and selected again,
+  alone with one click, the Transformations docker's Rotate page
+  (Relative center on) still turns it about that pivot, and a second
+  click brings the handles back with the pivot where it was, not where
+  the guideline was clicked. A guideline never given a pivot turns
+  about the docker's box. Moving the guideline by other means forgets
+  it (#2335, `guides::tests::a_guideline_keeps_its_moved_centre_once_deselected`).
 - Locked guidelines can be selected but not moved, rotated, nudged,
   deleted or edited: a click or double click on a locked guideline never
   shows its rotation handles, and locking one that shows them hides them;

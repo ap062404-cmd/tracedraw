@@ -1,7 +1,8 @@
 //! System clipboard and external bitmap editing.
 //!
-//! Copy puts the selection on the system clipboard as SVG text next to the
-//! internal clipboard, so other applications can paste it. Paste Special
+//! Copy puts the selection on the system clipboard next to the internal
+//! clipboard, so other applications can paste it: as SVG text, and on X11
+//! and Wayland desktops also as an SVG image and a PNG picture (#2288). Paste Special
 //! offers the system clipboard's content as text, as a bitmap or as vector
 //! objects (SVG). Image > Edit Bitmap hands a PNG to the system's image
 //! editor and Update from Link reads it back.
@@ -21,11 +22,17 @@ pub struct ClipboardContent {
     pub image: Option<image::RgbaImage>,
     /// Files copied in a file manager.
     pub files: Vec<std::path::PathBuf>,
+    /// Vector data another drawing program copied: SVG, PDF or EMF bytes
+    /// (#2514). Pasted as objects before the picture the same copy holds.
+    pub vector: Option<Vec<u8>>,
 }
 
 impl ClipboardContent {
     pub fn is_empty(&self) -> bool {
-        self.text.is_none() && self.image.is_none() && self.files.is_empty()
+        self.text.is_none()
+            && self.image.is_none()
+            && self.files.is_empty()
+            && self.vector.is_none()
     }
 
     /// What a [`Mark`] keeps of this content.
@@ -154,6 +161,7 @@ fn read_system_text_and_files() -> ClipboardContent {
         text: crate::android::clipboard::text(),
         image: None,
         files,
+        vector: None,
     }
 }
 
@@ -339,9 +347,38 @@ fn read_text_and_files() -> ClipboardContent {
             text,
             image: None,
             files,
+            vector: None,
         }
     })
+    .map(|mut content| {
+        content.vector = read_vector();
+        content
+    })
     .unwrap_or_default()
+}
+
+/// Vector data on the clipboard, as another drawing program copies it
+/// beside a picture of it (#2514): SVG, PDF or an enhanced metafile.
+/// The first of these offered is read, in that order.
+#[cfg(windows)]
+fn read_vector() -> Option<Vec<u8>> {
+    crate::win_clipboard::read_vector()
+}
+
+/// Vector data on the clipboard of an X11 desktop (also beside a Wayland
+/// one): SVG, PDF or EMF, the first offered (#2514).
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))]
+fn read_vector() -> Option<Vec<u8>> {
+    crate::x11_clipboard::read_vector()
+}
+
+#[cfg(not(any(
+    windows,
+    all(unix, not(any(target_os = "macos", target_os = "android")))
+)))]
+#[allow(dead_code)]
+fn read_vector() -> Option<Vec<u8>> {
+    None
 }
 
 /// The clipboard's picture, decoded. On an X11 desktop the clipboard's
@@ -382,6 +419,22 @@ fn without_line_end(path: std::path::PathBuf) -> std::path::PathBuf {
         Some(s) if s.ends_with(['\r', '\n']) => s.trim_end_matches(['\r', '\n']).into(),
         _ => path,
     }
+}
+
+/// The resolution of the picture a copy offers (#2288): 150 dpi, less
+/// for a selection so large that its longer side would pass 4000 pixels.
+#[cfg_attr(
+    not(all(unix, not(any(target_os = "macos", target_os = "android")))),
+    allow(dead_code)
+)]
+fn copy_picture_dpi(width_mm: f64, height_mm: f64) -> f64 {
+    const DPI: f64 = 150.0;
+    const MOST_PX: f64 = 4000.0;
+    let side = width_mm.max(height_mm);
+    if !side.is_finite() || side <= 0.0 {
+        return DPI;
+    }
+    DPI.min(MOST_PX * 25.4 / side).max(1.0)
 }
 
 /// Put text on the system clipboard (best effort); whether it went there.
@@ -511,8 +564,43 @@ impl App {
             return;
         };
         self.copy();
-        let written = write_text(&svg);
+        let written = self.offer_copy(&svg) || write_text(&svg);
         self.mark_system_clipboard(written.then_some(svg.as_str()));
+    }
+
+    /// Offer the copy `svg` to other programs as SVG, as a picture and as
+    /// text, where TraceDraw owns the clipboard itself (an X11 clipboard,
+    /// #2288; a Wayland one, `wayland_copy.rs`): a program that takes
+    /// pictures pastes the drawing, not its SVG source as text. On X11 the
+    /// picture is drawn only when a program asks for it; on Wayland on a
+    /// thread of its own, right after the copy. False elsewhere, where the
+    /// text goes there alone.
+    #[cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))]
+    fn offer_copy(&self, svg: &str) -> bool {
+        let Some(bounds) = self.selection_bounds() else {
+            return false;
+        };
+        let Some(alone) = self.selection_alone(bounds) else {
+            return false;
+        };
+        let dpi = copy_picture_dpi(bounds.width(), bounds.height());
+        let draw: crate::x11_copy::DrawPng = Box::new(move || {
+            crate::ops2::render_alone_png(&alone, dpi, true, true).map(|(png, _, _)| png)
+        });
+        if std::env::var_os("WAYLAND_DISPLAY").is_none() {
+            return crate::x11_copy::offer(svg.to_string(), draw);
+        }
+        // A Wayland desktop: its clipboard, else the X11 programs' one,
+        // which the desktop shares.
+        match crate::wayland_copy::offer(svg.to_string(), draw) {
+            Ok(()) => true,
+            Err(draw) => crate::x11_copy::offer_through_xwayland(svg.to_string(), draw),
+        }
+    }
+
+    #[cfg(not(all(unix, not(any(target_os = "macos", target_os = "android")))))]
+    fn offer_copy(&self, _svg: &str) -> bool {
+        false
     }
 
     /// Remember what the system clipboard holds right after a copy here
@@ -622,6 +710,54 @@ impl App {
         }
     }
 
+    /// Paste vector data another program copied (SVG, PDF or EMF, told
+    /// apart by their own signatures) as objects, one undo step, selected
+    /// (#2514). False when it holds nothing this reads, so the picture
+    /// copied with it is pasted instead.
+    pub fn paste_vector(&mut self, bytes: &[u8]) -> bool {
+        let mut ids = tracedraw_core::id::IdSource::default();
+        let shapes = if let Some(svg) = std::str::from_utf8(bytes)
+            .ok()
+            .map(|t| t.trim_start_matches('\u{feff}').trim_start())
+            .filter(|t| t.starts_with('<') && t.contains("<svg"))
+        {
+            tracedraw_io::svg_import::parse(svg, &mut ids)
+                .map(|i| i.shapes)
+                .ok()
+        } else if tracedraw_io::pdf_import::is_pdf(bytes) {
+            tracedraw_io::pdf_import::parse(bytes, &mut ids)
+                .ok()
+                .and_then(|p| p.pages.into_iter().next())
+                .map(|page| page.shapes)
+        } else if tracedraw_io::emf::is_emf(bytes) || tracedraw_io::emf::is_wmf(bytes) {
+            tracedraw_io::emf::parse(bytes, &mut ids)
+                .map(|i| i.shapes)
+                .ok()
+        } else {
+            None
+        };
+        let Some(shapes) = shapes.filter(|s| !s.is_empty()) else {
+            return false;
+        };
+        let Some(layer) = self.active_layer() else {
+            return false;
+        };
+        let mut cmds = Vec::new();
+        let mut new_ids = Vec::new();
+        for s in shapes {
+            let id = self.engine.new_shape_id();
+            let shape = crate::app::reid_pub(s, id, &mut self.engine);
+            new_ids.push(id);
+            cmds.push(Command::AddShape { layer, shape });
+        }
+        if let Err(e) = self.engine.run_batch("Paste", &cmds) {
+            self.status = e.to_string();
+            return false;
+        }
+        self.select(new_ids);
+        true
+    }
+
     /// Paste the system clipboard's image as a bitmap object.
     pub fn paste_as_bitmap(&mut self, img: image::RgbaImage) {
         if let Some(id) = self.place_image(img, Some(tr("kind.bitmap_short"))) {
@@ -719,6 +855,7 @@ impl App {
                     text,
                     image: None,
                     files: stored.clone(),
+                    vector: None,
                 },
                 || image,
             );
@@ -727,6 +864,7 @@ impl App {
                 text,
                 image,
                 files: stored.clone(),
+                vector: None,
             });
         }
         for path in &stored {
@@ -798,6 +936,16 @@ impl App {
                 return;
             }
         }
+        // Vector data a drawing program copied with a picture of it:
+        // objects, not the picture; the picture when the data cannot be
+        // read (#2514).
+        if content.files.is_empty() {
+            if let Some(bytes) = content.vector.take() {
+                if self.paste_vector(&bytes) {
+                    return;
+                }
+            }
+        }
         if content.image.is_none() && content.files.is_empty() && !content.is_svg() {
             content.image = take_image();
         }
@@ -807,16 +955,32 @@ impl App {
     /// [`App::paste_with`] on `content` (the tests' clipboard).
     #[cfg(test)]
     pub fn paste_from(&mut self, content: ClipboardContent) {
-        let ClipboardContent { text, image, files } = content;
+        let ClipboardContent {
+            text,
+            image,
+            files,
+            vector,
+        } = content;
         self.paste_with(
             None,
             || ClipboardContent {
                 text,
                 image: None,
                 files,
+                vector,
             },
             || image,
         );
+    }
+
+    /// [`App::paste_in_view`] with `content` on the system clipboard (the
+    /// tests' clipboard).
+    #[cfg(test)]
+    pub fn paste_in_view_from(&mut self, content: ClipboardContent) {
+        let before = self.selection.clone();
+        let at = self.view_center();
+        self.paste_from(content);
+        self.move_pasted_to(&before, Some(at));
     }
 
     /// What the system clipboard offers, or the copy here when it offers
@@ -1176,6 +1340,34 @@ mod eframe_paste_gate;
 mod tests {
     use super::*;
 
+    /// The picture a copy offers (#2288) is 150 dpi, and smaller for a
+    /// selection whose longer side would pass 4000 pixels; the copied
+    /// objects drawn alone fill it.
+    #[test]
+    fn the_picture_a_copy_offers_is_the_selection_drawn() {
+        assert_eq!(copy_picture_dpi(100.0, 50.0), 150.0);
+        let big = copy_picture_dpi(2000.0, 100.0);
+        assert!((2000.0 * big / 25.4 - 4000.0).abs() < 1.0, "{big}");
+        assert_eq!(copy_picture_dpi(0.0, 0.0), 150.0);
+        let mut app = App::headless();
+        let id = app
+            .new_shape(ShapeKind::Rect {
+                rect: tracedraw_core::geometry::Rect::new(10.0, 10.0, 60.8, 35.4),
+                radius: 0.0,
+                corners: None,
+            })
+            .expect("rect");
+        app.select(vec![id]);
+        let bounds = app.selection_bounds().expect("bounds");
+        let alone = app.selection_alone(bounds).expect("alone");
+        let (png, w, h) = crate::ops2::render_alone_png(&alone, 100.0, true, true).expect("png");
+        // 2 by 1 inches, and the outline's width round it.
+        assert!(w.abs_diff(200) <= 6 && h.abs_diff(100) <= 6, "{w} x {h}");
+        let img = image::load_from_memory(&png).expect("decodes").to_rgba8();
+        // A new rectangle has an outline and no fill: its edges are drawn.
+        assert!(img.pixels().any(|p| p[3] > 0), "the rectangle is drawn");
+    }
+
     fn shape_count(app: &App) -> usize {
         app.doc().all_layers().map(|l| l.shapes.len()).sum()
     }
@@ -1252,6 +1444,91 @@ mod tests {
             app.selected_shapes().first().map(|s| &s.kind),
             Some(ShapeKind::Text { .. })
         ));
+    }
+
+    /// #2514: objects copied in another vector drawing program paste as
+    /// objects with their fills and outlines, read from the vector data
+    /// the copy holds beside its picture (SVG, PDF or an enhanced
+    /// metafile); the picture only when there is no data this reads.
+    /// They pasted as one bitmap.
+    #[test]
+    fn vectors_another_program_copied_paste_as_objects() {
+        use tracedraw_core::{Color, Fill};
+        // Two red rectangles in a drawing of their own, for the PDF and
+        // the metafile another program would put on the clipboard.
+        let mut other = App::headless();
+        for x in [10.0, 60.0] {
+            let id = other
+                .new_shape(ShapeKind::Rect {
+                    rect: tracedraw_core::geometry::Rect::new(x, 10.0, x + 30.0, 40.0),
+                    radius: 0.0,
+                    corners: None,
+                })
+                .expect("rect");
+            other.run(Command::SetFill {
+                shapes: vec![id],
+                fill: Fill::Solid(Color::rgb8(255, 0, 0)),
+            });
+        }
+        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="100mm" height="50mm" viewBox="0 0 100 50"><rect x="10" y="10" width="30" height="30" fill="#ff0000"/><rect x="60" y="10" width="30" height="30" fill="#ff0000"/></svg>"##.to_vec();
+        let pdf = tracedraw_io::pdf::document_to_pdf(other.doc());
+        let emf = tracedraw_io::emf::page_to_emf(other.doc(), 0);
+        for (name, bytes) in [("svg", svg), ("pdf", pdf), ("emf", emf)] {
+            let mut app = App::headless();
+            app.paste_from(ClipboardContent {
+                vector: Some(bytes),
+                ..picture()
+            });
+            assert!(!is_bitmap(&app), "{name}: objects, not the picture");
+            // The rectangles, at whatever depth the reader put them.
+            fn walk(s: &tracedraw_core::document::Shape, out: &mut Vec<Fill>) {
+                match &s.kind {
+                    ShapeKind::Group { children } => children.iter().for_each(|c| walk(c, out)),
+                    ShapeKind::ClipFrame { contents, .. } => {
+                        contents.iter().for_each(|c| walk(c, out))
+                    }
+                    _ => out.push(s.fill.clone()),
+                }
+            }
+            let mut fills = Vec::new();
+            for s in app.doc().all_layers().flat_map(|l| &l.shapes) {
+                walk(s, &mut fills);
+            }
+            let red = fills
+                .iter()
+                .filter(
+                    |f| matches!(f, Fill::Solid(c) if c.to_rgb8()[0] > 200 && c.to_rgb8()[1] < 60),
+                )
+                .count();
+            assert!(red >= 2, "{name}: two red rectangles, got {fills:?}");
+            assert!(!app.selection.is_empty(), "{name}: selected");
+            // One undo step takes the paste back.
+            app.undo();
+            assert_eq!(shape_count(&app), 0, "{name}");
+        }
+        // Vector data this cannot read: the picture.
+        let mut app = App::headless();
+        app.paste_from(ClipboardContent {
+            vector: Some(b"not a drawing".to_vec()),
+            ..picture()
+        });
+        assert!(is_bitmap(&app));
+    }
+
+    /// Paste in View with nothing copied here pastes what another program
+    /// copied (a picture), centred on the visible area, as Edit > Paste
+    /// does; before, it pasted only a copy made here.
+    #[test]
+    fn paste_in_view_pastes_what_another_program_copied() {
+        let mut app = App::headless();
+        app.canvas_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        assert!(app.clipboard.is_none());
+        app.paste_in_view_from(picture());
+        assert_eq!(shape_count(&app), 1);
+        assert!(is_bitmap(&app), "the picture from the other program");
+        let b = app.selection_bounds().expect("pasted");
+        let c = app.view_center();
+        assert!((b.center() - c).hypot() < 1e-6, "{:?} at {c:?}", b.center());
     }
 
     fn png_file(name: &str) -> PastedFile {

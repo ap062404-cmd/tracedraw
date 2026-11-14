@@ -56,14 +56,7 @@ pub fn color_pick(
     painter.rect_stroke(
         swatch,
         0.0,
-        Stroke::new(
-            1.0,
-            if enabled {
-                Tokens::icon()
-            } else {
-                Tokens::border()
-            },
-        ),
+        Stroke::new(1.0, crate::ui::propbar::icon_color(enabled)),
         egui::StrokeKind::Inside,
     );
     let c = rect.right_center() - vec2(6.5, 0.0);
@@ -73,11 +66,7 @@ pub fn color_pick(
             c + vec2(3.0, -1.5),
             c + vec2(0.0, 2.0),
         ],
-        if enabled {
-            Tokens::icon()
-        } else {
-            Tokens::border()
-        },
+        crate::ui::propbar::icon_color(enabled),
         Stroke::NONE,
     ));
     let resp = resp.rich_tip(tip);
@@ -190,6 +179,23 @@ pub fn mesh_bar(app: &mut App, ui: &mut Ui) {
         .rich_tip(tr("toolbar.mesh_node_transparency"));
     if r.changed() {
         app.set_mesh_node_alpha(1.0 - transparency as f32 / 100.0);
+    }
+    // The mesh eyedropper: the next click takes a colour from the page
+    // (an object, a picture or the mesh itself) for every chosen node
+    // (discussion #2387).
+    if node.is_none() {
+        app.mesh_eyedropper = false;
+    }
+    if crate::ui::propbar::tool_button(
+        ui,
+        crate::tools::Tool::ColorEyedropper,
+        &crate::ui::tips::pair("toolbar.mesh_eyedropper", "toolbar.mesh_eyedropper_desc"),
+        node.is_some(),
+        app.mesh_eyedropper,
+    )
+    .clicked()
+    {
+        app.mesh_eyedropper = !app.mesh_eyedropper;
     }
     crate::ui::propbar::sep(ui);
     if ui

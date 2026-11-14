@@ -430,11 +430,13 @@ impl App {
     }
 
     /// Bitmaps > Crop to Frame (#1913): each selected clip frame holding a
-    /// picture alone loses the picture's pixels outside the frame; a
-    /// frame that is a rectangle along the picture's sides then lets the
-    /// picture go, a free picture in the frame's place (its transparency
-    /// and opacity, which the picture inside keeps, with it). Another
-    /// frame stays, holding the smaller picture. One undo step.
+    /// picture alone loses the picture's pixels outside the frame and
+    /// lets the picture go, a free picture in the frame's place (its
+    /// transparency and opacity, which the picture inside keeps, with
+    /// it). A frame that is a rectangle along the picture's sides cuts
+    /// the picture to it; a frame of another shape (a piece of a Knife
+    /// cut, an oval) makes the pixels outside its outline see-through.
+    /// A frame whose picture cannot be read stays. One undo step.
     pub fn crop_pictures_to_frames(&mut self) {
         let mut cmds = Vec::new();
         for id in self.framed_pictures() {
@@ -464,10 +466,19 @@ impl App {
             if let Some((kind, inks)) = cut {
                 inner.kind = kind;
                 inner.picture_inks = inks;
-            } else if !rectangular {
-                continue;
             }
-            if rectangular {
+            // A frame of another shape: the pixels outside its outline go
+            // see-through, and the picture goes free as well.
+            let mut free = rectangular;
+            if !rectangular {
+                if let Some((kind, inks)) = tracedraw_io::picture_crop::mask_picture(&inner, &path)
+                {
+                    inner.kind = kind;
+                    inner.picture_inks = inks;
+                    free = true;
+                }
+            }
+            if free {
                 // The picture in the frame's place, free.
                 let free = inner;
                 cmds.push(Command::SetShapeKind {
@@ -833,7 +844,8 @@ pub(crate) mod tests {
             ShapeKind::ClipFrame { .. }
         ));
 
-        // An oval frame: the pixels outside its box go, the frame stays.
+        // An oval frame: the pixels outside its box go, those outside the
+        // oval go see-through, and the picture goes free.
         let pic = striped_picture(&mut app);
         let oval = app
             .new_shape(ShapeKind::Ellipse {
@@ -846,12 +858,27 @@ pub(crate) mod tests {
         app.select(vec![frame]);
         assert_eq!(app.framed_pictures(), vec![frame]);
         app.crop_pictures_to_frames();
-        let s = app.doc().find_shape(frame).expect("frame");
-        let ShapeKind::ClipFrame { contents, .. } = &s.kind else {
-            panic!("still a frame");
-        };
-        let (_, img) = pixels_of(&contents[0]);
+        let s = app.doc().find_shape(frame).cloned().expect("free");
+        assert!(matches!(s.kind, ShapeKind::Bitmap { .. }), "{:?}", s.kind);
+        let (rect, img) = pixels_of(&s);
         assert_eq!((img.width(), img.height()), (2, 2));
+        // Each pixel is a quarter of the oval's box: its outer corner is
+        // outside the oval, so it is partly see-through, not gone.
+        for (x, y) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+            let a = img.get_pixel(x, y).0[3];
+            assert!(a > 0 && a < 255, "({x}, {y}): {a}");
+        }
+        let b = s.transform.transform_rect_bbox(rect);
+        assert!(
+            (b.x0 - 10.0).abs() < 1e-9 && (b.x1 - 30.0).abs() < 1e-9,
+            "{b:?}"
+        );
+        assert!(app.framed_pictures().is_empty());
+        app.engine.undo().expect("undo");
+        assert!(matches!(
+            app.doc().find_shape(frame).expect("frame").kind,
+            ShapeKind::ClipFrame { .. }
+        ));
     }
 
     fn rect_shape(app: &mut App, r: Rect) -> ShapeId {

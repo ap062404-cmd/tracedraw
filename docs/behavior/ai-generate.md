@@ -40,6 +40,21 @@ the OpenAI Images API at the same base with the image model entered.
   in `imageConfig`. One picture per request: asking for 3 sends 3
   requests. Pictures come back in `inlineData`; a refusal
   (`promptFeedback.blockReason`) or text without a picture is shown.
+  Parts marked `thought` (the notes and draft pictures a thinking model
+  such as `gemini-3-pro-image-preview` sends before its final picture)
+  are left out, so one picture is placed, and traced for Create vectors,
+  not each draft too; a reply with drafts only gives its last one
+  (#2042).
+- An image model that cannot be used is said plainly, with what to do
+  and then the service's own words (`ai_image::image_model_error`,
+  #2042; the usual messages of `ai-drawing.md` for everything else): a
+  429 whose message names a limit of 0 means the plan of the key gives
+  that model no quota at all, which is how Google's free keys answer for
+  the image models ("... Choose another image model, turn on billing for
+  the key, or have the vectors made as an SVG drawing instead"); a 400
+  or 404 that says the model takes no image output or does not answer
+  `generateContent` means it is not an image model ("... Choose an image
+  model in Tools > Options > AI > Service").
 - OpenAI: `POST {address}/images/generations` (JSON: model, prompt, `n`
   up to 4, size 1024 x 1024, 1536 x 1024 or 1024 x 1536; 1792 x 1024 or
   1024 x 1792 for `dall-e-3`, which also gets `response_format
@@ -48,8 +63,10 @@ the OpenAI Images API at the same base with the image model entered.
   Background). Pictures come back as `b64_json`; a reply with links only
   asks for another model.
 - Test Connection (Tools > Options > AI > Service) also lists the service's image models (`GET
-  {address}/models`, names with "image" or starting with "dall-e"); they
-  then fill the model lists.
+  {address}/models`, names with "image" or starting with "dall-e"; of
+  Gemini's, only those the service says answer `generateContent`, the
+  call pictures are asked with, so the Imagen models, which take
+  `predict`, stay out, #2039); they then fill the model lists.
 - Replies up to 64 MB are read; PNG, JPEG and WebP pictures are taken
   and stored as PNG.
 
@@ -64,6 +81,23 @@ and Set Up AI. The settings and results scroll; the footer stays at the
 bottom: Images (1 to 4), Insert into drawing (on), how many requests go
 to which service, and Generate (while waiting, a greyed "Generation in progress..." button,
 the progress when several pictures come, a spinner and Cancel), then the outcome.
+
+The panel follows its size (#2040), from a docker narrowed to about
+180 points to a wide floating one, and in a low window:
+
+- The footer is as high as its lines need (they wrap in a narrow panel;
+  a fixed 118 points cut its last line off) and stays at the bottom
+  while at least 140 points of settings fit above it; in a lower panel
+  it scrolls with the settings, so nothing reaches past the bottom.
+- The Style and Color palette tiles go as many to a row as fit (two at
+  least, three and four at most), each as wide as the row allows up to
+  84 points.
+- Lists (Model, Aspect ratio) cut a name that does not fit with an
+  ellipsis instead of growing past the panel; the full names are in the
+  open list. Rows of several controls (Make with, Images and Insert into
+  drawing, the working button with Cancel) wrap.
+- The banner shown while the service is not set up scrolls with the
+  settings.
 
 Every mode has:
 
@@ -159,6 +193,12 @@ text).
   (`ai_image::tests::remix_and_remove_background_work_on_the_selected_bitmap`);
   service and network errors are shown
   (`ai_image::tests::errors_of_the_service_are_shown_and_nothing_is_placed`).
+- Create vectors with Picture + trace through a thinking image model
+  places and traces the final picture only
+  (`ai_image::tests::the_pictures_a_model_thought_with_are_not_placed`);
+  a key with no quota for the image model and a model that makes no
+  pictures are said plainly
+  (`ai_image::tests::an_image_model_that_cannot_be_used_is_said_plainly`).
 - Aspect ratios match the reference picture; unreadable files are
   refused (`ai_image::tests::aspect_ratios_match_the_reference_picture`).
 - An example image goes with the prompt to Gemini and is edited by the
@@ -172,6 +212,12 @@ text).
   shapes and undo (`ai_image::tests::svg_vectors_come_from_the_drawing_service_as_shapes`).
 - The docker draws in every mode and state
   (`ui::ai_generate_docker::tests::the_docker_draws_in_every_mode_and_state`).
+- At widths from 180 to 560 points and heights down to 180, in every
+  mode, set up or not, in English, German and Russian, nothing reaches
+  past the panel's right edge or its bottom
+  (`ui::ai_generate_docker::tests::the_panel_fits_its_width_and_height`);
+  the connection's rows follow the room
+  (`ui::ai_docker::tests::the_connection_rows_follow_the_room`).
 
 ## AI Art Styles
 

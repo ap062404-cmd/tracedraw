@@ -18,6 +18,7 @@ TraceDraw 的每个版本都会增加功能和修复。本页介绍如何了解�
 
 ## 最近版本的亮点 {#highlights}
 
+- **立体化、阴影和一系列修复。** [[menu.effects > menu.effects.extrude]] 让在空间中旋转的立体保持在原位，文本上的斜角不再折叠；阴影保留圆环的孔，并连同立体一起从立体化对象投下；[[menu.edit > menu.edit.select_similar]] 会查看群组内部；[[menu.bitmaps > menu.bitmaps.convert_to_bitmap]] 保留图像在堆叠中的位置；[[menu.view > menu.view.navigator]] 成为带 N 键的菜单命令；.cdr 文件打开时带有表格，泰文文件名能正确显示。
 - **CNC 刀具路径、导出和选择。** [[menu.tools > menu.tools.tracecut]] 可为 CNC 雕刻机生成 G 代码，并绘制气眼、指接盒和折弯盒；[[menu.file > menu.file.export]] 先询问文件，再显示该格式的选项，[[menu.file > menu.file.export_with_options]] 则总是显示选项；[[menu.edit > menu.edit.select_similar]] 和 [[menu.edit > menu.edit.invert_selection]] 可更改选择；[[menu.object > menu.object.insert > menu.object.add_dimensions]] 为所选对象标注尺寸；新增程序化填充、OpenType 按钮和老挝语界面。
 - **对页和链接文本。** [[menu.layout > menu.layout.facing_pages]] 将页面并排显示为跨页；[[menu.text > menu.text.link_content]] 链接文本，在一个中输入会改变其他文本；多页 PDF 会询问要导入哪些页面；[[menu.edit > menu.edit.step_and_repeat]] 可以用副本填满页面。
 - **触控和手机。** 标准工具栏上的 Shift、Ctrl 和 Alt 按钮为手指保持按下；在 Android 上界面会避开摄像头挖孔和圆角；Apple Pencil 可在 iPad 的 Safari 中使用。

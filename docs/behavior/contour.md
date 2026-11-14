@@ -43,6 +43,10 @@ step count, side and end colours, and the steps the file stores go
   object's scale, stretch and rotation applied and the steps are taken
   back into the object's own coordinates, so an 80 mm inside step of a
   scaled polygon lies 80 mm from its edges (#754).
+- The object's area is read with its fill rule: text, and objects set
+  to the nonzero rule, with the nonzero rule, so the overlapping strokes
+  of a letter (as many variable fonts draw them) make no holes, which
+  the even-odd rule gave contours of their own (#2156).
 - `accelerate(t, a) = t ^ (4 ^ a)`: 0 spaces the steps evenly, positive
   values pack them toward the object, negative ones toward the last
   step.
@@ -52,7 +56,12 @@ step count, side and end colours, and the steps the file stores go
   leaves the straight side before it along that side and arrives at the
   next side along it, so it runs on from the sides it joins and stays at
   the contour's distance (#1542,
-  `shaping::tests::a_round_offset_corner_runs_on_from_its_sides`).
+  `shaping::tests::a_round_offset_corner_runs_on_from_its_sides`). The
+  curves of an offset are fitted within 0.05 mm of it and within a
+  tenth of the offset, whichever is less, so the round corners of a
+  contour a few hundredths of a millimetre wide are still arcs and not
+  straight cuts (#2176,
+  `shaping::tests::the_round_corners_of_a_narrow_offset_stay_round`).
 - Colours: step `i` of the `n` drawn takes `accelerate(i / n, colours)`
   of the way from the object's fill (and outline) colour to the last
   step's colours, mixed directly or through the hues clockwise or
@@ -114,6 +123,13 @@ plain segments and two small rectangles):
 - `live::tests::contour_outside_three_steps`
 - `live::tests::contour_offset_is_measured_on_the_page`
 - `shaping::tests::offset_corners_are_mitred_round_or_bevelled`
+- `shaping::tests::offset_reads_overlapping_strokes_with_the_fill_rule_given`
+- `live::tests::effects_read_text_with_the_nonzero_rule`
+- `effect_outline_tests::inside_contour_of_letters_keeps_its_distance` and
+  `outside_contour_of_letters_keeps_its_distance` (text crate): on the
+  letters of a static and of a variable face, every point of a round
+  contour lies at the offset from the letters' outline, of a mitred one
+  no nearer.
 - `contour_tool::tests::a_drag_draws_a_live_contour`
 - `contour_tool::tests::the_bar_edits_the_selected_contour`
 - `contour_tool::tests::handles_drag_the_offset_and_the_steps`: a 20 mm

@@ -63,11 +63,24 @@ What a drag that sets the line acts on (#1661,
 - With nothing selected: the object under the press is picked and gets
   it; a drag over no object does nothing.
 
-Ctrl (Cmd on macOS) keeps the line in steps of the constrain angle
-(set in Options, 15 degrees at first) about where the drag
+Ctrl (Cmd on macOS) or Shift keeps the line in steps of the constrain
+angle (set in Options, 15 degrees at first) about where the drag
 began, as for lines and the other angle drags; Interactive Fill's drag
 does the same
 (`pick_drag_tests::ctrl_keeps_an_interactive_fill_drag_to_the_constrain_angle`).
+Dragging the end node of a mask already there with Ctrl or Shift turns
+the line the same way about its start (a linear mask's start node about
+its end), without snapping (#2373).
+
+Choosing Radial, Conical or Square for a mask that still has its plain
+two stops (opaque at one end, clear at the other) makes it clear at the
+centre and opaque at the edge: the centre node black, the end node
+white. Linear (or Shaped) gives it back opaque at the start; a mask
+whose stops were changed keeps them (#2377, `mixed::set_mask_kind`).
+Dragging the end node of a radial, conical or square mask sizes it
+keeping the ratio its skew node sets, so a circle stays a circle; the
+skew node alone makes it an ellipse (#2373, `fill_tool::tests::
+a_radial_transparency_is_clear_at_the_centre_and_its_end_node_constrains`).
 
 Clear Transparency, a button at the end of the Transparency tool's bar
 and of the Properties docker's transparency part (greyed while no
@@ -200,7 +213,7 @@ The `.tdraw` name of a mode is its name in lower case without spaces
 |---|---|---|---|
 | Normal | `s` | | |
 | Add | `b + s`, clipped | | |
-| Subtract | `abs(b - s)` (drawn as Difference) | difference | Difference |
+| Subtract | `b + s - 1`, clipped at 0: white leaves the backdrop as it is, darker colours darken it (#2512; it was drawn as Difference) | multiply (nearest) | Multiply (nearest) |
 | Difference | `abs(b - s)` | difference | Difference |
 | Multiply | `b * s` | multiply | Multiply |
 | Divide | drawn as Screen | screen | Screen |
@@ -223,10 +236,19 @@ The `.tdraw` name of a mode is its name in lower case without spaces
 | Color Burn | `b = 1`: 1; `s = 0`: 0; else `1 - min(1, (1 - b) / s)` | color-burn | ColorBurn |
 | Exclusion | `b + s - 2 b s` | exclusion | Exclusion |
 
-The SVG and PDF exports draw a non-uniform transparency at the mask's
-mean opacity (they have no masks of their own here) and set the blend of
-the table on a group (SVG, `style="mix-blend-mode:..."`) or a graphics
-state (PDF, `/ExtGState /BM`) around the object; modes without a blend
+The SVG export draws a non-uniform transparency at the mask's mean
+opacity (it has no masks of its own here). The PDF export draws it as a
+luminosity soft mask (`/SMask` with `/S /Luminosity`) whose transparency
+group paints the mask's own fill over the object's box, so a fountain
+transparency fades from solid to clear as on the screen (#2615,
+`pdf::tests::a_fountain_transparency_goes_in_as_a_soft_mask`). A faded
+object with a drop shadow, or with a fill and an outline that overlap,
+goes into the PDF as one transparency group drawn faded, as the screen
+fades it in a layer of its own: the shadow stays hidden under the object
+(d#2596, `pdf::tests::a_see_through_object_and_its_shadow_fade_as_one_group`).
+Both set the blend of the table on a group (SVG,
+`style="mix-blend-mode:..."`) or a graphics state (PDF, `/ExtGState /BM`)
+around the object; modes without a blend
 draw normally, and PDF/X-1a flattens the object into a picture instead
 (`svg::tests::merge_modes_go_out_as_mix_blend_mode`,
 `pdf::tests::transparency_merge_modes_go_out_as_blend_modes`). Drop

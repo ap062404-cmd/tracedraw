@@ -8,7 +8,11 @@
 //! `RR`, `PM`, `EP`, `FP`, `PW`, `LT`, `PC`, `IP`, `SC` (uniform scaling
 //! only). Everything else is skipped. The writer emits `PA` moves with
 //! `PU`/`PD`, one pen per distinct outline colour (up to 8, more share
-//! pen 8), `PW` widths and `PC` colours (HPGL/2).
+//! pen 8), `PW` widths and `PC` colours (HPGL/2). The export's choices
+//! ([`PltOptions`], #2652) scale the drawing, put the plotter's origin
+//! at the page's corner or middle, set the plotter units per inch, leave
+//! out the HPGL/2 pen colours and widths for plain HP-GL, draw every
+//! outline with one pen and set how closely curves are followed.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -530,12 +534,19 @@ struct Writer<'a> {
     symbols: &'a [tracedraw_core::Symbol],
     /// Pen per outline colour, in order of first use.
     pens: Vec<(Color, f64)>,
-    /// Strokes per pen: polylines in plotter units.
+    /// Strokes per pen: polylines in page millimetres.
     strokes: Vec<Vec<Vec<Point>>>,
+    /// How far the polylines may stray from the curves, mm.
+    tolerance: f64,
+    /// Every outline with pen 1.
+    one_pen: bool,
 }
 
 impl Writer<'_> {
     fn pen_for(&mut self, color: Color, width: f64) -> usize {
+        if self.one_pen && !self.pens.is_empty() {
+            return 0;
+        }
         if let Some(i) = self
             .pens
             .iter()
@@ -548,11 +559,11 @@ impl Writer<'_> {
         self.pens.len() - 1
     }
 
-    fn polylines(path: &BezPath) -> Vec<Vec<Point>> {
+    fn polylines(path: &BezPath, tolerance: f64) -> Vec<Vec<Point>> {
         let mut out: Vec<Vec<Point>> = Vec::new();
         let mut cur: Vec<Point> = Vec::new();
         let mut start = Point::ZERO;
-        tracedraw_core::geometry::flatten(path, 0.02, &mut |el| match el {
+        tracedraw_core::geometry::flatten(path, tolerance, &mut |el| match el {
             PathEl::MoveTo(p) => {
                 if cur.len() >= 2 {
                     out.push(std::mem::take(&mut cur));
@@ -638,24 +649,96 @@ impl Writer<'_> {
             (None, _) => (Color::BLACK, 0.25),
         };
         let pen = self.pen_for(color, width);
-        let polys = Self::polylines(&path);
-        for pts in polys {
-            let plu: Vec<Point> = pts
-                .iter()
-                .map(|p| Point::new(p.x * PLU_PER_MM, p.y * PLU_PER_MM))
-                .collect();
-            self.strokes[pen].push(plu);
+        for pts in Self::polylines(&path, self.tolerance) {
+            self.strokes[pen].push(pts);
+        }
+    }
+}
+
+/// Where the plotter's origin, (0, 0), is on the page written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PltOrigin {
+    /// The page's bottom left corner, all coordinates positive (the
+    /// file as TraceDraw always wrote it).
+    #[default]
+    BottomLeft,
+    /// The middle of the page, as plotters that centre the drawing on
+    /// the sheet want it.
+    PageCentre,
+}
+
+/// The choices of the PLT export (#2652: the Export dialog had none for
+/// PLT, where CorelDRAW's HPGL export has a scale, the plotter's origin
+/// and units, and pen settings).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PltOptions {
+    /// The drawing's size in the file against the page's (1 = 100 %).
+    pub scale: f64,
+    pub origin: PltOrigin,
+    /// Plotter units per inch: 1016 is HPGL's own, 0.025 mm; some
+    /// cutters count 1000.
+    pub units_per_inch: f64,
+    /// HPGL/2: each pen's colour and width written (`PC`, `PW`). Off,
+    /// plain HP-GL as older plotters and most vinyl cutters read it.
+    pub hpgl2: bool,
+    /// Every outline drawn with pen 1 (a cutter with one knife), not one
+    /// pen per outline colour and width.
+    pub one_pen: bool,
+    /// How far, mm, the straight strokes a curve is drawn with may stray
+    /// from it: smaller is smoother and a larger file.
+    pub curve_resolution: f64,
+}
+
+impl Default for PltOptions {
+    fn default() -> Self {
+        PltOptions {
+            scale: 1.0,
+            origin: PltOrigin::BottomLeft,
+            units_per_inch: PLU_PER_MM * 25.4,
+            hpgl2: true,
+            one_pen: false,
+            curve_resolution: 0.02,
+        }
+    }
+}
+
+impl PltOptions {
+    /// The options with every value in its range: scale 1 % to
+    /// 10 000 %, 100 to 100 000 units per inch, curve resolution 0.001
+    /// to 5 mm.
+    pub fn sane(self) -> PltOptions {
+        let d = PltOptions::default();
+        let fit = |v: f64, lo: f64, hi: f64, or: f64| {
+            if v.is_finite() {
+                v.clamp(lo, hi)
+            } else {
+                or
+            }
+        };
+        PltOptions {
+            scale: fit(self.scale, 0.01, 100.0, d.scale),
+            units_per_inch: fit(self.units_per_inch, 100.0, 100_000.0, d.units_per_inch),
+            curve_resolution: fit(self.curve_resolution, 0.001, 5.0, d.curve_resolution),
+            ..self
         }
     }
 }
 
 /// Write one page as HPGL/2 text.
 pub fn page_to_plt(doc: &Document, page_index: usize) -> String {
+    page_to_plt_with(doc, page_index, &PltOptions::default())
+}
+
+/// Write one page as HPGL text with the export's choices.
+pub fn page_to_plt_with(doc: &Document, page_index: usize, opts: &PltOptions) -> String {
+    let opts = opts.sane();
     let mut w = Writer {
         out: String::new(),
         symbols: &doc.symbols,
         pens: Vec::new(),
         strokes: Vec::new(),
+        tolerance: opts.curve_resolution,
+        one_pen: opts.one_pen,
     };
     let Some(page) = doc.pages.get(page_index) else {
         return String::new();
@@ -666,18 +749,35 @@ pub fn page_to_plt(doc: &Document, page_index: usize) -> String {
             w.shape(s, Affine::IDENTITY);
         }
     }
+    // Page millimetres to plotter units: scaled about the origin chosen.
+    let per_mm = opts.units_per_inch / 25.4 * opts.scale;
+    let (ox, oy) = match opts.origin {
+        PltOrigin::BottomLeft => (0.0, 0.0),
+        PltOrigin::PageCentre => (page.size.width / 2.0, page.size.height / 2.0),
+    };
+    let unit = |x: f64, y: f64| ((x - ox) * per_mm, (y - oy) * per_mm);
     let _ = write!(w.out, "IN;");
+    let (x0, y0) = unit(0.0, 0.0);
+    let (x1, y1) = unit(page.size.width, page.size.height);
     let _ = write!(
         w.out,
-        "IP0,0,{},{};",
-        (page.size.width * PLU_PER_MM).round() as i64,
-        (page.size.height * PLU_PER_MM).round() as i64
+        "IP{},{},{},{};",
+        x0.round() as i64,
+        y0.round() as i64,
+        x1.round() as i64,
+        y1.round() as i64
     );
     let fmt = |v: f64| -> String { format!("{}", v.round() as i64) };
-    for (i, (color, width)) in w.pens.iter().enumerate() {
-        let pen = (i + 1).min(8);
-        let [r, g, b] = color.to_rgb8();
-        let _ = write!(w.out, "PC{pen},{r},{g},{b};PW{:.3},{pen};", width);
+    if opts.hpgl2 {
+        for (i, (color, width)) in w.pens.iter().enumerate() {
+            let pen = (i + 1).min(8);
+            let [r, g, b] = color.to_rgb8();
+            let _ = write!(
+                w.out,
+                "PC{pen},{r},{g},{b};PW{:.3},{pen};",
+                width * opts.scale
+            );
+        }
     }
     let _ = writeln!(w.out);
     for (i, strokes) in w.strokes.iter().enumerate() {
@@ -685,11 +785,15 @@ pub fn page_to_plt(doc: &Document, page_index: usize) -> String {
         let _ = write!(w.out, "SP{pen};");
         for pts in strokes {
             let Some(first) = pts.first() else { continue };
-            let _ = write!(w.out, "PU{},{};PD", fmt(first.x), fmt(first.y));
+            let (fx, fy) = unit(first.x, first.y);
+            let _ = write!(w.out, "PU{},{};PD", fmt(fx), fmt(fy));
             let rest: Vec<String> = pts
                 .iter()
                 .skip(1)
-                .map(|p| format!("{},{}", fmt(p.x), fmt(p.y)))
+                .map(|p| {
+                    let (x, y) = unit(p.x, p.y);
+                    format!("{},{}", fmt(x), fmt(y))
+                })
                 .collect();
             let _ = writeln!(w.out, "{};", rest.join(","));
         }
@@ -760,6 +864,69 @@ mod tests {
         let _ = parse(&junk, &mut ids);
         // A file that is all one giant polyline stops at the point limit.
         let _ = parse(b"IN;SP1;PD;" as &[u8], &mut ids);
+    }
+
+    /// The PLT export's choices (#2652): half size about the page's
+    /// middle in 1000 units per inch, plain HP-GL with one pen.
+    #[test]
+    fn export_options_scale_centre_units_and_pens() {
+        let mut doc = Document::new("t", Size::new(100.0, 100.0));
+        let mut ids = doc.ids().clone();
+        for (x, c) in [
+            (10.0, Color::rgb8(0, 0, 255)),
+            (60.0, Color::rgb8(255, 0, 0)),
+        ] {
+            let mut r = Shape::new(
+                ids.shape(),
+                ShapeKind::Rect {
+                    rect: Rect::new(x, 20.0, x + 30.0, 70.0),
+                    radius: 0.0,
+                    corners: None,
+                },
+            );
+            r.fill = Fill::None;
+            r.stroke = Some(Stroke::new(c, 0.5));
+            doc.pages[0].layers[0].shapes.push(r);
+        }
+        doc.set_ids(ids);
+        let opts = PltOptions {
+            scale: 0.5,
+            origin: PltOrigin::PageCentre,
+            units_per_inch: 1000.0,
+            hpgl2: false,
+            one_pen: true,
+            curve_resolution: 0.1,
+        };
+        let text = page_to_plt_with(&doc, 0, &opts);
+        // The page, 100 mm at half size in 1000/25.4 units a mm, about
+        // its middle: 50 mm each way is 984 units.
+        assert!(text.starts_with("IN;IP-984,-984,984,984;"), "{text}");
+        assert!(!text.contains("PC") && !text.contains("PW"), "plain HP-GL");
+        assert!(!text.contains("SP2"), "one pen");
+        // The first corner, (10, 20) mm: (-40, -30) mm from the middle,
+        // half of it in units.
+        let u = |mm: f64| (mm * 0.5 * 1000.0 / 25.4).round() as i64;
+        assert!(
+            text.contains(&format!("SP1;PU{},{};PD", u(-40.0), u(-30.0))),
+            "{text}"
+        );
+        // The default is the file as before.
+        assert_eq!(
+            page_to_plt(&doc, 0),
+            page_to_plt_with(&doc, 0, &PltOptions::default())
+        );
+        assert!(page_to_plt(&doc, 0).starts_with("IN;IP0,0,4000,4000;PC1,0,0,255;"));
+        // Values out of range are brought into it.
+        let wild = PltOptions {
+            scale: f64::NAN,
+            units_per_inch: 1.0,
+            curve_resolution: -1.0,
+            ..PltOptions::default()
+        }
+        .sane();
+        assert_eq!(wild.scale, 1.0);
+        assert_eq!(wild.units_per_inch, 100.0);
+        assert_eq!(wild.curve_resolution, 0.001);
     }
 
     #[test]

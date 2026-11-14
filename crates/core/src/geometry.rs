@@ -362,12 +362,6 @@ pub fn transformed_bounds(path: &BezPath, transform: Affine) -> Rect {
     (transform * path.clone()).bounding_box()
 }
 
-/// A cubic B-spline over the control points `points` as Bezier
-/// segments (quadratic with three points, a line with two). Open: the
-/// clamped uniform spline, which starts at the first point and ends at
-/// the last, its ends tangent to the control polygon. Closed: the
-/// periodic spline, smooth all round. Each knot span becomes one segment,
-/// its control points the blossoms of the span's ends.
 /// [`bspline_path`] with the control points `fixed` says (one flag a
 /// point, missing ones floating) made fixed: the curve passes through a
 /// fixed point, with a corner there between the lines of the control
@@ -391,6 +385,16 @@ pub fn bspline_path_fixed(points: &[Point], fixed: &[bool], closed: bool) -> Bez
     bspline_path(&all, closed)
 }
 
+/// A cubic B-spline over the control points `points` as Bezier
+/// segments. Open: the uniform spline with each end point taken three
+/// times, so it starts at the first point and ends at the last, its ends
+/// tangent to the control polygon, and is made the same way all along:
+/// a new end point placed where the last one is leaves the curve as it
+/// was, so the curve drawn so far does not jump when one more point is
+/// added (#2184). Two points make a line. Closed: the periodic spline,
+/// smooth all round (quadratic with three points). Each knot span
+/// becomes one segment, its control points the blossoms of the span's
+/// ends.
 pub fn bspline_path(points: &[Point], closed: bool) -> BezPath {
     let mut path = BezPath::new();
     let n = points.len();
@@ -400,6 +404,9 @@ pub fn bspline_path(points: &[Point], closed: bool) -> BezPath {
     if n == 1 {
         path.move_to(points[0]);
         return path;
+    }
+    if !closed && n > 2 {
+        return open_bspline_path(points);
     }
     let deg = if closed { 3.min(n) } else { 3.min(n - 1) };
     if deg <= 1 {
@@ -474,6 +481,28 @@ pub fn bspline_path(points: &[Point], closed: bool) -> BezPath {
     }
     if closed {
         path.close_path();
+    }
+    path
+}
+
+/// The open uniform cubic B-spline over `points` (three or more) with
+/// both end points taken three times: one Bezier segment for each four
+/// control points in a row, segments of no length left out.
+fn open_bspline_path(points: &[Point]) -> BezPath {
+    let n = points.len();
+    let get = |i: usize| points[i.saturating_sub(2).min(n - 1)];
+    let mut path = BezPath::new();
+    path.move_to(points[0]);
+    for i in 0..n + 1 {
+        let (a, b, c, d) = (get(i), get(i + 1), get(i + 2), get(i + 3));
+        let p1 = b.lerp(c, 1.0 / 3.0);
+        let p2 = b.lerp(c, 2.0 / 3.0);
+        let p3 = ((b.to_vec2() + c.to_vec2() * 4.0 + d.to_vec2()) / 6.0).to_point();
+        let p0 = ((a.to_vec2() + b.to_vec2() * 4.0 + c.to_vec2()) / 6.0).to_point();
+        if p0 == p3 && p1 == p0 && p2 == p0 {
+            continue;
+        }
+        path.curve_to(p1, p2, p3);
     }
     path
 }
@@ -575,40 +604,77 @@ mod tests {
         ];
         let p = bspline_path(&pts, false);
         let segs: Vec<_> = p.segments().collect();
-        assert_eq!(segs.len(), 2, "one cubic a knot span");
+        assert_eq!(segs.len(), 6, "one cubic a span, ends taken three times");
         assert!((segs[0].start() - pts[0]).hypot() < 1e-9);
-        assert!((segs[1].end() - pts[4]).hypot() < 1e-9);
+        assert!((segs[5].end() - pts[4]).hypot() < 1e-9);
         // Smooth where the segments meet, and inside the control points' box.
         let b = p.bounding_box();
         assert!(b.x0 >= -1e-9 && b.x1 <= 60.0 + 1e-9 && b.y0 >= -1e-9 && b.y1 <= 20.0 + 1e-9);
-        if let (PathSeg::Cubic(c0), PathSeg::Cubic(c1)) = (segs[0], segs[1]) {
-            let t0 = c0.p3 - c0.p2;
-            let t1 = c1.p1 - c1.p0;
-            assert!(
-                (t0.x * t1.y - t0.y * t1.x).abs() < 1e-6,
-                "tangent continuity"
-            );
-        } else {
-            panic!("cubic segments");
+        for w in segs.windows(2) {
+            if let (PathSeg::Cubic(c0), PathSeg::Cubic(c1)) = (w[0], w[1]) {
+                let t0 = c0.p3 - c0.p2;
+                let t1 = c1.p1 - c1.p0;
+                assert!(
+                    (t0.x * t1.y - t0.y * t1.x).abs() < 1e-6,
+                    "tangent continuity"
+                );
+            } else {
+                panic!("cubic segments");
+            }
         }
-        // Four points: one cubic with those control points.
-        let p = bspline_path(&pts[..4], false);
-        let segs: Vec<_> = p.segments().collect();
-        assert_eq!(segs.len(), 1);
-        if let PathSeg::Cubic(c) = segs[0] {
-            assert!((c.p1 - pts[1]).hypot() < 1e-9 && (c.p2 - pts[2]).hypot() < 1e-9);
+        // Tangent to the control polygon at the ends.
+        if let (PathSeg::Cubic(c0), PathSeg::Cubic(c5)) = (segs[0], segs[5]) {
+            let (t, e) = (c0.p3 - c0.p0, pts[1] - pts[0]);
+            assert!((t.x * e.y - t.y * e.x).abs() < 1e-6);
+            let (t, e) = (c5.p3 - c5.p0, pts[4] - pts[3]);
+            assert!((t.x * e.y - t.y * e.x).abs() < 1e-6);
         }
         // Closed: one segment a point, ending where it began.
         let p = bspline_path(&pts, true);
         let segs: Vec<_> = p.segments().collect();
         assert_eq!(segs.len(), 5);
         assert!((segs[4].end() - segs[0].start()).hypot() < 1e-9);
-        // Two points: a line; three: a quadratic.
+        // Two points: a line; three: cubics from end to end.
         assert_eq!(bspline_path(&pts[..2], false).segments().count(), 1);
-        assert!(matches!(
-            bspline_path(&pts[..3], false).segments().next(),
-            Some(PathSeg::Quad(_))
-        ));
+        let three = bspline_path(&pts[..3], false);
+        assert!(three.segments().all(|s| matches!(s, PathSeg::Cubic(_))));
+        assert!((three.segments().last().expect("seg").end() - pts[2]).hypot() < 1e-9);
+    }
+
+    /// The curve drawn so far stays as it is when one more point is
+    /// added where the last one is, as when the pointer leaves a point
+    /// just placed with the B-spline tool, and a new point moved off
+    /// changes only the last stretches, by little for a little move
+    /// (#2184).
+    #[test]
+    fn a_new_bspline_end_point_does_not_move_the_curve_before_it() {
+        let pts = [
+            Point::new(0.0, 0.0),
+            Point::new(10.0, 0.0),
+            Point::new(20.0, 10.0),
+            Point::new(30.0, 0.0),
+            Point::new(40.0, 10.0),
+        ];
+        // (Two points make a line, which three in a row follow.)
+        for k in 3..=pts.len() {
+            let before = bspline_path(&pts[..k], false);
+            let mut more = pts[..k].to_vec();
+            more.push(pts[k - 1]);
+            assert_eq!(bspline_path(&more, false), before, "{k} points");
+        }
+        // The pointer a little way off: every segment but the last three
+        // is the same, and those move by no more than the pointer did.
+        let before: Vec<PathSeg> = bspline_path(&pts, false).segments().collect();
+        let mut more = pts.to_vec();
+        more.push(pts[4] + Vec2::new(0.5, 0.0));
+        let after: Vec<PathSeg> = bspline_path(&more, false).segments().collect();
+        let same = before.len() - 2;
+        assert_eq!(after[..same], before[..same]);
+        for k in 0..=20 {
+            let t = k as f64 / 20.0;
+            let d = (after[same].eval(t) - before[same].eval(t)).hypot();
+            assert!(d <= 0.5, "{d}");
+        }
     }
 
     #[test]

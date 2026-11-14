@@ -301,8 +301,16 @@ impl<'a> Parser<'a> {
                     return self.err("Expected Sub or Function");
                 }
                 let name = self.ident()?;
-                m.declares.push((name, public));
-                self.skip_line();
+                let mut alias = None;
+                while !matches!(self.peek(), Tok::Newline | Tok::Eof) {
+                    if self.eat_kw("alias") {
+                        if let Tok::Str(s) = self.peek() {
+                            alias = Some(s.clone());
+                        }
+                    }
+                    self.bump();
+                }
+                m.declares.push((name, public, alias));
                 continue;
             }
             if self.kw("event") {

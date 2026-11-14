@@ -29,7 +29,10 @@ bounded by its four grid lines.
   (`Mesh::handle_point`, `Mesh::move_handle`, discussion #2073).
 - With a node selected, a click on a colour in the colour palette
   colours that node (the fill stays a mesh); with the Pick tool the same
-  click fills the whole object as usual.
+  click fills the whole object as usual. Ctrl+click on a colour mixes
+  a tenth of it into each chosen node's own colour, one undo step a
+  click, so repeated clicks move the nodes towards it (discussion #2616,
+  `mesh_tool::tests::ctrl_click_on_a_colour_mixes_it_into_the_chosen_mesh_nodes`).
 - Double-click inside the mesh puts a node where it was: a new column
   and a new row through that point, their nodes placed and coloured as
   the cell's patch is there (the point's place `u`, `v` in the cell

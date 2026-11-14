@@ -1253,13 +1253,46 @@ pub fn decode_picture(bytes: &[u8]) -> image::ImageResult<image::DynamicImage> {
     decode_picture_within(bytes, picture_decode_limit())
 }
 
-/// Decode a picture file taking at most `limit` bytes.
+/// Decode a picture file taking at most `limit` bytes, turned the way
+/// its Exif orientation says (a photo taken with the camera on its side
+/// stands upright, #2167).
 pub fn decode_picture_within(bytes: &[u8], limit: u64) -> image::ImageResult<image::DynamicImage> {
+    use image::ImageDecoder;
     let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()?;
     let mut limits = image::Limits::default();
     limits.max_alloc = Some(limit);
-    reader.limits(limits);
-    reader.decode()
+    reader.limits(limits.clone());
+    let mut decoder = reader.into_decoder()?;
+    limits.reserve(decoder.total_bytes())?;
+    // A file whose orientation cannot be read stands as stored.
+    let orientation = decoder
+        .orientation()
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
+    let mut img = image::DynamicImage::from_decoder(decoder)?;
+    img.apply_orientation(orientation);
+    Ok(img)
+}
+
+/// Whether the Exif orientation of picture file `bytes` turns it a
+/// quarter turn, so that its width and height (and its resolution
+/// across and down) change places.
+pub fn picture_turns_sideways(bytes: &[u8]) -> bool {
+    use image::metadata::Orientation;
+    use image::ImageDecoder;
+    let Ok(reader) = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()
+    else {
+        return false;
+    };
+    let Ok(mut decoder) = reader.into_decoder() else {
+        return false;
+    };
+    matches!(
+        decoder.orientation(),
+        Ok(Orientation::Rotate90
+            | Orientation::Rotate270
+            | Orientation::Rotate90FlipH
+            | Orientation::Rotate270FlipH)
+    )
 }
 
 /// Keep bytes under a synthetic path so [`read`] finds them (browser).

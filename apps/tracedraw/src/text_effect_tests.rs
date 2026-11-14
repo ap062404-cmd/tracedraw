@@ -796,6 +796,51 @@ fn the_blend_tool_picks_a_text_blend_and_its_sliders_tune_it() {
 }
 
 /// The squares at the ends of a text blend's line, with the Blend tool
+/// A colour dropped on a square of the blend in hand becomes the fill
+/// of that end's object, the start or the end, in one undo step, and
+/// the selection stays; off the squares the drop goes on as before
+/// (#965, the reporter's third request).
+#[test]
+fn a_colour_dropped_on_a_blend_s_square_fills_that_end() {
+    use tracedraw_core::{Color, Fill};
+    let ctx = crate::theme::ui_context();
+    let mut app = App::headless();
+    app.show_welcome = false;
+    let a = text(&mut app, Point::new(30.0, 150.0), "A");
+    let b = text(&mut app, Point::new(150.0, 150.0), "A");
+    app.selection = vec![a, b];
+    app.blend_selection(20, 0.0, 0.0, 0.0);
+    app.set_tool(crate::tools::Tool::Blend);
+    app.select(Vec::new());
+    for _ in 0..3 {
+        frame(&ctx, &mut app, Vec::new());
+    }
+    app.zoom_to_page();
+    for _ in 0..2 {
+        frame(&ctx, &mut app, Vec::new());
+    }
+    let on_a = app.view.to_screen(center(&app, a));
+    click(&ctx, &mut app, on_a);
+    let ctl = app.blend_controls().expect("the blend's controls");
+    assert_eq!(app.blend_end_object_at(ctl.start), Some(a));
+    assert_eq!(app.blend_end_object_at(ctl.end), Some(b));
+    let fill = |app: &App, id| app.doc().find_shape(id).expect("shape").fill.clone();
+    let (red, green) = (Color::rgb8(220, 20, 20), Color::rgb8(20, 180, 20));
+    let selection = app.selection.clone();
+    let steps = app.engine.history_labels().0.len();
+    assert!(app.drop_color(Some(red), app.view.to_screen(ctl.end)));
+    assert_eq!(fill(&app, b), Fill::Solid(red));
+    assert_ne!(fill(&app, a), Fill::Solid(red));
+    assert_eq!(app.engine.history_labels().0.len(), steps + 1);
+    assert!(app.drop_color(Some(green), app.view.to_screen(ctl.start)));
+    assert_eq!(fill(&app, a), Fill::Solid(green));
+    assert_eq!(fill(&app, b), Fill::Solid(red));
+    assert_eq!(app.selection, selection);
+    // With another tool the squares are not there to take a colour.
+    app.set_tool(crate::tools::Tool::Pick);
+    assert_eq!(app.blend_end_object_at(ctl.end), None);
+}
+
 /// in the window (#965, the reporter's second request): dragging the end
 /// square to empty space moves the end text, so the blend changes its
 /// direction, in one undo step; dropped on another text it makes that
@@ -883,12 +928,19 @@ fn the_blend_tool_s_end_squares_move_and_pick_the_end_objects() {
 }
 
 /// Copy Envelope Properties from a shape with no envelope fits the text
-/// into that shape (#993): text taking a circle's outline fills the
-/// ellipse inside its own box and leaves the box's corners empty.
+/// into that shape (#993): text taking a circle's outline takes the
+/// circle's shape and size where the text is, as in CorelDRAW (#2178),
+/// and leaves the corners of its box empty.
 #[test]
 fn text_takes_the_shape_of_an_object_as_its_envelope() {
     let mut app = App::headless();
     let id = text(&mut app, Point::new(20.0, 100.0), "HHHHHH");
+    let was = {
+        let s = app.doc().find_shape(id).expect("text").clone();
+        (s.transform * tracedraw_core::live::evaluate(&s).main.local_path())
+            .bounding_box()
+            .center()
+    };
     let circle = app
         .new_shape(ShapeKind::Ellipse {
             rect: Rect::new(150.0, 50.0, 190.0, 90.0),
@@ -896,21 +948,16 @@ fn text_takes_the_shape_of_an_object_as_its_envelope() {
         })
         .expect("circle");
     app.select(vec![id]);
-    let before = tracedraw_core::live::evaluate(app.doc().find_shape(id).expect("text"))
-        .main
-        .bounds();
     app.start_copy_envelope();
     app.copy_envelope_from(circle);
     assert!(app.envelope_of(id).is_some(), "{}", app.status);
     let s = app.doc().find_shape(id).expect("text").clone();
     let drawn = s.transform * tracedraw_core::live::evaluate(&s).main.local_path();
     let b = drawn.bounding_box();
-    // The text keeps its place and size.
-    assert!(
-        (b.center() - before.center()).hypot() < 0.5,
-        "{b:?} {before:?}"
-    );
-    assert!((b.width() - before.width()).abs() < 0.5, "{b:?} {before:?}");
+    // The text keeps its place and takes the circle's size.
+    assert!((b.center() - was).hypot() < 0.5, "{b:?} {was:?}");
+    assert!((b.width() - 40.0).abs() < 0.5, "{b:?}");
+    assert!((b.height() - 40.0).abs() < 0.5, "{b:?}");
     // Every point drawn lies in the ellipse of the box.
     let (c, rx, ry) = (b.center(), b.width() / 2.0, b.height() / 2.0);
     let mut worst = 0.0f64;

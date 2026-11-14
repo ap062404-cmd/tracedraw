@@ -84,6 +84,17 @@ of the group's first object with a fill. The result took the group's own
 attributes, none, and showed only in Wireframe (#539,
 `back_minus_front_with_a_group_keeps_each_objects_colours`).
 
+Objects of one group, selected inside it (Ctrl+click or in the Objects
+docker): Weld, Trim, Intersect, Front Minus Back, Back Minus Front and
+Boundary leave what they make in that group, where the object that
+keeps its attributes was (above it when it stays, as Boundary's
+objects do), with the group's other objects kept and the group where it
+was in the stacking order; Combine likewise makes its curve in the
+group, where the bottom object was. One undo step. The result went on
+top of the layer, out of the group, and Combine did nothing (#2640,
+`shaping_tests::shaping_objects_of_a_group_leaves_the_result_in_the_group`,
+`shaping_tests::combine_inside_a_group_keeps_the_result_in_the_group`).
+
 ## Curves
 
 - The operations run on the outlines flattened to 0.02 mm (`i_overlay`),
@@ -135,6 +146,17 @@ rules. The result covers the same area under the even-odd rule
 (`shaping::tests::overlay_reads_its_inputs_with_the_fill_rule_given`).
 `shaping::nonzero_as_even_odd` turns one such outline into an even-odd one
 on its own.
+
+The operations read each object as the area it fills (#555): text and
+curves set to the nonzero rule with that rule, so the overlapping
+strokes of a letter make no hole; a group as what its objects cover
+together, so where two of them overlap is no hole either (its outline is
+their outlines one after the other, which the even-odd rule read as a
+hole there). Checked on overlapping rectangles, ellipses, curves, a
+group, a group of overlapping objects, an object with a hole, text and
+text converted to curves, and a target behind the source, by Weld,
+Trim, Intersect, Front Minus Back and Back Minus Front
+(`shaping_tests`).
 
 ## Clip frames
 

@@ -73,6 +73,17 @@ pub const BORDER_DASHES: [(&str, &[f64]); 3] = [
     ("table.border_dotted", &[1.0, 1.5]),
 ];
 
+/// How a click of the Pick or the Shape tool chooses cells of a table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CellPick {
+    /// The cell clicked alone.
+    One,
+    /// The cell clicked added to the chosen ones, or taken from them.
+    Toggle,
+    /// Every cell from the active one to the cell clicked.
+    Range,
+}
+
 impl App {
     /// The table being edited with the Table tool, else the selected one,
     /// with its transform.
@@ -143,6 +154,36 @@ impl App {
 
     /// Ctrl+click: add the cell under the point to the selection, or take
     /// it out (the last cell stays).
+    /// A click of the Pick or the Shape tool on a table that chooses
+    /// cells, at page point `p`: one cell, one more or less (`Toggle`),
+    /// or the block from the active cell (`Range`, with a cell of this
+    /// table chosen, else one cell). The table becomes the selection, so
+    /// the property bar has the cells' borders, fill, merge and split.
+    /// False when no table is under `p` (#2434, #2436).
+    pub fn pick_table_cell(&mut self, p: Point, how: CellPick) -> bool {
+        let Some(id) = self.hit_test(p) else {
+            return false;
+        };
+        let Some(tf) = self
+            .doc()
+            .shape(id)
+            .ok()
+            .filter(|(_, s)| matches!(s.kind, ShapeKind::Table(_)))
+            .map(|(_, s)| s.transform)
+        else {
+            return false;
+        };
+        let local = tf.inverse() * p;
+        let chosen = self.table_edit.as_ref().is_some_and(|e| e.shape == id);
+        match how {
+            CellPick::Toggle => self.table_toggle_cell(id, local),
+            CellPick::Range if chosen => self.table_range_to(id, local),
+            CellPick::One | CellPick::Range => self.table_click(id, local, false),
+        }
+        self.select(vec![id]);
+        true
+    }
+
     pub fn table_toggle_cell(&mut self, id: ShapeId, local: Point) {
         let Some(t) = self.table_of(id) else {
             return;
@@ -1051,6 +1092,35 @@ mod tests {
         let id = app.new_shape(ShapeKind::Table(t)).unwrap();
         app.select(vec![id]);
         (app, id)
+    }
+
+    /// The Pick and the Shape tool choose cells of a table: one cell, one
+    /// more or less, a block from the active cell; a point off any table
+    /// chooses nothing and says so (#2434, #2436).
+    #[test]
+    fn the_pick_and_shape_tools_choose_cells_of_a_table() {
+        let (mut app, id) = app_with_table();
+        app.tool = Tool::Pick;
+        app.select(Vec::new());
+        assert!(app.pick_table_cell(at(1, 2), CellPick::One));
+        assert_eq!(app.selection, vec![id]);
+        assert_eq!(cells(&app), vec![(1, 2)]);
+        // One more, then that one taken away again.
+        assert!(app.pick_table_cell(at(0, 0), CellPick::Toggle));
+        assert_eq!(cells(&app), vec![(0, 0), (1, 2)]);
+        assert!(app.pick_table_cell(at(0, 0), CellPick::Toggle));
+        assert_eq!(cells(&app), vec![(1, 2)]);
+        // A block from the active cell.
+        app.tool = Tool::Shape;
+        assert!(app.pick_table_cell(at(0, 0), CellPick::One));
+        assert!(app.pick_table_cell(at(1, 1), CellPick::Range));
+        assert_eq!(cells(&app), vec![(0, 0), (0, 1), (1, 0), (1, 1)]);
+        // With no cell chosen yet, a block is the cell clicked.
+        app.table_edit = None;
+        assert!(app.pick_table_cell(at(2, 3), CellPick::Range));
+        assert_eq!(cells(&app), vec![(2, 3)]);
+        // Off the table: nothing.
+        assert!(!app.pick_table_cell(Point::new(500.0, 500.0), CellPick::One));
     }
 
     /// Centre of cell (r, c).

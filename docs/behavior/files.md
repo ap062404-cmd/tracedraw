@@ -155,7 +155,43 @@ pictures and the end objects of its blends included), so the member grows
 with them; a member that inflates past 64 MB is not read, and its
 objects open as drawn.
 
+## Open drawings keep their files (Windows, #2130)
+
+On Windows the file of every open drawing (the front tab's and the
+others') is kept open for reading for as long as the drawing is open
+under that name, shared with programs that read or write it but not with
+a delete, a rename or a move (`file_hold.rs`). The Explorer then refuses
+to delete, rename or move the file, or to replace it with another, and
+says it is open in TraceDraw. Save writes the file in place, so it goes
+on as before, and other programs still read the file (the thumbnail in
+the Explorer, a backup, a second TraceDraw window). The hold ends when
+the drawing is closed or saved under another name, and when TraceDraw
+ends. A drawing opened from a file it does not save to (a `.cdr`, an
+SVG, a PDF) holds that file until it is saved under a name of its own.
+A drawing never saved and one opened from a template hold nothing. A
+file that cannot be opened for the hold (it is gone, or its folder went
+away) is not held; it is tried again when the drawing is saved.
+
+On Linux and macOS nothing is kept open: these systems have no such
+hold, a file deleted there only loses its name while a program has it
+open, and Save writes it again.
+
+The open drawings are compared with the holds once a frame (paths only);
+a file is opened only when a drawing was opened, closed or saved under
+another name.
+
 ## Checks
+
+- Each open drawing's file is held from the frame after it is opened or
+  saved until it is closed or saved under another name, in the front tab
+  or another, the file a drawing was opened from until it is saved under
+  its own name; an untitled drawing holds nothing
+  (`documents::tests::open_drawings_hold_their_files_until_closed_or_renamed`,
+  `file_hold::tests::holds_follow_the_open_drawings`). On Windows a held
+  file cannot be deleted, renamed or replaced and is still read and
+  written in place
+  (`file_hold::tests::a_held_file_cannot_be_deleted_or_renamed_but_is_saved`,
+  run on the Windows build by `scripts/windows/spell-check`).
 
 - Given a folder with a subfolder, a `.cdr` and a `.txt` file, the
   TraceDraw type lists the subfolder only and CDR the subfolder and the

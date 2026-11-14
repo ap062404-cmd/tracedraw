@@ -39,6 +39,10 @@ pub enum Pic {
     /// Fit page to drawing: a page shrunk onto the object on it.
     FitPage,
     Nudge,
+    /// Super nudge: the nudge arrows with a plus (#2608).
+    SuperNudge,
+    /// Micro nudge: the nudge arrows with a minus (#2608).
+    MicroNudge,
     DupX,
     DupY,
     TreatFilled,
@@ -317,6 +321,14 @@ pub fn draw_pic(painter: &Painter, r: Rect, pic: Pic, color: Color32) {
         Pic::Nudge => {
             arrow_h(8.0, 1.0, 15.0);
             arrow_v(8.0, 1.0, 15.0);
+        }
+        Pic::SuperNudge | Pic::MicroNudge => {
+            arrow_h(6.0, 0.5, 11.5);
+            arrow_v(6.0, 0.5, 11.5);
+            line((11.5, 13.5), (15.5, 13.5), s);
+            if pic == Pic::SuperNudge {
+                line((13.5, 11.5), (13.5, 15.5), s);
+            }
         }
         Pic::DupX | Pic::DupY => {
             outline(&[(1.5, 1.5), (9.0, 1.5), (9.0, 9.0), (1.5, 9.0)], thin);
@@ -1250,13 +1262,21 @@ pub fn pic_button(ui: &mut Ui, pic: Pic, tip: &str, enabled: bool, pressed: bool
         ui.painter(),
         Rect::from_center_size(rect.center(), Vec2::splat(Tokens::prop_icon())),
         pic,
-        if enabled {
-            Tokens::icon()
-        } else {
-            Tokens::border()
-        },
+        icon_color(enabled),
     );
     resp.rich_tip(tip)
+}
+
+/// The colour of a bar icon: the theme's icon colour, or its colour for
+/// commands that cannot run now. That was the panels' line colour, which
+/// on the Dark theme is darker than the bar, so the Shape tool's node
+/// buttons, greyed with no node chosen, could hardly be seen (#2065).
+pub fn icon_color(enabled: bool) -> egui::Color32 {
+    if enabled {
+        Tokens::icon()
+    } else {
+        Tokens::icon_off()
+    }
 }
 
 /// An icon button of the bar showing a tool's own icon (the toolbox's),
@@ -1281,7 +1301,7 @@ pub fn tool_button(
     let color = if enabled {
         crate::ui::icons::tool_color(tool, Tokens::icon())
     } else {
-        Tokens::border()
+        icon_color(false)
     };
     crate::ui::icons::draw(
         ui.painter(),
@@ -1747,13 +1767,7 @@ pub fn page_bar(app: &mut App, ui: &mut Ui) {
         .rich_tip(crate::ui::tips::keyed("toolbar.units"));
     app.units = u;
     sep(ui);
-    tip_row(ui, Pic::Nudge, "toolbar.nudge_tip", |ui| {
-        if let Some(n) = distance(ui, app, app.nudge_mm, 84.0, Some(0.1)) {
-            if n > 0.0 {
-                app.nudge_mm = n;
-            }
-        }
-    });
+    nudge_part(app, ui);
     sep(ui);
     let dup = app.duplicate_offset;
     let mut new_dup = None;
@@ -1787,6 +1801,36 @@ pub fn page_bar(app: &mut App, ui: &mut Ui) {
     }
 }
 
+/// The nudge distances the arrow keys move the selection by: Nudge, then
+/// Super nudge (Shift) over Micro nudge (Ctrl), the values Document
+/// Options > Rulers sets, here with nothing selected and with objects
+/// selected so they change without opening the dialog (#2608).
+pub fn nudge_part(app: &mut App, ui: &mut Ui) {
+    tip_row(ui, Pic::Nudge, "toolbar.nudge_tip", |ui| {
+        if let Some(n) = distance(ui, app, app.nudge_mm, 84.0, Some(0.1)) {
+            if n > 0.0 {
+                app.nudge_mm = n;
+            }
+        }
+    });
+    let (sup, micro) = (app.settings.super_nudge_mm, app.settings.micro_nudge_mm);
+    let (mut new_sup, mut new_micro) = (None, None);
+    stacked(ui, |ui| {
+        tip_row(ui, Pic::SuperNudge, "toolbar.super_nudge_tip", |ui| {
+            new_sup = distance(ui, app, sup, 84.0, Some(0.1));
+        });
+        tip_row(ui, Pic::MicroNudge, "toolbar.micro_nudge_tip", |ui| {
+            new_micro = distance(ui, app, micro, 84.0, Some(0.01));
+        });
+    });
+    if let Some(v) = new_sup.filter(|v| *v > 0.0) {
+        app.settings.super_nudge_mm = v;
+    }
+    if let Some(v) = new_micro.filter(|v| *v > 0.0) {
+        app.settings.micro_nudge_mm = v;
+    }
+}
+
 /// Resize the current page, or every page when "all pages" is on, as one
 /// undo step.
 pub fn resize_pages(app: &mut App, size: Size) {
@@ -1795,13 +1839,7 @@ pub fn resize_pages(app: &mut App, size: Size) {
     } else {
         vec![app.page]
     };
-    let cmds: Vec<Command> = pages
-        .into_iter()
-        .map(|page| Command::ResizePage { page, size })
-        .collect();
-    if let Err(e) = app.engine.run_batch("Page Size", &cmds) {
-        app.status = e.to_string();
-    }
+    app.resize_pages_about_centre(&pages, size, "Page Size");
 }
 
 // ----- the object bar ---------------------------------------------------
@@ -1880,9 +1918,12 @@ fn selection_angle(app: &App) -> f64 {
 }
 
 /// Position, size, scale, rotation and mirroring of the selection.
-/// The rotation angle: the selection's own, turned about `refp` by what
-/// is typed or stepped, each arrow click or wheel turn on its own.
+/// The rotation angle: the selection's own, turned by what is typed or
+/// stepped, each arrow click or wheel turn on its own, about the centre of
+/// rotation the user moved, else about `refp` (#2478: a typed angle
+/// turned about the box's centre even with the centre of rotation moved).
 fn rotation_field(app: &mut App, ui: &mut Ui, refp: Point) -> egui::Response {
+    let refp = app.moved_rotation_center().unwrap_or(refp);
     let angle = selection_angle(app);
     let mut a = angle;
     let r = ui.add_sized(
@@ -2153,6 +2194,38 @@ fn set_no_outline(app: &mut App) {
     }
 }
 
+/// The rows of the outline width list: None, Hairline and the usual
+/// widths; returns the one clicked. A width and its unit stay on one row
+/// and the list grows wider than the box when they need it ("0.75 pt"
+/// broke in two in a narrow list, #2651).
+fn outline_width_rows(
+    app: &App,
+    ui: &mut Ui,
+    width: Option<f64>,
+    mixed: bool,
+) -> Option<Option<f64>> {
+    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+    let mut picked = None;
+    if ui
+        .selectable_label(!mixed && width.is_none(), tr("toolbar.none"))
+        .clicked()
+    {
+        picked = Some(None);
+    }
+    if ui.selectable_label(false, tr("toolbar.hairline")).clicked() {
+        picked = Some(Some(tracedraw_core::Stroke::HAIRLINE));
+    }
+    for w in outline_width_presets(app.outline_units()) {
+        if ui
+            .selectable_label(false, outline_text(app, Some(w)))
+            .clicked()
+        {
+            picked = Some(Some(w));
+        }
+    }
+    picked
+}
+
 /// The outline width: a box typed into (Enter or leaving it applies, Esc
 /// puts it back) and an arrow dropping the usual widths; with `wheel`,
 /// the mouse wheel over it steps through those widths. Returns the width
@@ -2187,6 +2260,7 @@ fn outline_width_box(
                     .desired_width(72.0),
             )
             .rich_tip(tr("toolbar.outline_width"));
+        crate::ui::field::select_all_when_focused(ui, &resp, stored.is_none(), &buf);
         if resp.has_focus() {
             ui.data_mut(|d| d.insert_temp(id, buf.clone()));
         } else if stored.is_some() || resp.lost_focus() {
@@ -2261,22 +2335,8 @@ fn outline_width_box(
             egui::ScrollArea::vertical()
                 .max_height(400.0)
                 .show(ui, |ui| {
-                    if ui
-                        .selectable_label(!mixed && width.is_none(), tr("toolbar.none"))
-                        .clicked()
-                    {
-                        picked = Some(None);
-                    }
-                    if ui.selectable_label(false, tr("toolbar.hairline")).clicked() {
-                        picked = Some(Some(tracedraw_core::Stroke::HAIRLINE));
-                    }
-                    for w in outline_width_presets(app.outline_units()) {
-                        if ui
-                            .selectable_label(false, outline_text(app, Some(w)))
-                            .clicked()
-                        {
-                            picked = Some(Some(w));
-                        }
+                    if let Some(p) = outline_width_rows(app, ui, width, mixed) {
+                        picked = Some(p);
                     }
                     crate::ui::keynav::scroll_into_view(ui);
                 });
@@ -2500,11 +2560,7 @@ pub fn ellipse_part(app: &mut App, ui: &mut Ui) {
         Some(a) if a.pie => 1,
         Some(_) => 2,
     };
-    let mut arc = current.unwrap_or(tracedraw_core::EllipseArc {
-        start_deg: 90.0,
-        end_deg: 90.0,
-        pie: true,
-    });
+    let mut arc = current.unwrap_or(crate::app::DEFAULT_ELLIPSE_ARC);
     let mut new = current;
     for (i, pic, key) in [
         (0, Pic::Ellipse, "toolbar.ellipse_tip"),
@@ -3200,7 +3256,7 @@ pub fn arrange_part(app: &mut App, ui: &mut Ui) -> bool {
         ),
     ] {
         let on = if need_many {
-            op.ready(shapes.len())
+            app.shaping_ready(op)
         } else {
             !shapes.is_empty()
         };
@@ -3319,9 +3375,11 @@ pub fn wrap_offset_field(app: &mut App, ui: &mut Ui, offset: f64) {
     });
 }
 
-/// Wrap Paragraph Text, To Front and To Back of the layer and Convert to
-/// Curves, for the selected objects.
-pub fn order_part(app: &mut App, ui: &mut Ui) {
+/// Wrap Paragraph Text and its list of wrap styles, for the selected
+/// objects: on every object's bar, so that paragraph text alone, a
+/// picture alone or any one object shows it, not only a mixed selection
+/// (#2620, discussion #2618).
+pub fn wrap_part(app: &mut App, ui: &mut Ui) {
     let wrap = app.selected_rc().iter().any(|s| s.wrap_text);
     if pic_button(
         ui,
@@ -3339,6 +3397,12 @@ pub fn order_part(app: &mut App, ui: &mut Ui) {
         });
     }
     wrap_style_list(app, ui);
+}
+
+/// Wrap Paragraph Text, To Front and To Back of the layer and Convert to
+/// Curves, for the selected objects.
+pub fn order_part(app: &mut App, ui: &mut Ui) {
+    wrap_part(app, ui);
     if pic_button(ui, Pic::ToFront, &tr("toolbar.to_front"), true, false).clicked() {
         app.order_page(true);
     }
@@ -3363,6 +3427,68 @@ pub fn order_part(app: &mut App, ui: &mut Ui) {
 mod tests {
     use super::*;
     use tracedraw_core::geometry::Rect as R;
+
+    /// A bar button that cannot run now is drawn greyed but plain to see
+    /// in every theme: on the Dark theme the Shape tool's node buttons,
+    /// with no node chosen, were drawn in the panels' line colour, darker
+    /// than the bar (#2065).
+    #[test]
+    fn greyed_bar_icons_stand_out_from_the_bar_in_every_theme() {
+        fn luminance(c: egui::Color32) -> f32 {
+            let f = |v: u8| {
+                let v = v as f32 / 255.0;
+                if v <= 0.04045 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * f(c.r()) + 0.7152 * f(c.g()) + 0.0722 * f(c.b())
+        }
+        fn contrast(a: egui::Color32, b: egui::Color32) -> f32 {
+            let (a, b) = (luminance(a), luminance(b));
+            (a.max(b) + 0.05) / (a.min(b) + 0.05)
+        }
+        let ctx = crate::theme::ui_context();
+        for theme in crate::theme::Theme::ALL {
+            crate::theme::set_theme(theme);
+            let (off, on, bar) = (icon_color(false), icon_color(true), Tokens::panel());
+            assert_eq!(off, Tokens::icon_off(), "{theme:?}");
+            assert!(contrast(off, bar) >= 1.5, "{theme:?}: {off:?} on {bar:?}");
+            // Still apart from the buttons that can run.
+            assert_ne!(off, on, "{theme:?}");
+            // The button paints its picture in that colour.
+            let mut out = ctx.run_ui(Default::default(), |ui| {
+                pic_button(ui, Pic::BreakCurve, "Break", false, false);
+            });
+            out.textures_delta.clear();
+            fn collect(s: &epaint::Shape, out: &mut Vec<egui::Color32>) {
+                match s {
+                    epaint::Shape::Vec(v) => v.iter().for_each(|s| collect(s, out)),
+                    epaint::Shape::Path(p) => {
+                        out.push(p.fill);
+                        if let epaint::ColorMode::Solid(c) = p.stroke.color {
+                            out.push(c);
+                        }
+                    }
+                    epaint::Shape::LineSegment { stroke, .. } => out.push(stroke.color),
+                    epaint::Shape::Circle(c) => out.extend([c.fill, c.stroke.color]),
+                    epaint::Shape::Rect(r) => out.extend([r.fill, r.stroke.color]),
+                    _ => {}
+                }
+            }
+            let mut colours = Vec::new();
+            for c in &out.shapes {
+                collect(&c.shape, &mut colours);
+            }
+            assert!(colours.contains(&off), "{theme:?}: {colours:?}");
+            assert!(
+                !colours.contains(&Tokens::border()) || Tokens::border() == off,
+                "{theme:?}"
+            );
+        }
+        crate::theme::set_theme(crate::theme::Theme::Light);
+    }
 
     /// The size and position fields show the decimals a value needs, at
     /// least one and up to the drawing precision, with no trailing zeros:
@@ -3548,6 +3674,21 @@ mod tests {
         // One undo step a click.
         app.undo();
         assert!((selection_angle(&app) - 3.0).abs() < 1e-6);
+        // With the centre of rotation moved to a corner, the arrow turns
+        // the object about that corner, which stays put (#2478).
+        let corner = |app: &App| {
+            app.doc().shape_on_page(id).expect("rect").transform * Point::new(10.0, 10.0)
+        };
+        let before = corner(&app);
+        app.set_pivot(before);
+        click(&mut app, up);
+        assert!(
+            (selection_angle(&app) - 4.0).abs() < 1e-6,
+            "{}",
+            selection_angle(&app)
+        );
+        let after = corner(&app);
+        assert!((after - before).hypot() < 1e-6, "{before:?} -> {after:?}");
     }
 
     /// #1331: the sharpness box takes a negative value, which inverts the
@@ -3936,6 +4077,41 @@ mod tests {
                 );
             }
             assert_eq!(width(&app), Some(p[6 - k]), "notch {k}");
+        }
+    }
+
+    /// The outline width list keeps each width and its unit on one row,
+    /// however narrow the list (#2651: with short words for None and
+    /// Hairline, as in Chinese, "0.75 pt" broke in two).
+    #[test]
+    fn the_outline_width_list_keeps_a_width_on_one_row() {
+        let ctx = crate::theme::ui_context();
+        App::setup_context(&ctx);
+        for u in OUTLINE_UNITS {
+            let mut app = App::headless();
+            app.settings.outline_units = u.id().to_string();
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                ui.allocate_ui(egui::vec2(20.0, 600.0), |ui| {
+                    ui.set_max_width(20.0);
+                    outline_width_rows(&app, ui, None, false);
+                });
+            });
+            out.textures_delta.clear();
+            let rows: Vec<(String, usize)> = out
+                .shapes
+                .iter()
+                .filter_map(|c| match &c.shape {
+                    egui::Shape::Text(t) => {
+                        Some((t.galley.text().to_string(), t.galley.rows.len()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            for w in outline_width_presets(u) {
+                let label = outline_text(&app, Some(w));
+                let row = rows.iter().find(|(t, _)| *t == label);
+                assert_eq!(row.map(|r| r.1), Some(1), "{u:?} {label}: {rows:?}");
+            }
         }
     }
 

@@ -474,6 +474,77 @@ mod tests {
         t
     }
 
+    /// #2423: editing a text fitted to a path, the caret, the selection
+    /// and clicks are where the letters stand on the path. The caret
+    /// stayed where the text was before it was fitted (here 70 mm above
+    /// the line), and moved along that straight line as letters were
+    /// typed.
+    #[test]
+    fn the_caret_of_a_text_on_a_path_stands_on_the_path() {
+        let mut app = App::headless();
+        app.settings.autocorrect.enabled = false;
+        let t = fitted_on_line(&mut app);
+        app.selection = vec![t];
+        app.begin_text_edit(t);
+        app.text_set_caret_at(2, false);
+        let (top, bottom, _) = app.text_caret_geometry().expect("caret");
+        for p in [top, bottom] {
+            assert!((45.0..60.0).contains(&p.y), "{top:?} {bottom:?}");
+            assert!((10.0..40.0).contains(&p.x), "{top:?} {bottom:?}");
+        }
+        // Typing moves it along the path.
+        app.text_insert("XX");
+        let (after, _, _) = app.text_caret_geometry().expect("caret");
+        assert!(
+            after.x > top.x + 1.0 && (45.0..60.0).contains(&after.y),
+            "{after:?}"
+        );
+        // A click on the first letter puts the caret before or after it.
+        let hit = app.text_hit_char(Point::new(11.0, 52.0));
+        assert!(matches!(hit, Some(0 | 1)), "{hit:?}");
+        // The selection lies on the path too.
+        app.text_select_all();
+        let (_, _, quads) = app.text_caret_geometry().expect("caret");
+        assert!(!quads.is_empty());
+        assert!(
+            quads.iter().flatten().all(|p| (40.0..65.0).contains(&p.y)),
+            "{quads:?}"
+        );
+    }
+
+    /// #2423: on a path going up the page the letters lie on their side,
+    /// and so does the caret: across the path, not upright.
+    #[test]
+    fn the_caret_turns_with_the_path() {
+        let mut app = App::headless();
+        app.settings.autocorrect.enabled = false;
+        let mut line = BezPath::new();
+        line.move_to((50.0, 10.0));
+        line.line_to((50.0, 110.0));
+        let l = app
+            .new_shape(ShapeKind::Path {
+                path: line,
+                closed: false,
+            })
+            .expect("line");
+        app.start_text(Point::new(100.0, 150.0), None);
+        app.text_insert("Path");
+        app.finish_text();
+        let t = app.selection[0];
+        app.selection = vec![t, l];
+        app.begin_fit_text_to_path();
+        app.selection = vec![t];
+        app.begin_text_edit(t);
+        app.text_set_caret_at(2, false);
+        let (top, bottom, _) = app.text_caret_geometry().expect("caret");
+        assert!((top.y - bottom.y).abs() < 0.5, "{top:?} {bottom:?}");
+        assert!((top.x - bottom.x).abs() > 1.0, "{top:?} {bottom:?}");
+        assert!(
+            (35.0..60.0).contains(&top.x) && (10.0..40.0).contains(&top.y),
+            "{top:?}"
+        );
+    }
+
     #[test]
     fn the_bar_settings_edit_the_text_with_undo_and_come_back_on_reselect() {
         let mut app = App::headless();

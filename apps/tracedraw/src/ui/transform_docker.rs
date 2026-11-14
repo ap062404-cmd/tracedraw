@@ -277,6 +277,8 @@ pub fn apply(app: &mut App) {
         return;
     };
     if app.selection.is_empty() {
+        // The guideline's centre of rotation, as an object's (#2335).
+        app.transform.pivot = app.guide_rotation_center();
         let origin = app.ruler_origin();
         let t = app.transform.affine(b, origin);
         let copies = app.transform.copies.min(MAX_COPIES);
@@ -553,7 +555,9 @@ pub fn transformations(app: &mut App, ui: &mut Ui) {
     let bounds = target_bounds(app);
     let origin = app.ruler_origin();
     let selection = app.selection.clone();
-    app.transform.pivot = app.moved_rotation_center();
+    app.transform.pivot = app
+        .moved_rotation_center()
+        .or_else(|| app.guide_rotation_center());
     app.transform.sync(&selection, bounds, origin);
     let has = bounds.is_some();
     ui.horizontal(|ui| {

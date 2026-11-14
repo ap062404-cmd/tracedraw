@@ -7,18 +7,22 @@
 //! 0.42 the first three sat on the Standard toolbar), unless Options >
 //! Display turns them off: a tap on Shift, Ctrl or Alt holds the key
 //! down until the next tap on it, the key drawn pressed meanwhile, and
-//! Delete deletes as the Delete key does. The keys held this way join
+//! Delete deletes as the Delete key does. A finger can also hold Shift,
+//! Ctrl or Alt down as a key is held, while another finger draws: the
+//! key is let go with the finger (#2362). The keys held this way join
 //! every frame's input (the app's raw input hook), so every tool reads
 //! them as it reads the keyboard's. See docs/behavior/android.md.
 
 use crate::app::App;
 
-/// The keys held down from the toolbar.
+/// The keys held down from the keys on the drawing: tapped on until the
+/// next tap, or held down by a finger on one of them (`pressed`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TouchModifiers {
     pub shift: bool,
     pub ctrl: bool,
     pub alt: bool,
+    pub pressed: Option<ModKey>,
 }
 
 /// One of the three keys.
@@ -76,11 +80,12 @@ impl ModKey {
 impl TouchModifiers {
     /// Whether `key` is held.
     pub fn held(self, key: ModKey) -> bool {
-        match key {
-            ModKey::Shift => self.shift,
-            ModKey::Ctrl => self.ctrl,
-            ModKey::Alt => self.alt,
-        }
+        self.pressed == Some(key)
+            || match key {
+                ModKey::Shift => self.shift,
+                ModKey::Ctrl => self.ctrl,
+                ModKey::Alt => self.alt,
+            }
     }
 
     /// A tap on `key`'s button: held down, or let go.
@@ -95,18 +100,19 @@ impl TouchModifiers {
     /// Whether any key is held.
     #[cfg(test)]
     pub fn any(self) -> bool {
-        self.shift || self.ctrl || self.alt
+        self.shift || self.ctrl || self.alt || self.pressed.is_some()
     }
 
     /// The keys as egui's modifiers. Ctrl is also the command key, as
     /// the Ctrl key is everywhere but on a Mac.
     pub fn modifiers(self) -> egui::Modifiers {
+        let ctrl = self.held(ModKey::Ctrl);
         egui::Modifiers {
-            alt: self.alt,
-            ctrl: self.ctrl,
-            shift: self.shift,
+            alt: self.held(ModKey::Alt),
+            ctrl,
+            shift: self.held(ModKey::Shift),
             mac_cmd: false,
-            command: self.ctrl,
+            command: ctrl,
         }
     }
 
@@ -143,6 +149,135 @@ impl TouchModifiers {
         }
         ctx.data_mut(|d| d.insert_temp(id, (keyboard, self)));
     }
+}
+
+/// A finger held down on Shift, Ctrl or Alt on the drawing, as a key is
+/// held (#2362).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct KeyFinger {
+    id: u64,
+    key: ModKey,
+    /// It came down with no other finger on the screen, so the frame's
+    /// pointer follows it: its pointer events are left out.
+    pointer: bool,
+    /// Another finger touched the screen while it was down: when it
+    /// lifts, the key is let go instead of tapped on.
+    chord: bool,
+}
+
+/// The fingers on the screen as the keys on the drawing see them: a
+/// finger held on Shift, Ctrl or Alt holds the key down while it stays,
+/// and the finger that draws meanwhile moves the pointer. The pointer
+/// follows only the first finger down, the one on the key, and two
+/// fingers on the screen pan and zoom the drawing: the key's finger is
+/// taken out of the frame's input and the other finger's moves, presses
+/// and releases are given as the pointer's (#2362).
+#[derive(Debug, Clone, Default)]
+pub struct KeyFingers {
+    /// The fingers on the screen, by touch id.
+    down: Vec<u64>,
+    key: Option<KeyFinger>,
+    /// The finger drawing while the key's finger has the pointer.
+    other: Option<u64>,
+}
+
+/// Take a finger held on Shift, Ctrl or Alt on the drawing out of the
+/// frame's input `raw`, holding the key down for as long as it stays,
+/// and give the moves of the finger drawing meanwhile as the pointer's.
+/// A finger lifted from a key with no other finger down in the meantime
+/// is a tap: the key is held until the next tap, as a tap on the
+/// button does. Runs in the raw input hook, before
+/// [`TouchModifiers::apply`].
+pub fn fingers_on_keys(app: &mut App, raw: &mut egui::RawInput) {
+    use egui::{Event, PointerButton, TouchPhase};
+    let keys: Vec<(ModKey, egui::Rect)> = app
+        .touch_keys_shown
+        .iter()
+        .filter_map(|(id, r)| ModKey::of_item(id).map(|k| (k, *r)))
+        .collect();
+    let f = &mut app.key_fingers;
+    let mods = &mut app.touch_mods;
+    // The pointer events that follow a touch event belong to that
+    // finger, when it has the pointer.
+    let mut swallow = false;
+    let press = |pos, pressed| Event::PointerButton {
+        pos,
+        button: PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    let mut out = Vec::with_capacity(raw.events.len());
+    for e in std::mem::take(&mut raw.events) {
+        let Event::Touch { id, phase, pos, .. } = e else {
+            let pointer = matches!(
+                e,
+                Event::PointerMoved(_) | Event::PointerButton { .. } | Event::PointerGone
+            );
+            if !(pointer && swallow) {
+                out.push(e);
+            }
+            continue;
+        };
+        let id = id.0;
+        let on_key = f.key.filter(|k| k.id == id);
+        swallow = on_key.is_some_and(|k| k.pointer) || f.other.is_some();
+        match phase {
+            TouchPhase::Start => {
+                let key = keys
+                    .iter()
+                    .find(|(_, r)| r.contains(pos))
+                    .map(|(k, _)| *k)
+                    .filter(|_| f.key.is_none() && f.other.is_none());
+                let first = f.down.is_empty();
+                f.down.push(id);
+                if let Some(key) = key {
+                    f.key = Some(KeyFinger {
+                        id,
+                        key,
+                        pointer: first,
+                        chord: !first,
+                    });
+                    mods.pressed = Some(key);
+                    swallow = first;
+                    continue;
+                }
+                out.push(e);
+                if let Some(k) = f.key.as_mut() {
+                    k.chord = true;
+                    if k.pointer && f.other.is_none() {
+                        f.other = Some(id);
+                        out.extend([Event::PointerMoved(pos), press(pos, true)]);
+                    }
+                }
+            }
+            TouchPhase::Move => {
+                if on_key.is_some() {
+                    continue;
+                }
+                out.push(e);
+                if f.other == Some(id) {
+                    out.push(Event::PointerMoved(pos));
+                }
+            }
+            TouchPhase::End | TouchPhase::Cancel => {
+                f.down.retain(|d| *d != id);
+                if let Some(k) = on_key {
+                    f.key = None;
+                    mods.pressed = None;
+                    if !k.chord && phase == TouchPhase::End {
+                        mods.toggle(k.key);
+                    }
+                    continue;
+                }
+                out.push(e);
+                if f.other == Some(id) {
+                    f.other = None;
+                    out.extend([press(pos, false), Event::PointerGone]);
+                }
+            }
+        }
+    }
+    raw.events = out;
 }
 
 /// Whether the buttons are shown: on Android, and wherever a finger has
@@ -225,7 +360,7 @@ pub fn keys_on_drawing(app: &mut App, ui: &mut egui::Ui, canvas: egui::Rect) {
 /// does not put the bars in their customize mode (Alt held moves their
 /// buttons), which would leave the Alt button unable to let go.
 pub fn alt_from_toolbar(app: &App) -> bool {
-    app.touch_mods.alt
+    app.touch_mods.held(ModKey::Alt)
 }
 
 #[cfg(test)]
@@ -293,6 +428,7 @@ mod tests {
             shift: true,
             ctrl: true,
             alt: false,
+            pressed: None,
         };
         let (mods, out) = held_after(
             &ctx,

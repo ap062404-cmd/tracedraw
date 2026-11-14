@@ -370,3 +370,58 @@ fn report_controls_without_tips() {
         .collect();
     std::fs::write(out, lines.join("\n")).unwrap();
 }
+
+/// The most tips one control showed in the last frame.
+fn most_tips(d: &Driver) -> usize {
+    d.ctx.viewport(|v| {
+        v.prev_pass
+            .tooltips
+            .widget_tooltips
+            .values()
+            .map(|t| t.tooltip_count)
+            .max()
+            .unwrap_or(0)
+    })
+}
+
+/// #2367: a control of the Options dialog shows one tip, not the same
+/// tip twice one under the other (OK and Cancel did).
+#[test]
+fn an_options_control_shows_one_tip() {
+    crate::i18n::set_language("en");
+    let mut d = Driver::new();
+    let mut app = mixed_app();
+    app.show_welcome = false;
+    let mut doubled = Vec::new();
+    let mut found = BTreeSet::new();
+    for set in crate::ui::options::OptionsSet::ALL {
+        let Some(&page) = set.pages().first() else {
+            continue;
+        };
+        app.options_page = page;
+        app.dialog = crate::ui::dialogs::Dialog::Options;
+        d.frame(&mut app, vec![Event::PointerGone]);
+        d.frame(&mut app, vec![]);
+        let (list, _) = controls(&d.ctx, true);
+        for (id, rect, kind, label) in list {
+            if is_modal_blocker(id) {
+                continue;
+            }
+            let shown = hover(&mut d, &mut app, &mut |_| {}, rect.center());
+            if shown && most_tips(&d) > 1 {
+                doubled.push(format!("{page:?} {kind} {label:?}"));
+            }
+            if shown {
+                found.insert(label);
+            }
+            d.frame(&mut app, vec![Event::PointerGone]);
+        }
+    }
+    for name in ["dialog.ok", "dialog.cancel"] {
+        assert!(
+            found.contains(&crate::i18n::tr(name)),
+            "{name} in {found:?}"
+        );
+    }
+    assert!(doubled.is_empty(), "controls with two tips: {doubled:#?}");
+}

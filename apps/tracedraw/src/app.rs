@@ -3455,7 +3455,16 @@ impl App {
         let cmyk = carried_cmyk_profile(self.doc())
             .filter(|_| c.open_cmyk == 0)
             .or_else(|| load(&c.cmyk_profile_path, tracedraw_core::icc::ColorSpace::Cmyk));
-        let intent = Intent::from_name(&c.intent).unwrap_or_default();
+        // A document's rendering intent overrides the default one. This
+        // keeps Proof Colors and screen conversions in step with the
+        // intent chosen on the Color Management dialog's Document tab.
+        let document_intent = &self.doc().metadata.rendering_intent;
+        let intent_name = if document_intent.trim().is_empty() {
+            c.intent.as_str()
+        } else {
+            document_intent.as_str()
+        };
+        let intent = Intent::from_name(intent_name).unwrap_or_default();
         let bpc = c.black_point_compensation;
         self.color_profile_key = carried.map(|p| std::sync::Arc::as_ptr(&p.data) as usize);
         tracedraw_core::color::engine::set_map_gray_to_black(c.map_gray_to_black);
@@ -3479,7 +3488,18 @@ impl App {
             .cmyk_profile
             .as_ref()
             .map(|p| std::sync::Arc::as_ptr(&p.data) as usize);
-        if key != self.color_profile_key {
+        let c = &self.settings.color;
+        let document_intent = &self.doc().metadata.rendering_intent;
+        let intent_name = if document_intent.trim().is_empty() {
+            c.intent.as_str()
+        } else {
+            document_intent.as_str()
+        };
+        let expected_intent = tracedraw_core::icc::Intent::from_name(intent_name)
+            .unwrap_or_default();
+        let intent_changed = tracedraw_core::color::engine::icc()
+            .is_some_and(|engine| engine.intent() != expected_intent);
+        if key != self.color_profile_key || intent_changed {
             self.apply_color_settings();
         }
     }

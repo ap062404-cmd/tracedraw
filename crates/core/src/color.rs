@@ -556,8 +556,20 @@ fn luminance(r: f32, g: f32, b: f32) -> f32 {
 /// back, through the ICC engine when one is installed with a CMYK
 /// profile, else the press model (View > Proof Colors).
 pub fn proof_rgb(rgb: [f32; 3]) -> [f32; 3] {
-    let [r, g, b] = rgb.map(|v| v.clamp(0.0, 1.0));
-    Color::Rgb { r, g, b }.convert_to("CMYK").to_rgb_f32()
+    let rgb = rgb.map(|v| v.clamp(0.0, 1.0));
+    // Raster pixels are already in display sRGB. Do not send them through
+    // the working-RGB transform: that profile may be different from sRGB.
+    if let Some(icc) = engine::icc() {
+        if let Some([c, m, y, k]) = icc.display_rgb_to_cmyk(rgb) {
+            let cmyk = Color::Cmyk { c, m, y, k };
+            if let Some(proofed) = icc.to_rgb_f32(cmyk) {
+                return proofed.map(|v| v.clamp(0.0, 1.0));
+            }
+        }
+    }
+    // No usable CMYK transform: use the built-in press model with the
+    // same sRGB input/output convention as the raster.
+    crate::press::cmyk_to_srgb(crate::press::srgb_to_cmyk(rgb))
 }
 
 pub fn hsb_to_rgb(h: f32, s: f32, v: f32) -> [f32; 3] {

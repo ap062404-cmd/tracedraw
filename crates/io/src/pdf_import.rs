@@ -40,6 +40,9 @@ pub struct ImportedPdf {
     /// The spot inks the pages' Separation colours name, numbered from 1
     /// in the order they came; `Color::Spot` of the shapes refers to them.
     pub inks: Vec<tracedraw_core::document::Ink>,
+    /// The CMYK ICC profile embedded in the PDF, when one was used by an
+    /// ICCBased CMYK colour space.
+    pub cmyk_profile: Option<tracedraw_core::document::DocumentProfile>,
     /// The pictures that came in smaller than the file holds them, past
     /// [`ImportOptions::max_picture_pixels`] or when there was no memory
     /// for them (#1835), for the caller to say so.
@@ -57,6 +60,21 @@ pub struct ShrunkPicture {
     /// Its size in the drawing.
     pub new_width: u32,
     pub new_height: u32,
+}
+
+/// Build the same CMYK-to-sRGB lookup used by native CDR bitmap import.
+fn cmyk_lut_from_profile(data: &[u8]) -> Option<tracedraw_core::icc::CmykLut> {
+    let source = tracedraw_core::icc::Profile::parse(data).ok()?;
+    if source.color_space() != tracedraw_core::icc::ColorSpace::Cmyk {
+        return None;
+    }
+    let transform = tracedraw_core::icc::Transform::new(
+        &source,
+        &tracedraw_core::icc::Profile::srgb(),
+        tracedraw_core::icc::Intent::default(),
+        false,
+    )?;
+    tracedraw_core::icc::CmykLut::new(&transform)
 }
 
 /// Does the buffer hold a PDF, possibly after an AI/PostScript preamble?
@@ -185,9 +203,17 @@ pub fn parse_with_options(
             max_pixels: options.max_picture_pixels.max(1),
             shrunk: Vec::new(),
             in_mask: false,
+            cmyk_profile: out.cmyk_profile.clone(),
+            cmyk_lut: out
+                .cmyk_profile
+                .as_ref()
+                .and_then(|p| cmyk_lut_from_profile(&p.data)),
         };
         let page = imp.import_page(*page_id, index);
         out.inks = std::mem::take(&mut imp.inks);
+        if out.cmyk_profile.is_none() {
+            out.cmyk_profile = imp.cmyk_profile.clone();
+        }
         out.shrunk_pictures.extend(
             imp.shrunk
                 .into_iter()
@@ -840,6 +866,10 @@ struct Importer<'a> {
     /// A picture's soft mask is being read (its shrinking is the
     /// picture's own).
     in_mask: bool,
+    /// ICC profile carried by an ICCBased CMYK colour space.
+    cmyk_profile: Option<tracedraw_core::document::DocumentProfile>,
+    /// Profile-based conversion used for the screen preview.
+    cmyk_lut: Option<tracedraw_core::icc::CmykLut>,
 }
 
 /// The text marked content gives its glyphs, shown in place of their own
@@ -2143,16 +2173,39 @@ impl<'a> Importer<'a> {
                     .unwrap_or(b"");
                 match family {
                     b"ICCBased" => {
-                        let n = a
-                            .get(1)
-                            .and_then(|s| self.dict_of(s))
-                            .and_then(|d| self.get(d, b"N"))
+                        let profile_stream = a.get(1).and_then(|s| match self.deref(s) {
+                            Object::Stream(stream) => Some(stream),
+                            _ => None,
+                        });
+                        let n = profile_stream
+                            .and_then(|stream| self.get(&stream.dict, b"N"))
                             .and_then(Self::num)
                             .unwrap_or(3.0) as usize;
-                        match n {
-                            1 => ColorSpace::Gray,
-                            4 => ColorSpace::Cmyk,
-                            _ => ColorSpace::Rgb,
+                        let profile_data = if n == 4 && self.cmyk_profile.is_none() {
+                            profile_stream.and_then(|stream| stream.decompressed_content().ok())
+                        } else {
+                            None
+                        };
+                        if n == 4 {
+                            if let Some(data) = profile_data {
+                                if let Ok(profile) = tracedraw_core::icc::Profile::parse(&data) {
+                                    if profile.color_space() == tracedraw_core::icc::ColorSpace::Cmyk {
+                                        let name = profile
+                                            .description()
+                                            .unwrap_or("Embedded PDF CMYK")
+                                            .to_string();
+                                        self.cmyk_lut = cmyk_lut_from_profile(&data);
+                                        self.cmyk_profile = Some(
+                                            tracedraw_core::document::DocumentProfile::new(name, data),
+                                        );
+                                    }
+                                }
+                            }
+                            ColorSpace::Cmyk
+                        } else if n == 1 {
+                            ColorSpace::Gray
+                        } else {
+                            ColorSpace::Rgb
                         }
                     }
                     b"CalRGB" | b"Lab" => ColorSpace::Rgb,
@@ -2568,7 +2621,7 @@ impl<'a> Importer<'a> {
     }
 
     fn draw_image(&mut self, stream: &Stream, gs: &GState) {
-        let Some((png, w, h)) = self.decode_image(stream) else {
+        let Some((png, w, h, inks)) = self.decode_image(stream) else {
             return;
         };
         // The image fills the unit square of the current CTM.
@@ -2581,6 +2634,8 @@ impl<'a> Importer<'a> {
             fx: None,
         });
         shape.transform = gs.ctm;
+        shape.cmyk_bitmap = inks.is_some();
+        shape.picture_inks = inks.map(Box::new);
         shape.stroke = None;
         shape.fill = Fill::None;
         shape.opacity = gs.fill_alpha;
@@ -2605,14 +2660,25 @@ impl<'a> Importer<'a> {
     /// for, is shrunk by a whole factor, each pixel the mean of a block of
     /// the picture's own (#1804), and listed as shrunk; only one past
     /// [`MAX_SOURCE_SIDE`] or [`MAX_SOURCE_PIXELS`] is skipped.
-    fn decode_image(&mut self, stream: &Stream) -> Option<(Vec<u8>, u32, u32)> {
-        let (rgba, w, h) = self.decode_pixels(stream)?;
-        Some((tracedraw_render_png(w, h, &rgba), w, h))
+    fn decode_image(
+        &mut self,
+        stream: &Stream,
+    ) -> Option<(Vec<u8>, u32, u32, Option<tracedraw_core::picture_inks::PictureInks>)> {
+        let (rgba, w, h, planes) = self.decode_pixels(stream)?;
+        let png = tracedraw_render_png(w, h, &rgba);
+        let inks = planes.map(|planes| {
+            let gray = tracedraw_render_gray_png(w, h.saturating_mul(4), &planes);
+            tracedraw_core::picture_inks::PictureInks::cmyk(&png, gray.into())
+        });
+        Some((png, w, h, inks))
     }
 
     /// An image XObject's RGBA pixels and size, as [`Self::decode_image`]
     /// gives them before they are put into a PNG.
-    fn decode_pixels(&mut self, stream: &Stream) -> Option<(Vec<u8>, u32, u32)> {
+    fn decode_pixels(
+        &mut self,
+        stream: &Stream,
+    ) -> Option<(Vec<u8>, u32, u32, Option<Vec<u8>>)> {
         let d = &stream.dict;
         let w = self.get(d, b"Width").and_then(Self::num)? as u32;
         let h = self.get(d, b"Height").and_then(Self::num)? as u32;
@@ -2679,6 +2745,26 @@ impl<'a> Importer<'a> {
             .map(|o| self.nums(o))
             .unwrap_or_default();
         let inverted = decode_arr.first().map(|v| *v == 1.0).unwrap_or(false);
+        // Preserve source CMYK samples only when no resampling is needed.
+        // The RGB preview can be generated from these same samples, while
+        // the original four planes remain available for print separations.
+        let keep_cmyk = cs == ColorSpace::Cmyk && bpc == 8 && f == 1 && !is_mask
+            && !matches!(last, b"DCTDecode" | b"DCT" | b"JPXDecode");
+        let mut cmyk_planes = if keep_cmyk {
+            let len = (w as usize)
+                .checked_mul(h as usize)
+                .and_then(|pixels| pixels.checked_mul(4));
+            let mut planes = Vec::new();
+            if let Some(len) = len.filter(|len| planes.try_reserve_exact(*len).is_ok()) {
+                planes.resize(len, 0);
+                Some(planes)
+            } else {
+                self.warn("CMYK ink channels not retained: not enough memory");
+                None
+            }
+        } else {
+            None
+        };
         match last {
             b"DCTDecode" | b"DCT" | b"JPXDecode" => {
                 // The decoder takes its own memory.
@@ -2719,15 +2805,72 @@ impl<'a> Importer<'a> {
                     };
                     let is_cmyk_jpeg =
                         img.color() == image::ColorType::Rgba8 && cs == ColorSpace::Cmyk;
-                    let _ = is_cmyk_jpeg;
-                    let rgb = img.to_rgba8();
-                    rgba = rgb.into_raw();
-                    if cs == ColorSpace::Cmyk && inverted {
-                        for px in rgba.chunks_exact_mut(4) {
-                            px[0] = 255 - px[0];
-                            px[1] = 255 - px[1];
-                            px[2] = 255 - px[2];
+                    if is_cmyk_jpeg {
+                        // The JPEG decoder exposes CMYK JPEG samples as four
+                        // bytes per pixel. Keep those as inks; the fourth
+                        // byte is K, not an alpha channel.
+                        let mut samples = img.to_rgba8().into_raw();
+                        let (jw, jh) = (img.width(), img.height());
+                        let mut preview = vec![0u8; samples.len()];
+                        for (source, target) in samples
+                            .chunks_exact_mut(4)
+                            .zip(preview.chunks_exact_mut(4))
+                        {
+                            if inverted {
+                                for channel in source.iter_mut() {
+                                    *channel = 255 - *channel;
+                                }
+                            }
+                            let cmyk = [
+                                source[0] as f32 / 255.0,
+                                source[1] as f32 / 255.0,
+                                source[2] as f32 / 255.0,
+                                source[3] as f32 / 255.0,
+                            ];
+                            let rgb = if let Some(lut) = &self.cmyk_lut {
+                                lut.eval(cmyk)
+                            } else {
+                                let [c, m, y, k] = cmyk;
+                                [
+                                    (1.0 - c) * (1.0 - k),
+                                    (1.0 - m) * (1.0 - k),
+                                    (1.0 - y) * (1.0 - k),
+                                ]
+                            };
+                            target[0] = (rgb[0].clamp(0.0, 1.0) * 255.0).round() as u8;
+                            target[1] = (rgb[1].clamp(0.0, 1.0) * 255.0).round() as u8;
+                            target[2] = (rgb[2].clamp(0.0, 1.0) * 255.0).round() as u8;
+                            target[3] = 255;
                         }
+                        let jf = if jw == w && jh == h {
+                            f
+                        } else {
+                            shrink_factor(jw, jh, self.max_pixels)
+                        };
+                        if jf == 1 && jw == ow && jh == oh {
+                            let len = (jw as usize)
+                                .checked_mul(jh as usize)
+                                .and_then(|pixels| pixels.checked_mul(4));
+                            let mut planes = Vec::new();
+                            if let Some(len) =
+                                len.filter(|len| planes.try_reserve_exact(*len).is_ok())
+                            {
+                                planes.resize(len, 0);
+                                let plane = len / 4;
+                                for (pixel, sample) in samples.chunks_exact(4).enumerate() {
+                                    for channel in 0..4 {
+                                        planes[channel * plane + pixel] = sample[channel];
+                                    }
+                                }
+                                cmyk_planes = Some(planes);
+                            } else {
+                                self.warn("CMYK JPEG ink channels not retained: not enough memory");
+                            }
+                        }
+                        rgba = preview;
+                    } else {
+                        let rgb = img.to_rgba8();
+                        rgba = rgb.into_raw();
                     }
                     if let ColorSpace::Separation(_) = cs {
                         // Grey samples are tints: 255 is full ink.
@@ -2764,7 +2907,7 @@ impl<'a> Importer<'a> {
                         };
                     rgba = rgba_j;
                     if jw != ow || jh != oh {
-                        return Some((rgba, jw, jh));
+                        return Some((rgba, jw, jh, None));
                     }
                 }
             }
@@ -2817,7 +2960,7 @@ impl<'a> Importer<'a> {
                         .collect(),
                     _ => Vec::new(),
                 };
-                for _ in 0..h {
+                for y in 0..h {
                     if source.read_exact(&mut row).is_err() {
                         self.warn("image data shorter than its size; skipped");
                         return None;
@@ -2845,15 +2988,26 @@ impl<'a> Importer<'a> {
                         }
                     }
                     let mut bits = BitReader::new(&row);
-                    for _ in 0..w {
+                    for x in 0..w {
                         let mut comps = [0f32; 4];
+                        let mut raw_comps = [0u32; 4];
                         let mut raw0 = 0u32;
                         for (ci, c) in comps.iter_mut().enumerate().take(ncomp.min(4)) {
                             let v = bits.read(bpc);
+                            raw_comps[ci] = v;
                             if ci == 0 {
                                 raw0 = v;
                             }
                             *c = v as f32 / max;
+                        }
+                        if let Some(planes) = cmyk_planes.as_mut() {
+                            let at = (y as usize) * (w as usize) + x as usize;
+                            let plane = (w as usize) * (h as usize);
+                            for ci in 0..4 {
+                                let sample = raw_comps[ci] as u8;
+                                planes[ci * plane + at] =
+                                    if inverted { 255 - sample } else { sample };
+                            }
                         }
                         for _ in 4..ncomp {
                             bits.read(bpc);
@@ -2879,21 +3033,31 @@ impl<'a> Importer<'a> {
                             match cs {
                                 ColorSpace::Rgb => (to8(comps[0]), to8(comps[1]), to8(comps[2])),
                                 ColorSpace::Cmyk => {
-                                    let (c, m, yy, k) = if inverted {
-                                        (
+                                    let cmyk = if inverted {
+                                        [
                                             1.0 - comps[0],
                                             1.0 - comps[1],
                                             1.0 - comps[2],
                                             1.0 - comps[3],
+                                        ]
+                                    } else {
+                                        [comps[0], comps[1], comps[2], comps[3]]
+                                    };
+                                    if let Some(lut) = &self.cmyk_lut {
+                                        let rgb = lut.eval(cmyk);
+                                        (
+                                            to8(rgb[0]),
+                                            to8(rgb[1]),
+                                            to8(rgb[2]),
                                         )
                                     } else {
-                                        (comps[0], comps[1], comps[2], comps[3])
-                                    };
-                                    (
-                                        to8((1.0 - c) * (1.0 - k)),
-                                        to8((1.0 - m) * (1.0 - k)),
-                                        to8((1.0 - yy) * (1.0 - k)),
-                                    )
+                                        let [c, m, yy, k] = cmyk;
+                                        (
+                                            to8((1.0 - c) * (1.0 - k)),
+                                            to8((1.0 - m) * (1.0 - k)),
+                                            to8((1.0 - yy) * (1.0 - k)),
+                                        )
+                                    }
                                 }
                                 ColorSpace::DeviceN(_) => {
                                     let n = cs.components();
@@ -2929,7 +3093,7 @@ impl<'a> Importer<'a> {
                 px[3] = a;
             }
         }
-        Some((rgba, ow, oh))
+        Some((rgba, ow, oh, cmyk_planes))
     }
 
     /// An SMask as 8-bit alpha, resampled to `w` x `h` (nearest).
@@ -2937,7 +3101,7 @@ impl<'a> Importer<'a> {
         let was = std::mem::replace(&mut self.in_mask, true);
         let decoded = self.decode_pixels(sm);
         self.in_mask = was;
-        let (px, sw, sh) = decoded?;
+        let (px, sw, sh, _) = decoded?;
         let mut out = Vec::with_capacity((w * h) as usize);
         for y in 0..h {
             let sy = (y as u64 * sh as u64 / h as u64) as usize;
@@ -4290,6 +4454,19 @@ fn tracedraw_render_png(w: u32, h: u32, rgba: &[u8]) -> Vec<u8> {
     }
 }
 
+/// Encode the four stacked CMYK planes as one 8-bit greyscale PNG.
+fn tracedraw_render_gray_png(w: u32, h: u32, gray: &[u8]) -> Vec<u8> {
+    use image::ImageEncoder;
+    let mut out = Vec::new();
+    let _ = image::codecs::png::PngEncoder::new(&mut out).write_image(
+        gray,
+        w,
+        h,
+        image::ExtendedColorType::L8,
+    );
+    out
+}
+
 /// MSB-first bit reader for packed image samples.
 struct BitReader<'a> {
     data: &'a [u8],
@@ -5286,6 +5463,93 @@ mod tests {
         ];
         objs.extend(extra.iter().cloned());
         pdf(&objs)
+    }
+
+    #[test]
+    fn device_cmyk_image_keeps_its_original_ink_planes() {
+        let image_data = String::from_utf8(vec![10, 20, 30, 40]).expect("sample bytes");
+        let image = stream(
+            "/Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceCMYK /BitsPerComponent 8",
+            &image_data,
+        );
+        let bytes = one_page(
+            "q /Im0 Do Q",
+            "<< /XObject << /Im0 5 0 R >> >>",
+            &[image],
+        );
+        let mut ids = IdSource::default();
+        let imp = parse(&bytes, &mut ids).expect("parse");
+        let shape = imp.pages[0].shapes.first().expect("bitmap");
+        assert!(shape.cmyk_bitmap);
+        let inks = shape.picture_inks.as_deref().expect("retained CMYK");
+        assert_eq!(
+            inks.inks,
+            vec![
+                tracedraw_core::picture_inks::PictureInk::Process(0),
+                tracedraw_core::picture_inks::PictureInk::Process(1),
+                tracedraw_core::picture_inks::PictureInk::Process(2),
+                tracedraw_core::picture_inks::PictureInk::Process(3),
+            ]
+        );
+        assert!(matches!(&shape.kind, ShapeKind::Bitmap { .. }));
+        let planes = image::load_from_memory(inks.png.as_ref())
+            .expect("plane PNG")
+            .to_luma8()
+            .into_raw();
+        assert_eq!(planes, vec![10, 20, 30, 40]);
+        assert!(inks.fits(match &shape.kind {
+            ShapeKind::Bitmap { png, .. } => png,
+            _ => unreachable!(),
+        }));
+    }
+
+    #[test]
+    fn iccbased_cmyk_profile_is_retained_and_used_for_preview() {
+        let icc = tracedraw_core::icc::test_profiles::lut16_cmyk_profile();
+        let hex: String = icc.iter().map(|b| format!("{b:02X}")).collect();
+        let profile = stream("/N 4 /Filter /ASCIIHexDecode", &hex);
+        let image_data = String::from_utf8(vec![10, 20, 30, 40]).expect("sample bytes");
+        let image = stream(
+            "/Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace [/ICCBased 6 0 R] /BitsPerComponent 8",
+            &image_data,
+        );
+        let bytes = one_page(
+            "q /Im0 Do Q",
+            "<< /XObject << /Im0 5 0 R >> >>",
+            &[image, profile],
+        );
+        let mut ids = IdSource::default();
+        let imported = parse(&bytes, &mut ids).expect("parse");
+        let retained = imported.cmyk_profile.expect("embedded CMYK profile");
+        assert_eq!(retained.data.as_slice(), icc.as_slice());
+        assert!(retained.name.len() > 0);
+        let shape = imported.pages[0].shapes.first().expect("bitmap");
+        assert!(shape.cmyk_bitmap);
+        let ShapeKind::Bitmap { png, .. } = &shape.kind else {
+            panic!("bitmap shape");
+        };
+        let preview = image::load_from_memory(png)
+            .expect("RGB preview")
+            .to_rgba8()
+            .into_raw();
+        let lut = cmyk_lut_from_profile(&icc).expect("CMYK ICC transform");
+        let expected = lut.eval([
+            10.0 / 255.0,
+            20.0 / 255.0,
+            30.0 / 255.0,
+            40.0 / 255.0,
+        ]);
+        for (actual, expected) in preview[..3].iter().zip(expected) {
+            assert_eq!(*actual, (expected * 255.0).round() as u8);
+        }
+        assert!(shape.picture_inks.as_deref().is_some_and(|inks| {
+            matches!(inks.inks.as_slice(), [
+                tracedraw_core::picture_inks::PictureInk::Process(0),
+                tracedraw_core::picture_inks::PictureInk::Process(1),
+                tracedraw_core::picture_inks::PictureInk::Process(2),
+                tracedraw_core::picture_inks::PictureInk::Process(3)
+            ])
+        }));
     }
 
     #[test]

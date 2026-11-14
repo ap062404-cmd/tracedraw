@@ -812,6 +812,9 @@ fn apply(app: &mut App, st: &ColorManagementState) {
         md.rendering_intent = st.doc_intent.clone();
         app.run(tracedraw_core::Command::SetMetadata { metadata: md });
     }
+    // Rebuild after document profiles and its rendering intent have been
+    // applied; the ICC engine used by Proof Colors must reflect this tab.
+    app.apply_color_settings();
 }
 
 #[cfg(test)]

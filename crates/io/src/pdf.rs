@@ -141,6 +141,33 @@ fn resample(data: &[u8], channels: u8, w: u32, h: u32, nw: u32, nh: u32) -> Opti
             FilterType::Triangle,
         )
         .into_raw(),
+        4 => {
+            // CMYK channels are four independent inks, not RGBA (the
+            // fourth channel is black, not transparency). Resize each
+            // plane as greyscale, then interleave the samples again.
+            let mut planes = Vec::with_capacity((nw as usize) * (nh as usize) * 4);
+            let mut resized = Vec::with_capacity((nw as usize) * (nh as usize) * 4);
+            for channel in 0..4 {
+                planes.clear();
+                planes.extend(data.chunks_exact(4).map(|px| px[channel]));
+                let plane = resize(
+                    &image::GrayImage::from_raw(w, h, planes.clone())?,
+                    nw,
+                    nh,
+                    FilterType::Triangle,
+                )
+                .into_raw();
+                resized.push(plane);
+            }
+            let pixels = (nw as usize) * (nh as usize);
+            let mut out = Vec::with_capacity(pixels * 4);
+            for pixel in 0..pixels {
+                for channel in 0..4 {
+                    out.push(resized[channel][pixel]);
+                }
+            }
+            out
+        },
         _ => return None,
     };
     Some(out)
@@ -232,6 +259,10 @@ struct Pdf {
     bad_fonts: Vec<(usize, u32, fonts::SlotKind)>,
     report: PdfReport,
     images: PdfImages,
+    /// The CMYK profile associated with bitmap ink samples, shared by
+    /// ICCBased image colour spaces and the PDF/X output intent.
+    cmyk_profile: Option<Vec<u8>>,
+    cmyk_profile_ref: Option<usize>,
 }
 
 impl Pdf {
@@ -287,6 +318,23 @@ impl Pdf {
         } else {
             "/DeviceRGB"
         }
+    }
+
+    /// Embed the document's CMYK profile once and reuse its ICC stream.
+    fn icc_profile_ref(&mut self) -> Option<usize> {
+        if self.cmyk_profile_ref.is_none() {
+            let profile = self.cmyk_profile.as_deref()?.to_vec();
+            let id = self.stream("/N 4", &profile);
+            self.cmyk_profile_ref = Some(id);
+        }
+        self.cmyk_profile_ref
+    }
+
+    /// ICCBased CMYK when the drawing carries a profile, otherwise DeviceCMYK.
+    fn cmyk_color_space(&mut self) -> String {
+        self.icc_profile_ref()
+            .map(|id| format!("[/ICCBased {id} 0 R]"))
+            .unwrap_or_else(|| "/DeviceCMYK".to_string())
     }
 
     fn stream(&mut self, dict: &str, data: &[u8]) -> usize {
@@ -1194,10 +1242,44 @@ impl PageWriter<'_> {
         {
             if let Some((mut rgb, alpha)) = decode_png_rgb_alpha(png) {
                 let name = format!("Im{}", self.images.len());
+                // Original CMYK planes are usable only while their fingerprint
+                // still matches the preview pixels and all four process inks
+                // are present in the expected order.
+                let mut cmyk = shape
+                    .picture_inks
+                    .as_deref()
+                    .filter(|inks| inks.fits(png))
+                    .filter(|inks| {
+                        inks.inks.as_slice()
+                            == [
+                                tracedraw_core::picture_inks::PictureInk::Process(0),
+                                tracedraw_core::picture_inks::PictureInk::Process(1),
+                                tracedraw_core::picture_inks::PictureInk::Process(2),
+                                tracedraw_core::picture_inks::PictureInk::Process(3),
+                            ]
+                    })
+                    .and_then(|inks| image::load_from_memory(inks.png.as_ref()).ok())
+                    .filter(|planes| {
+                        planes.width() == *width_px
+                            && planes.height() == height_px.saturating_mul(4)
+                    })
+                    .map(|planes| {
+                        let planes = planes.to_luma8().into_raw();
+                        let plane = (*width_px as usize) * (*height_px as usize);
+                        let mut interleaved = vec![0u8; plane * 4];
+                        for pixel in 0..plane {
+                            for channel in 0..4 {
+                                interleaved[pixel * 4 + channel] =
+                                    planes[channel * plane + pixel];
+                            }
+                        }
+                        interleaved
+                    });
                 let alpha = if self.pdf.allow_alpha {
                     alpha
                 } else {
-                    // No soft masks: composite over white.
+                    // No soft masks: composite over white. The same
+                    // coverage is applied to the original ink amounts.
                     if let Some(a) = &alpha {
                         for (px, a) in rgb.chunks_exact_mut(3).zip(a.iter()) {
                             let a = *a as u32;
@@ -1205,13 +1287,27 @@ impl PageWriter<'_> {
                                 *c = ((*c as u32 * a + 255 * (255 - a)) / 255) as u8;
                             }
                         }
+                        if let Some(inks) = cmyk.as_mut() {
+                            for (px, a) in inks.chunks_exact_mut(4).zip(a.iter()) {
+                                for c in px {
+                                    *c = ((*c as u16 * *a as u16 + 127) / 255) as u8;
+                                }
+                            }
+                        }
                     }
                     None
                 };
                 let opts = self.pdf.images;
-                let kind = image_kind(&rgb);
+                let kind = if cmyk.is_some() {
+                    ImageKind::Color
+                } else {
+                    image_kind(&rgb)
+                };
+                // Keep retained CMYK data; otherwise use the RGB preview.
                 // Gray and black-and-white pictures go in with one channel.
-                let (mut data, mut channels): (Vec<u8>, u8) = if kind == ImageKind::Color {
+                let (mut data, mut channels): (Vec<u8>, u8) = if let Some(inks) = cmyk {
+                    (inks, 4)
+                } else if kind == ImageKind::Color {
                     (rgb, 3)
                 } else {
                     (rgb.chunks_exact(3).map(|p| p[0]).collect(), 1)
@@ -1264,9 +1360,11 @@ impl PageWriter<'_> {
                     .map(|id| format!(" /SMask {id} 0 R"))
                     .unwrap_or_default();
                 let cs = if channels == 1 {
-                    "/DeviceGray"
+                    "/DeviceGray".to_string()
+                } else if channels == 4 {
+                    self.pdf.cmyk_color_space()
                 } else {
-                    self.pdf.color_space()
+                    self.pdf.color_space().to_string()
                 };
                 if channels == 3 && self.pdf.cmyk_only {
                     data = rgb_to_cmyk_bytes(&data);
@@ -2184,6 +2282,9 @@ pub fn document_to_pdf_with(doc: &Document, opts: &PdfOptions) -> Vec<u8> {
 pub fn document_to_pdf_report(doc: &Document, opts: &PdfOptions) -> (Vec<u8>, PdfReport) {
     let doc = &*crate::for_export(doc, None);
     let std_ = opts.standard;
+    let cmyk_profile = output_profile(opts, doc)
+        .filter(|icc| icc_channels(icc) == 4)
+        .map(|icc| icc.to_vec());
     let mut pdf = Pdf {
         objects: Vec::new(),
         spot_spaces: std::collections::HashMap::new(),
@@ -2194,6 +2295,8 @@ pub fn document_to_pdf_report(doc: &Document, opts: &PdfOptions) -> (Vec<u8>, Pd
         bad_fonts: Vec::new(),
         report: PdfReport::default(),
         images: opts.images,
+        cmyk_profile,
+        cmyk_profile_ref: None,
     };
     // PDF/X wants every font in the file.
     let text_mode = (!opts.text.as_curves).then_some(TextMode {
@@ -2536,10 +2639,13 @@ pub fn document_to_pdf_report(doc: &Document, opts: &PdfOptions) -> (Vec<u8>, Pd
         } else {
             "CGATS TR 001".to_string()
         };
-        let profile_ref = profile.map(|icc| {
-            let n = icc_channels(icc);
-            let id = pdf.stream(&format!("/N {n}"), icc);
-            format!(" /DestOutputProfile {id} 0 R")
+        let profile_ref = profile.and_then(|icc| {
+            let id = if icc_channels(icc) == 4 {
+                pdf.icc_profile_ref()
+            } else {
+                Some(pdf.stream(&format!("/N {}", icc_channels(icc)), icc))
+            }?;
+            Some(format!(" /DestOutputProfile {id} 0 R"))
         });
         let intent = pdf.add_str(format!(
             "<< /Type /OutputIntent /S /GTS_PDFX /OutputConditionIdentifier {} /OutputCondition {} /RegistryName (http://www.color.org) /Info {}{} >>",
@@ -2710,6 +2816,74 @@ mod tests {
     /// it is at first; downsampled to 150 dpi (150 x 150) when asked; JPEG
     /// compressed when asked; a gray picture goes in with one channel; the
     /// page content can stay uncompressed (#550).
+    #[test]
+    fn pdf_export_writes_retained_bitmap_cmyk_samples() {
+        let mut preview = std::io::Cursor::new(Vec::new());
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([138, 122, 107, 255]))
+            .write_to(&mut preview, image::ImageFormat::Png)
+            .expect("preview PNG");
+        let png = preview.into_inner();
+
+        let mut planes = std::io::Cursor::new(Vec::new());
+        image::GrayImage::from_raw(1, 4, vec![10, 20, 30, 40])
+            .expect("four ink planes")
+            .write_to(&mut planes, image::ImageFormat::Png)
+            .expect("planes PNG");
+        let inks = tracedraw_core::picture_inks::PictureInks::cmyk(
+            &png,
+            planes.into_inner().into(),
+        );
+
+        let mut doc = Document::default();
+        let layer = doc.pages[0].layers[0].id;
+        let id = doc.ids_mut().shape();
+        let mut shape = Shape::new(
+            id,
+            ShapeKind::Bitmap {
+                rect: Rect::new(10.0, 10.0, 30.0, 30.0),
+                width_px: 1,
+                height_px: 1,
+                png: png.into(),
+                fx: None,
+            },
+        );
+        shape.cmyk_bitmap = true;
+        shape.picture_inks = Some(Box::new(inks));
+        doc.layer_mut(layer).unwrap().shapes.push(shape);
+
+        let bytes = document_to_pdf(&doc);
+        let parsed = lopdf::Document::load_mem(&bytes).expect("PDF parses");
+        let image = parsed
+            .objects
+            .values()
+            .find_map(|object| match object {
+                lopdf::Object::Stream(stream)
+                    if stream
+                        .dict
+                        .get(b"ColorSpace")
+                        .and_then(lopdf::Object::as_name)
+                        .map_or(false, |name| name == b"DeviceCMYK") =>
+                {
+                    Some(stream)
+                }
+                _ => None,
+            })
+            .expect("CMYK image XObject");
+        assert_eq!(
+            image.decompressed_content().expect("CMYK samples"),
+            vec![10, 20, 30, 40]
+        );
+
+        // A regular PDF also carries the document profile in the bitmap's
+        // ICCBased colour space, not only as a PDF/X output intent.
+        let icc = tracedraw_core::icc::test_profiles::lut16_cmyk_profile();
+        doc.cmyk_profile = Some(tracedraw_core::DocumentProfile::new("press profile", icc));
+        let profiled = document_to_pdf(&doc);
+        let profiled = String::from_utf8_lossy(&profiled);
+        assert!(profiled.contains("/ColorSpace [/ICCBased"));
+        assert!(profiled.contains("/N 4"));
+    }
+
     #[test]
     fn pictures_are_downsampled_and_compressed_as_asked() {
         let picture = |gray: bool| {
@@ -4773,6 +4947,8 @@ mod text_tests {
             bad_fonts: Vec::new(),
             report: PdfReport::default(),
             images: PdfImages::default(),
+            cmyk_profile: None,
+            cmyk_profile_ref: None,
         };
         let mut w = PageWriter {
             content: String::new(),

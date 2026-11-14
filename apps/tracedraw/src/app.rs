@@ -3438,16 +3438,15 @@ impl App {
         use tracedraw_core::color::{engine, IccEngine};
         use tracedraw_core::icc::{Intent, Profile};
         let c = &self.settings.color;
-        let load = |path: &str| -> Option<Profile> {
+        let load = |path: &str, expected: tracedraw_core::icc::ColorSpace| -> Option<Profile> {
             if path.is_empty() {
                 return None;
             }
-            match crate::files::read(std::path::Path::new(path)).map_err(|e| e.to_string()) {
-                Ok(bytes) => Profile::parse(&bytes).map_err(|e| e.to_string()).ok(),
-                Err(_) => None,
-            }
+            let bytes = crate::files::read(std::path::Path::new(path)).ok()?;
+            let profile = Profile::parse(&bytes).ok()?;
+            profile_matches_space(&profile, expected).then_some(profile)
         };
-        let rgb = load(&c.rgb_profile_path);
+        let rgb = load(&c.rgb_profile_path, tracedraw_core::icc::ColorSpace::Rgb);
         // A drawing that carries its CMYK profile (a `.cdr` file's) shows
         // its CMYK colours through it; others through the settings' one.
         let carried = self.doc().cmyk_profile.clone();
@@ -3455,8 +3454,14 @@ impl App {
         // drawing's own one.
         let cmyk = carried_cmyk_profile(self.doc())
             .filter(|_| c.open_cmyk == 0)
-            .or_else(|| load(&c.cmyk_profile_path));
-        let intent = Intent::from_name(&c.intent).unwrap_or_default();
+            .or_else(|| load(&c.cmyk_profile_path, tracedraw_core::icc::ColorSpace::Cmyk));
+        // A document's rendering intent overrides the default one. This
+        // keeps Proof Colors and screen conversions in step with the
+        // intent chosen on the Color Management dialog's Document tab.
+        let intent = effective_rendering_intent(
+            &self.doc().metadata.rendering_intent,
+            &c.intent,
+        );
         let bpc = c.black_point_compensation;
         self.color_profile_key = carried.map(|p| std::sync::Arc::as_ptr(&p.data) as usize);
         tracedraw_core::color::engine::set_map_gray_to_black(c.map_gray_to_black);
@@ -3480,7 +3485,14 @@ impl App {
             .cmyk_profile
             .as_ref()
             .map(|p| std::sync::Arc::as_ptr(&p.data) as usize);
-        if key != self.color_profile_key {
+        let c = &self.settings.color;
+        let expected_intent = effective_rendering_intent(
+            &self.doc().metadata.rendering_intent,
+            &c.intent,
+        );
+        let intent_changed = tracedraw_core::color::engine::icc()
+            .is_some_and(|engine| engine.intent() != expected_intent);
+        if key != self.color_profile_key || intent_changed {
             self.apply_color_settings();
         }
     }
@@ -3509,6 +3521,7 @@ impl App {
                 match crate::files::read(&path)
                     .ok()
                     .and_then(|b| tracedraw_core::icc::Profile::parse(&b).ok())
+                    .filter(|p| profile_matches_space(p, tracedraw_core::icc::ColorSpace::Gray))
                 {
                     Some(p) => {
                         let name = p
@@ -3546,6 +3559,20 @@ impl App {
         };
         match tracedraw_core::icc::Profile::parse(&bytes) {
             Ok(p) => {
+                let expected = if cmyk {
+                    tracedraw_core::icc::ColorSpace::Cmyk
+                } else {
+                    tracedraw_core::icc::ColorSpace::Rgb
+                };
+                if !profile_matches_space(&p, expected) {
+                    let expected_name = if cmyk { "CMYK" } else { "RGB" };
+                    let actual_name = format!("{:?}", p.color_space());
+                    self.status = crate::i18n::trf(
+                        "status.icc_failed",
+                        &[("e", &format!("Expected {expected_name} profile, found {actual_name}"))],
+                    );
+                    return;
+                }
                 let name = p
                     .description()
                     .map(|s| s.to_string())
@@ -7196,6 +7223,7 @@ impl App {
                 let layer_name = doc2.pages[0].layers[0].name.clone();
                 doc2.pages.clear();
                 doc2.inks = std::mem::take(&mut imported.inks);
+                doc2.cmyk_profile = imported.cmyk_profile.take();
                 let mut ids = tracedraw_core::id::IdSource::default();
                 for (i, p) in imported.pages.into_iter().enumerate() {
                     let pid = ids.page();
@@ -9428,6 +9456,27 @@ pub(crate) fn carried_cmyk_profile(
     (profile.color_space() == tracedraw_core::icc::ColorSpace::Cmyk).then_some(profile)
 }
 
+/// Whether an ICC profile belongs in the requested working-space slot.
+fn profile_matches_space(
+    profile: &tracedraw_core::icc::Profile,
+    expected: tracedraw_core::icc::ColorSpace,
+) -> bool {
+    profile.color_space() == expected
+}
+
+/// The document's intent overrides the application default when set.
+fn effective_rendering_intent(
+    document_intent: &str,
+    default_intent: &str,
+) -> tracedraw_core::icc::Intent {
+    let name = if document_intent.trim().is_empty() {
+        default_intent
+    } else {
+        document_intent
+    };
+    tracedraw_core::icc::Intent::from_name(name).unwrap_or_default()
+}
+
 /// The pictures a version 16+ `.cdr` file stores with the drawing: a
 /// thumbnail and each page, 256 pixels on the longer side.
 pub(crate) fn cdr_previews(doc: &tracedraw_core::Document) -> tracedraw_cdr::write::Previews {
@@ -9655,6 +9704,40 @@ pub(crate) fn repeated_transform(t: Affine, before: Rect, now: Rect) -> Affine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn document_rendering_intent_overrides_default_but_empty_uses_default() {
+        use tracedraw_core::icc::Intent;
+        assert_eq!(
+            effective_rendering_intent("Perceptual", "Relative colorimetric"),
+            Intent::Perceptual
+        );
+        assert_eq!(
+            effective_rendering_intent("", "Saturation"),
+            Intent::Saturation
+        );
+        assert_eq!(
+            effective_rendering_intent("   ", "Absolute colorimetric"),
+            Intent::AbsoluteColorimetric
+        );
+    }
+
+    #[test]
+    fn icc_profiles_are_only_accepted_in_matching_colour_slots() {
+        let rgb = tracedraw_core::icc::Profile::srgb();
+        assert!(profile_matches_space(
+            &rgb,
+            tracedraw_core::icc::ColorSpace::Rgb
+        ));
+        assert!(!profile_matches_space(
+            &rgb,
+            tracedraw_core::icc::ColorSpace::Cmyk
+        ));
+        assert!(!profile_matches_space(
+            &rgb,
+            tracedraw_core::icc::ColorSpace::Gray
+        ));
+    }
 
     /// A PDF's spot inks come with it: opened, the drawing has them;
     /// imported, an ink of a name the drawing has is that ink and the

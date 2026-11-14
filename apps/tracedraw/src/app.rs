@@ -3444,7 +3444,7 @@ impl App {
             }
             let bytes = crate::files::read(std::path::Path::new(path)).ok()?;
             let profile = Profile::parse(&bytes).ok()?;
-            (profile.color_space() == expected).then_some(profile)
+            profile_matches_space(&profile, expected).then_some(profile)
         };
         let rgb = load(&c.rgb_profile_path, tracedraw_core::icc::ColorSpace::Rgb);
         // A drawing that carries its CMYK profile (a `.cdr` file's) shows
@@ -3508,7 +3508,7 @@ impl App {
                 match crate::files::read(&path)
                     .ok()
                     .and_then(|b| tracedraw_core::icc::Profile::parse(&b).ok())
-                    .filter(|p| p.color_space() == tracedraw_core::icc::ColorSpace::Gray)
+                    .filter(|p| profile_matches_space(p, tracedraw_core::icc::ColorSpace::Gray))
                 {
                     Some(p) => {
                         let name = p
@@ -3551,7 +3551,7 @@ impl App {
                 } else {
                     tracedraw_core::icc::ColorSpace::Rgb
                 };
-                if p.color_space() != expected {
+                if !profile_matches_space(&p, expected) {
                     let expected_name = if cmyk { "CMYK" } else { "RGB" };
                     let actual_name = format!("{:?}", p.color_space());
                     self.status = crate::i18n::trf(
@@ -9443,6 +9443,14 @@ pub(crate) fn carried_cmyk_profile(
     (profile.color_space() == tracedraw_core::icc::ColorSpace::Cmyk).then_some(profile)
 }
 
+/// Whether an ICC profile belongs in the requested working-space slot.
+fn profile_matches_space(
+    profile: &tracedraw_core::icc::Profile,
+    expected: tracedraw_core::icc::ColorSpace,
+) -> bool {
+    profile.color_space() == expected
+}
+
 /// The pictures a version 16+ `.cdr` file stores with the drawing: a
 /// thumbnail and each page, 256 pixels on the longer side.
 pub(crate) fn cdr_previews(doc: &tracedraw_core::Document) -> tracedraw_cdr::write::Previews {
@@ -9670,6 +9678,23 @@ pub(crate) fn repeated_transform(t: Affine, before: Rect, now: Rect) -> Affine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn icc_profiles_are_only_accepted_in_matching_colour_slots() {
+        let rgb = tracedraw_core::icc::Profile::srgb();
+        assert!(profile_matches_space(
+            &rgb,
+            tracedraw_core::icc::ColorSpace::Rgb
+        ));
+        assert!(!profile_matches_space(
+            &rgb,
+            tracedraw_core::icc::ColorSpace::Cmyk
+        ));
+        assert!(!profile_matches_space(
+            &rgb,
+            tracedraw_core::icc::ColorSpace::Gray
+        ));
+    }
 
     /// A PDF's spot inks come with it: opened, the drawing has them;
     /// imported, an ink of a name the drawing has is that ink and the

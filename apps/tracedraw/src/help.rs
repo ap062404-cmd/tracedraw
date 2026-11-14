@@ -52,6 +52,7 @@ pub fn dialog_topic(d: &Dialog, options: OptionsPage) -> &'static str {
         Dialog::BitmapDuotone(_) => "bitmaps/color-modes#duotone",
         Dialog::BitmapPaletted(_) => "bitmaps/color-modes#paletted",
         Dialog::RemoveBackground(_) => "bitmaps/remove-background",
+        Dialog::Imposition(_) => "printing/print",
         Dialog::NodeAlign { .. } => "lines-shapes/shape-tool#align-nodes",
         Dialog::RenamePage { .. } => "pages-layout/pages#rename-page",
         Dialog::GoToPage { .. } => "pages-layout/pages#go-to-page",

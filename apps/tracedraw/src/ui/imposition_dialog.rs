@@ -31,6 +31,8 @@ impl DesignEntry {
 pub struct State {
     pub designs: Vec<DesignEntry>,
     pub next_design_id: u64,
+    /// Design row that receives the next Replace operation.
+    pub selected_design_id: Option<u64>,
     pub sheet_width_mm: f64,
     pub sheet_height_mm: f64,
     pub margin_x_mm: f64,
@@ -65,6 +67,7 @@ impl State {
         if designs.is_empty() { return None; }
         let next_design_id = designs.iter().map(|design| design.id).max().unwrap_or(0).saturating_add(1);
         Some(Self {
+            selected_design_id: designs.first().map(|design| design.id),
             designs,
             next_design_id,
             sheet_width_mm: 320.0,
@@ -105,24 +108,18 @@ impl State {
         added
     }
 
-    fn replace_selection(&mut self, shapes: Vec<Shape>) -> bool {
-        let Some(mut replacement) = Self::from_selection(shapes) else {
+    fn replace_selection(&mut self, design_id: u64, shapes: Vec<Shape>) -> bool {
+        let Some(index) = self.designs.iter().position(|design| design.id == design_id) else {
             return false;
         };
-        replacement.sheet_width_mm = self.sheet_width_mm;
-        replacement.sheet_height_mm = self.sheet_height_mm;
-        replacement.margin_x_mm = self.margin_x_mm;
-        replacement.margin_y_mm = self.margin_y_mm;
-        replacement.gutter_x_mm = self.gutter_x_mm;
-        replacement.gutter_y_mm = self.gutter_y_mm;
-        replacement.bleed_mm = self.bleed_mm;
-        replacement.crop_marks = self.crop_marks;
-        replacement.crop_mark_length_mm = self.crop_mark_length_mm;
-        replacement.crop_mark_offset_mm = self.crop_mark_offset_mm;
-        replacement.crop_mark_width_mm = self.crop_mark_width_mm;
-        replacement.shape_nesting = self.shape_nesting;
-        replacement.saving_sheet_preset = self.saving_sheet_preset.take();
-        *self = replacement;
+        let current = &self.designs[index];
+        let copies = current.copies;
+        let allow_rotation = current.allow_rotation;
+        let Some(mut replacement) = DesignEntry::from_shapes(design_id, shapes, copies) else {
+            return false;
+        };
+        replacement.allow_rotation = allow_rotation;
+        self.designs[index] = replacement;
         true
     }
 }
@@ -248,11 +245,15 @@ pub fn dialog(app: &mut App, ctx: &Context, state: &mut State, close: &mut bool)
                     ui.separator();
 
                     ui.heading("Designs");
+                    let selected_design_id = state.selected_design_id;
+                    let mut clicked_design = None;
                     for (index, design) in state.designs.iter_mut().enumerate() {
                         ui.push_id(design.id, |ui| {
                             ui.group(|ui| {
                                 ui.horizontal(|ui| {
-                                    ui.strong(format!("Design {}", index + 1));
+                                    if ui.selectable_label(selected_design_id == Some(design.id), format!("Design {}", index + 1)).clicked() {
+                                        clicked_design = Some(design.id);
+                                    }
                                     ui.label(format!("{:.1} × {:.1} mm", design.width_mm, design.height_mm));
                                     if ui.small_button("Remove").clicked() {
                                         remove_design = Some(design.id);
@@ -269,17 +270,23 @@ pub fn dialog(app: &mut App, ctx: &Context, state: &mut State, close: &mut bool)
                     if let Some(id) = remove_design {
                         if state.designs.len() > 1 {
                             state.designs.retain(|design| design.id != id);
+                            if state.selected_design_id == Some(id) {
+                                state.selected_design_id = state.designs.first().map(|design| design.id);
+                            }
                         }
+                    }
+                    if let Some(id) = clicked_design {
+                        state.selected_design_id = Some(id);
                     }
                     ui.horizontal(|ui| {
                         if ui.button("+ Add selected design(s)").clicked() {
                             add_selected = true;
                         }
-                        if ui.button("Replace with current selection").clicked() {
+                        if ui.add_enabled(state.selected_design_id.is_some(), egui::Button::new("Replace selected design")).clicked() {
                             replace_selected = true;
                         }
                     });
-                    ui.small("Add appends the current canvas selection; Replace swaps the design list without closing this window.");
+                    ui.small("Add appends selected canvas objects as designs. Replace updates only the highlighted design row.");
 
                     ui.separator();
                     ui.heading("Sheet settings");
@@ -522,8 +529,10 @@ pub fn dialog(app: &mut App, ctx: &Context, state: &mut State, close: &mut bool)
 
     if replace_selected {
         let selected = app.selected_shapes();
-        if !state.replace_selection(selected) {
-            app.status = "Select at least one valid object or group on the canvas to replace the designs.".into();
+        let replaced = state.selected_design_id
+            .is_some_and(|design_id| state.replace_selection(design_id, selected));
+        if !replaced {
+            app.status = "Select a design row, then select valid canvas objects to replace that design.".into();
         } else {
             state.cached_plan = None;
             state.cached_capacity_plan = None;

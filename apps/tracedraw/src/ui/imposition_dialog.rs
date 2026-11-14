@@ -625,23 +625,54 @@ pub fn dialog(app: &mut App, ctx: &Context, state: &mut State, close: &mut bool)
 mod tests {
     use super::*;
 
+    fn rect_shape(source: &mut tracedraw_core::Document, x: f64, y: f64, w: f64, h: f64) -> Shape {
+        Shape::new(
+            source.ids_mut().shape(),
+            tracedraw_core::ShapeKind::Rect {
+                rect: tracedraw_core::Rect::new(x, y, w, h),
+                radius: 0.0,
+                corners: None,
+            },
+        )
+    }
+
     #[test]
     fn selected_designs_start_with_one_copy() {
         let mut source = tracedraw_core::Document::new(
             "Selection",
             tracedraw_core::Size::new(100.0, 100.0),
         );
-        let shape = tracedraw_core::Shape::new(
-            source.ids_mut().shape(),
-            tracedraw_core::ShapeKind::Rect {
-                rect: tracedraw_core::Rect::new(0.0, 0.0, 40.0, 20.0),
-                radius: 0.0,
-                corners: None,
-            },
-        );
+        let shape = rect_shape(&mut source, 0.0, 0.0, 40.0, 20.0);
 
         let state = State::from_selection(vec![shape]).expect("valid selected artwork");
         assert_eq!(state.designs.len(), 1);
         assert_eq!(state.designs[0].copies, 1);
+        assert_eq!(state.selected_design_id, Some(state.designs[0].id));
+    }
+
+    #[test]
+    fn replace_updates_only_the_highlighted_design_and_keeps_its_quantity() {
+        let mut source = tracedraw_core::Document::new(
+            "Selection",
+            tracedraw_core::Size::new(200.0, 100.0),
+        );
+        let first = rect_shape(&mut source, 0.0, 0.0, 40.0, 20.0);
+        let second = rect_shape(&mut source, 60.0, 0.0, 30.0, 15.0);
+        let replacement = rect_shape(&mut source, 100.0, 0.0, 50.0, 25.0);
+        let mut state = State::from_selection(vec![first, second]).expect("two designs");
+
+        let first_id = state.designs[0].id;
+        let second_id = state.designs[1].id;
+        state.designs[0].copies = 12;
+        state.designs[0].allow_rotation = true;
+
+        assert!(state.replace_selection(first_id, vec![replacement]));
+        assert_eq!(state.designs.len(), 2);
+        assert_eq!(state.designs[0].id, first_id);
+        assert_eq!(state.designs[0].width_mm, 50.0);
+        assert_eq!(state.designs[0].copies, 12);
+        assert!(state.designs[0].allow_rotation);
+        assert_eq!(state.designs[1].id, second_id);
+        assert_eq!(state.designs[1].width_mm, 30.0);
     }
 }

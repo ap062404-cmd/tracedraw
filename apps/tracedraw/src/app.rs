@@ -3438,16 +3438,15 @@ impl App {
         use tracedraw_core::color::{engine, IccEngine};
         use tracedraw_core::icc::{Intent, Profile};
         let c = &self.settings.color;
-        let load = |path: &str| -> Option<Profile> {
+        let load = |path: &str, expected: tracedraw_core::icc::ColorSpace| -> Option<Profile> {
             if path.is_empty() {
                 return None;
             }
-            match crate::files::read(std::path::Path::new(path)).map_err(|e| e.to_string()) {
-                Ok(bytes) => Profile::parse(&bytes).map_err(|e| e.to_string()).ok(),
-                Err(_) => None,
-            }
+            let bytes = crate::files::read(std::path::Path::new(path)).ok()?;
+            let profile = Profile::parse(&bytes).ok()?;
+            (profile.color_space() == expected).then_some(profile)
         };
-        let rgb = load(&c.rgb_profile_path);
+        let rgb = load(&c.rgb_profile_path, tracedraw_core::icc::ColorSpace::Rgb);
         // A drawing that carries its CMYK profile (a `.cdr` file's) shows
         // its CMYK colours through it; others through the settings' one.
         let carried = self.doc().cmyk_profile.clone();
@@ -3455,7 +3454,7 @@ impl App {
         // drawing's own one.
         let cmyk = carried_cmyk_profile(self.doc())
             .filter(|_| c.open_cmyk == 0)
-            .or_else(|| load(&c.cmyk_profile_path));
+            .or_else(|| load(&c.cmyk_profile_path, tracedraw_core::icc::ColorSpace::Cmyk));
         let intent = Intent::from_name(&c.intent).unwrap_or_default();
         let bpc = c.black_point_compensation;
         self.color_profile_key = carried.map(|p| std::sync::Arc::as_ptr(&p.data) as usize);
@@ -3509,6 +3508,7 @@ impl App {
                 match crate::files::read(&path)
                     .ok()
                     .and_then(|b| tracedraw_core::icc::Profile::parse(&b).ok())
+                    .filter(|p| p.color_space() == tracedraw_core::icc::ColorSpace::Gray)
                 {
                     Some(p) => {
                         let name = p
@@ -3546,6 +3546,20 @@ impl App {
         };
         match tracedraw_core::icc::Profile::parse(&bytes) {
             Ok(p) => {
+                let expected = if cmyk {
+                    tracedraw_core::icc::ColorSpace::Cmyk
+                } else {
+                    tracedraw_core::icc::ColorSpace::Rgb
+                };
+                if p.color_space() != expected {
+                    let expected_name = if cmyk { "CMYK" } else { "RGB" };
+                    let actual_name = format!("{:?}", p.color_space());
+                    self.status = crate::i18n::trf(
+                        "status.icc_failed",
+                        &[("e", &format!("Expected {expected_name} profile, found {actual_name}"))],
+                    );
+                    return;
+                }
                 let name = p
                     .description()
                     .map(|s| s.to_string())

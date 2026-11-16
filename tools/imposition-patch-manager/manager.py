@@ -110,7 +110,8 @@ def require_root() -> None:
 def status() -> None:
     version, history = installed_version(), load_history()
     installs = history["installs"]
-    managed = any(item.get("version") == version for item in installs) if version else False
+    managed = bool(version and history.get("active_version") == version and
+                   any(item.get("version") == version for item in installs))
     print(f"Paket            : {PACKAGE}")
     print(f"Status           : {'terpasang' if version else 'belum terpasang'}")
     print(f"Versi terpasang  : {version or '-'}")
@@ -140,12 +141,17 @@ def install(deb: Path) -> None:
     if not stored.exists():
         shutil.copy2(deb, stored)
     run(["dpkg", "-i", str(stored)])
-    if not any(item.get("version") == version for item in history["installs"]):
+    existing = next((item for item in history["installs"]
+                     if item.get("version") == version), None)
+    if existing and (existing.get("sha256") != digest or existing.get("file") != str(stored)):
+        raise ManagerError("Metadata versi tersimpan tidak cocok dengan paket ini.")
+    if not existing:
         history["installs"].append({
             "version": version, "sha256": digest, "file": str(stored),
             "installed_at": datetime.now(timezone.utc).isoformat(),
         })
-        save_history(history)
+    history["active_version"] = version
+    save_history(history)
     print(f"Berhasil memasang TraceDraw Imposition {version}.")
 
 def rollback() -> None:
@@ -153,11 +159,16 @@ def rollback() -> None:
     current = installed_version()
     if not current:
         raise ManagerError("TraceDraw Imposition belum terpasang.")
-    installs = load_history()["installs"]
-    previous = next((item for item in reversed(installs)
-                     if item.get("version") != current), None)
-    if not previous:
+    history = load_history()
+    installs = history["installs"]
+    active = history.get("active_version")
+    if active != current:
+        raise ManagerError("Versi terpasang tidak cocok dengan versi aktif dalam riwayat manager.")
+    active_index = next((i for i, item in enumerate(installs)
+                         if item.get("version") == active), None)
+    if active_index is None or active_index == 0:
         raise ManagerError("Belum ada versi sebelumnya yang tersimpan untuk rollback.")
+    previous = installs[active_index - 1]
     package_file = Path(previous.get("file", ""))
     if not package_file.is_file() or sha256(package_file) != previous.get("sha256"):
         raise ManagerError("Paket versi sebelumnya hilang atau checksum tidak cocok.")
@@ -165,6 +176,8 @@ def rollback() -> None:
     if version != previous["version"]:
         raise ManagerError("Versi paket tersimpan tidak sesuai riwayat.")
     run(["dpkg", "-i", str(package_file)])
+    history["active_version"] = version
+    save_history(history)
     print(f"Rollback berhasil: {current} -> {version}.")
 
 def main() -> int:

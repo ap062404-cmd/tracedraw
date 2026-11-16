@@ -74,7 +74,7 @@ def validate_deb(deb: Path) -> tuple[str, str]:
     return version, sha256(deb)
 
 def installed_version() -> str | None:
-    result = run(["dpkg-query", "-W", "-f=\${Status}|\${Version}", PACKAGE], check=False)
+    result = run(["dpkg-query", "-W", "-f=$"+"{Status}|$"+"{Version}", PACKAGE], check=False)
     if result.returncode:
         return None
     status, _, version = result.stdout.strip().partition("|")

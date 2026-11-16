@@ -139,18 +139,22 @@ def install(deb: Path) -> None:
     stored = VERSIONS_DIR / f"{PACKAGE}_{version}_{ARCH}.deb"
     if stored.exists() and sha256(stored) != digest:
         raise ManagerError("Versi sama sudah tersimpan dengan checksum berbeda.")
-    if not stored.exists():
-        shutil.copy2(deb, stored)
-    run(["dpkg", "-i", str(stored)])
     existing = next((item for item in history["installs"]
                      if item.get("version") == version), None)
     if existing and (existing.get("sha256") != digest or existing.get("file") != str(stored)):
         raise ManagerError("Metadata versi tersimpan tidak cocok dengan paket ini.")
-    if not existing:
-        history["installs"].append({
-            "version": version, "sha256": digest, "file": str(stored),
-            "installed_at": datetime.now(timezone.utc).isoformat(),
-        })
+    if not stored.exists():
+        shutil.copy2(deb, stored)
+    run(["dpkg", "-i", str(stored)])
+    # Keep the list in installation order. Reinstalling an older saved version
+    # moves it to the end so rollback always selects the immediately prior version.
+    history["installs"] = [
+        item for item in history["installs"] if item.get("version") != version
+    ]
+    history["installs"].append({
+        "version": version, "sha256": digest, "file": str(stored),
+        "installed_at": datetime.now(timezone.utc).isoformat(),
+    })
     history["active_version"] = version
     save_history(history)
     print(f"Berhasil memasang TraceDraw Imposition {version}.")

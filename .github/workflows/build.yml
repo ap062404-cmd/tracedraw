@@ -322,6 +322,12 @@ jobs:
         run: |
           bash packaging/linux/build-imposition-deb.sh "${{ steps.ver.outputs.version }}" "target/${{ matrix.target }}/release" dist
 
+      - name: Check Imposition Patch Manager
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          python3 -m py_compile tools/imposition-patch-manager/manager.py
+          python3 tools/imposition-patch-manager/manager.py --help >/dev/null
+
       - uses: actions/upload-artifact@v4
         with:
           name: tracedraw-${{ matrix.name }}

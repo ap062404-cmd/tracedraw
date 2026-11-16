@@ -98,6 +98,7 @@ def save_history(data: dict) -> None:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             json.dump(data, stream, indent=2)
             stream.write("\n")
+        os.chmod(temp_name, 0o644)
         os.replace(temp_name, MANIFEST)
     finally:
         if os.path.exists(temp_name):
